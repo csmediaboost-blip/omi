@@ -25,7 +25,7 @@ export default function Sidebar() {
         </li>
 
         <li>
-          <Link href="/academy">Academy</Link>
+          <Link href="/company-disclosure">company-disclosure</Link>
         </li>
 
         <li>

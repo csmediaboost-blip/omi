@@ -47,14 +47,22 @@ const MORE_SECTIONS = [
     items: [
       { label: "Tax Report", href: "/dashboard/tax", icon: Receipt },
       { label: "License", href: "/dashboard/license", icon: FileText },
-      { label: "Company Disclosure", href: "/dashboard/company-disclosure", icon: Building2 },
+      {
+        label: "Company Disclosure",
+        href: "/dashboard/company-disclosure",
+        icon: Building2,
+      },
     ],
   },
   {
     title: "Account",
     items: [
       { label: "Network", href: "/dashboard/network", icon: Users },
-      { label: "Academy", href: "/dashboard/academy", icon: BookOpen },
+      {
+        label: "company-disclosure",
+        href: "/dashboard/company-disclosure",
+        icon: BookOpen,
+      },
       { label: "Settings", href: "/dashboard/settings", icon: Settings },
     ],
   },

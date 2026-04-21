@@ -23,7 +23,11 @@ const NAV_ITEMS = [
   { label: "Tasks", href: "/dashboard/tasks", icon: Zap },
   { label: "Financials", href: "/dashboard/financials", icon: DollarSign },
   { label: "Network", href: "/dashboard/network", icon: Users },
-  { label: "Academy", href: "/dashboard/academy", icon: BookOpen },
+  {
+    label: "company-disclosure",
+    href: "/dashboard/company-disclosure",
+    icon: BookOpen,
+  },
   { label: "Verification", href: "/dashboard/verification", icon: Shield },
   { label: "Settings", href: "/dashboard/settings", icon: Settings },
 ];

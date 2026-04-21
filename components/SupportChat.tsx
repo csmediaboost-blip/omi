@@ -74,11 +74,31 @@ export default function SupportChat() {
   const [unreadCount, setUnreadCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // FEATURE: Make chat draggable on mobile
+  // ─── DRAGGABLE POSITION ────────────────────────────────────────
+  // Desktop default: bottom-right corner { bottom: 20, right: 20 }
+  // Mobile default: CENTERED horizontally above the bottom nav so it
+  //                 never overlaps the "More" icon on either side.
+  //                 We set this in useEffect (client-only, SSR-safe).
   const [position, setPosition] = useState({ bottom: 20, right: 20 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const chatButtonRef = useRef<HTMLDivElement>(null);
+
+  // One-time mobile centering on mount
+  useEffect(() => {
+    if (window.innerWidth < 768) {
+      // button is w-14 = 56px wide
+      // (screenWidth - 56) / 2  →  centers it horizontally
+      // bottom: 84  →  64px nav + 20px gap, safely above all nav icons
+      const centeredRight = Math.round((window.innerWidth - 56) / 2);
+      setPosition({ bottom: 84, right: centeredRight });
+    }
+    // Desktop keeps the default { bottom: 20, right: 20 }
+  }, []);
+
+  // ─── Track drag distance so we can tell a tap from a drag ─────
+  const dragStartPos = useRef({ x: 0, y: 0 });
+  const didDrag = useRef(false);
 
   const scrollBottom = useCallback(() => {
     setTimeout(
@@ -369,11 +389,22 @@ export default function SupportChat() {
     }
   }
 
+  // ─── DRAG HANDLERS ─────────────────────────────────────────────
+  // Records start position so handleDragEnd can tell tap from drag.
+  // A movement < 6px is treated as a tap → toggles open.
+  // A movement >= 6px is a drag → repositions the button, no toggle.
   const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
+    // Don't intercept clicks on buttons/inputs inside the chat window
+    if ((e.target as HTMLElement).closest("button, textarea, input, a")) return;
+
     setIsDragging(true);
+    didDrag.current = false;
+
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-    
+
+    dragStartPos.current = { x: clientX, y: clientY };
+
     if (chatButtonRef.current) {
       const rect = chatButtonRef.current.getBoundingClientRect();
       setDragOffset({
@@ -388,6 +419,13 @@ export default function SupportChat() {
     const clientX = e instanceof TouchEvent ? e.touches[0].clientX : e.clientX;
     const clientY = e instanceof TouchEvent ? e.touches[0].clientY : e.clientY;
 
+    // Mark as a real drag once the pointer moves more than 6px
+    const dx = clientX - dragStartPos.current.x;
+    const dy = clientY - dragStartPos.current.y;
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+      didDrag.current = true;
+    }
+
     const newRight = window.innerWidth - clientX + dragOffset.x;
     const newBottom = window.innerHeight - clientY + dragOffset.y;
 
@@ -399,6 +437,11 @@ export default function SupportChat() {
 
   const handleDragEnd = () => {
     setIsDragging(false);
+    // Only toggle open/close when it was a tap (not a drag)
+    if (!didDrag.current) {
+      setOpen((v) => !v);
+    }
+    didDrag.current = false;
   };
 
   useEffect(() => {
@@ -426,7 +469,7 @@ export default function SupportChat() {
       <div
         ref={chatButtonRef}
         className="fixed z-50 flex flex-col items-end gap-2"
-        style={{ 
+        style={{
           bottom: `${position.bottom}px`,
           right: `${position.right}px`,
           pointerEvents: "auto",
@@ -436,435 +479,455 @@ export default function SupportChat() {
       >
         {/* Chat Container - Draggable */}
         {open && (
-        <div
-          className="flex flex-col rounded-2xl shadow-2xl overflow-hidden cursor-grab active:cursor-grabbing"
-          style={{
-            width: "min(380px,calc(100vw - 32px))",
-            height: "min(560px,calc(100vh - 110px))",
-            background: "#0d1117",
-            border: "1px solid rgba(255,255,255,0.1)",
-            boxShadow: "0 25px 60px rgba(0,0,0,0.7)",
-            pointerEvents: "auto",
-          }}
-          onMouseDown={handleDragStart}
-          onTouchStart={handleDragStart}
-        >
-          {/* Header */}
           <div
-            className="flex items-center justify-between px-4 py-3.5 shrink-0"
+            className="flex flex-col rounded-2xl shadow-2xl overflow-hidden cursor-grab active:cursor-grabbing"
             style={{
-              background: "linear-gradient(135deg,#059669,#047857)",
-              borderBottom: "1px solid rgba(255,255,255,0.08)",
+              width: "min(380px,calc(100vw - 32px))",
+              height: "min(560px,calc(100vh - 110px))",
+              background: "#0d1117",
+              border: "1px solid rgba(255,255,255,0.1)",
+              boxShadow: "0 25px 60px rgba(0,0,0,0.7)",
+              pointerEvents: "auto",
             }}
+            onMouseDown={handleDragStart}
+            onTouchStart={handleDragStart}
           >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center">
-                <Headphones size={15} className="text-white" />
-              </div>
-              <div>
-                <p className="text-white font-black text-sm">
-                  OmniTask Support
-                </p>
-                <div className="flex items-center gap-1">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse" />
-                  <p className="text-emerald-200 text-[10px]">
-                    Online · Replies in ~2 hours
-                  </p>
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="text-white/70 hover:text-white p-1"
-              style={{ ...tapStyle, touchAction: "manipulation", minHeight: "32px", minWidth: "32px" }}
+            {/* Header */}
+            <div
+              className="flex items-center justify-between px-4 py-3.5 shrink-0"
+              style={{
+                background: "linear-gradient(135deg,#059669,#047857)",
+                borderBottom: "1px solid rgba(255,255,255,0.08)",
+              }}
             >
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-hidden flex flex-col">
-            {/* start */}
-            {stage === "start" && (
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                <div className="text-center pt-2">
-                  <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-3">
-                    <MessageSquare size={24} className="text-emerald-400" />
-                  </div>
-                  <p className="text-white font-black text-base">
-                    How can we help?
-                  </p>
-                  <p className="text-slate-400 text-xs mt-1">
-                    Start a conversation with our support team
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  {QUICK_TOPICS.map((t) => (
-                    <button
-                      key={t}
-                      type="button"
-                      onClick={() => {
-                        setFormTopic(t);
-                        setStage("form");
-                      }}
-                      className="w-full text-left px-4 py-3 rounded-xl text-sm text-slate-300 hover:text-white transition-all flex items-center justify-between gap-2"
-                      style={{
-                        background: "rgba(30,41,59,0.6)",
-                        border: "1px solid rgba(255,255,255,0.07)",
-                        ...tapStyle,
-                        touchAction: "manipulation",
-                      }}
-                    >
-                      {t}
-                      <ChevronDown
-                        size={12}
-                        className="text-slate-500 -rotate-90 shrink-0"
-                      />
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* form */}
-            {stage === "form" && (
-              <div className="flex-1 overflow-y-auto p-4 space-y-3">
-                <button
-                  type="button"
-                  onClick={() => setStage("start")}
-                  className="text-slate-500 hover:text-slate-300 text-xs"
-                  style={{ ...tapStyle, touchAction: "manipulation" }}
-                >
-                  ← Back
-                </button>
-                <div
-                  className="rounded-xl px-3 py-2"
-                  style={{
-                    background: "rgba(16,185,129,0.08)",
-                    border: "1px solid rgba(16,185,129,0.15)",
-                  }}
-                >
-                  <p className="text-emerald-400 text-xs font-bold">
-                    {formTopic}
-                  </p>
-                </div>
-                {!userId && (
-                  <>
-                    <div>
-                      <label className="text-slate-400 text-xs font-bold mb-1.5 block">
-                        Your Name
-                      </label>
-                      <input
-                        value={formName}
-                        onChange={(e) => setFormName(e.target.value)}
-                        placeholder="John Doe"
-                        className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-slate-400 text-xs font-bold mb-1.5 block">
-                        Email Address
-                      </label>
-                      <input
-                        type="email"
-                        value={formEmail}
-                        onChange={(e) => setFormEmail(e.target.value)}
-                        placeholder="you@email.com"
-                        className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
-                      />
-                    </div>
-                  </>
-                )}
-                <div>
-                  <label className="text-slate-400 text-xs font-bold mb-1.5 block">
-                    Describe your issue
-                  </label>
-                  <textarea
-                    value={formMessage}
-                    onChange={(e) => setFormMessage(e.target.value)}
-                    placeholder="Please describe what's happening in detail..."
-                    rows={4}
-                    className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 resize-none"
-                  />
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center">
+                  <Headphones size={15} className="text-white" />
                 </div>
                 <div>
-                  <label className="text-slate-400 text-xs font-bold mb-1.5 block flex items-center gap-1">
-                    <ImageIcon size={10} /> Attach Screenshot (optional)
-                  </label>
-                  {imagePreview ? (
-                    <div
-                      className="relative rounded-xl overflow-hidden"
-                      style={{ border: "1px solid rgba(255,255,255,0.1)" }}
-                    >
-                      <img
-                        src={imagePreview}
-                        alt="Preview"
-                        className="w-full max-h-32 object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={removeImage}
-                        className="absolute top-2 right-2 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center"
-                        style={{ touchAction: "manipulation", WebkitTapHighlightColor: "transparent" }}
-                      >
-                        <X size={10} className="text-white" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full py-3 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-300 flex items-center justify-center gap-2 border-dashed"
-                      style={{
-                        background: "rgba(30,41,59,0.4)",
-                        border: "1px dashed rgba(255,255,255,0.1)",
-                        ...tapStyle,
-                        touchAction: "manipulation",
-                      }}
-                    >
-                      <Paperclip size={12} /> Click to attach image or
-                      screenshot
-                    </button>
-                  )}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={handleImageSelect}
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={handleStartChat}
-                  disabled={loading || !formMessage.trim()}
-                  className="w-full py-3 rounded-xl font-black text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
-                  style={{
-                    background: "linear-gradient(135deg,#059669,#10b981)",
-                    ...tapStyle,
-                    touchAction: "manipulation",
-                    minHeight: "44px",
-                    pointerEvents: "auto",
-                  }}
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" /> Starting
-                      chat...
-                    </>
-                  ) : (
-                    <>
-                      <Send size={14} /> Start Chat
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
-
-            {/* chat */}
-            {stage === "chat" && (
-              <>
-                <div className="flex-1 overflow-y-auto p-3 space-y-3">
-                  {loading ? (
-                    <div className="flex justify-center pt-8">
-                      <Loader2
-                        size={20}
-                        className="text-emerald-400 animate-spin"
-                      />
-                    </div>
-                  ) : messages.length === 0 ? (
-                    <div className="text-center pt-6 text-slate-500 text-sm">
-                      No messages yet
-                    </div>
-                  ) : (
-                    messages.map((msg) => {
-                      const txt = getText(msg);
-                      if (!txt && !msg.image_url) return null;
-                      return (
-                        <div
-                          key={msg.id}
-                          className={`flex ${msg.is_admin ? "justify-start" : "justify-end"}`}
-                        >
-                          {msg.is_admin && (
-                            <div className="w-6 h-6 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0 mr-2 mt-1">
-                              <Headphones
-                                size={10}
-                                className="text-emerald-400"
-                              />
-                            </div>
-                          )}
-                          <div className="max-w-[80%] space-y-1">
-                            {txt && (
-                              <div
-                                className={`px-3 py-2.5 rounded-2xl text-sm leading-relaxed ${msg.is_admin ? "rounded-tl-sm" : "rounded-tr-sm"}`}
-                                style={
-                                  msg.is_admin
-                                    ? {
-                                        background: "rgba(30,41,59,0.9)",
-                                        border:
-                                          "1px solid rgba(255,255,255,0.07)",
-                                        color: "#e2e8f0",
-                                      }
-                                    : {
-                                        background:
-                                          "linear-gradient(135deg,#059669,#047857)",
-                                        color: "white",
-                                      }
-                                }
-                              >
-                                {txt}
-                              </div>
-                            )}
-                            {msg.image_url && (
-                              <a
-                                href={msg.image_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="block rounded-xl overflow-hidden"
-                                style={{
-                                  border: "1px solid rgba(255,255,255,0.1)",
-                                }}
-                              >
-                                <img
-                                  src={msg.image_url}
-                                  alt={msg.image_name || "Attachment"}
-                                  className="max-h-48 w-full object-cover"
-                                />
-                              </a>
-                            )}
-                            <div
-                              className={`flex items-center gap-1 text-[10px] text-slate-600 ${msg.is_admin ? "justify-start" : "justify-end"}`}
-                            >
-                              <span>
-                                {new Date(msg.created_at).toLocaleTimeString(
-                                  "en",
-                                  { hour: "2-digit", minute: "2-digit" },
-                                )}
-                              </span>
-                              {!msg.is_admin &&
-                                (msg.seen ? (
-                                  <CheckCheck
-                                    size={10}
-                                    className="text-emerald-400"
-                                  />
-                                ) : (
-                                  <Check size={10} />
-                                ))}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                  <div ref={messagesEndRef} />
-                </div>
-
-                {imagePreview && (
-                  <div className="px-3 py-2 border-t border-slate-800/50 flex items-center gap-2">
-                    <img
-                      src={imagePreview}
-                      alt="Preview"
-                      className="w-10 h-10 rounded-lg object-cover"
-                    />
-                    <p className="text-white text-xs font-bold truncate flex-1">
-                      {imageFile?.name}
+                  <p className="text-white font-black text-sm">
+                    OmniTask Support
+                  </p>
+                  <div className="flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-pulse" />
+                    <p className="text-emerald-200 text-[10px]">
+                      Online · Replies in ~2 hours
                     </p>
-                    <button
-                      type="button"
-                      onClick={removeImage}
-                      className="text-slate-500 hover:text-red-400"
-                      style={{ touchAction: "manipulation", WebkitTapHighlightColor: "transparent" }}
-                    >
-                      <X size={14} />
-                    </button>
                   </div>
-                )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="text-white/70 hover:text-white p-1"
+                style={{
+                  ...tapStyle,
+                  touchAction: "manipulation",
+                  minHeight: "32px",
+                  minWidth: "32px",
+                }}
+              >
+                <X size={16} />
+              </button>
+            </div>
 
-                <div className="px-3 pb-3 pt-2 border-t border-slate-800/50 shrink-0">
-                  {ticket?.status === "resolved" ||
-                  ticket?.status === "closed" ? (
-                    <div className="text-center py-2">
-                      <p className="text-slate-500 text-xs">
-                        This ticket is {ticket.status}.
-                      </p>
+            <div className="flex-1 overflow-hidden flex flex-col">
+              {/* start */}
+              {stage === "start" && (
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  <div className="text-center pt-2">
+                    <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mx-auto mb-3">
+                      <MessageSquare size={24} className="text-emerald-400" />
+                    </div>
+                    <p className="text-white font-black text-base">
+                      How can we help?
+                    </p>
+                    <p className="text-slate-400 text-xs mt-1">
+                      Start a conversation with our support team
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {QUICK_TOPICS.map((t) => (
                       <button
+                        key={t}
                         type="button"
                         onClick={() => {
-                          setTicket(null);
-                          setStage("start");
-                          setMessages([]);
-                          try {
-                            localStorage.removeItem(GUEST_KEY);
-                          } catch {
-                            /* ignore */
-                          }
+                          setFormTopic(t);
+                          setStage("form");
                         }}
-                        className="text-emerald-400 text-xs hover:underline mt-1"
-                        style={{ touchAction: "manipulation", WebkitTapHighlightColor: "transparent" }}
+                        className="w-full text-left px-4 py-3 rounded-xl text-sm text-slate-300 hover:text-white transition-all flex items-center justify-between gap-2"
+                        style={{
+                          background: "rgba(30,41,59,0.6)",
+                          border: "1px solid rgba(255,255,255,0.07)",
+                          ...tapStyle,
+                          touchAction: "manipulation",
+                        }}
                       >
-                        Open new ticket
+                        {t}
+                        <ChevronDown
+                          size={12}
+                          className="text-slate-500 -rotate-90 shrink-0"
+                        />
                       </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-end gap-2">
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* form */}
+              {stage === "form" && (
+                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                  <button
+                    type="button"
+                    onClick={() => setStage("start")}
+                    className="text-slate-500 hover:text-slate-300 text-xs"
+                    style={{ ...tapStyle, touchAction: "manipulation" }}
+                  >
+                    ← Back
+                  </button>
+                  <div
+                    className="rounded-xl px-3 py-2"
+                    style={{
+                      background: "rgba(16,185,129,0.08)",
+                      border: "1px solid rgba(16,185,129,0.15)",
+                    }}
+                  >
+                    <p className="text-emerald-400 text-xs font-bold">
+                      {formTopic}
+                    </p>
+                  </div>
+                  {!userId && (
+                    <>
+                      <div>
+                        <label className="text-slate-400 text-xs font-bold mb-1.5 block">
+                          Your Name
+                        </label>
+                        <input
+                          value={formName}
+                          onChange={(e) => setFormName(e.target.value)}
+                          placeholder="John Doe"
+                          className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-slate-400 text-xs font-bold mb-1.5 block">
+                          Email Address
+                        </label>
+                        <input
+                          type="email"
+                          value={formEmail}
+                          onChange={(e) => setFormEmail(e.target.value)}
+                          placeholder="you@email.com"
+                          className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50"
+                        />
+                      </div>
+                    </>
+                  )}
+                  <div>
+                    <label className="text-slate-400 text-xs font-bold mb-1.5 block">
+                      Describe your issue
+                    </label>
+                    <textarea
+                      value={formMessage}
+                      onChange={(e) => setFormMessage(e.target.value)}
+                      placeholder="Please describe what's happening in detail..."
+                      rows={4}
+                      className="w-full bg-slate-800/60 border border-slate-700/50 rounded-xl px-3 py-2.5 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 resize-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-400 text-xs font-bold mb-1.5 block flex items-center gap-1">
+                      <ImageIcon size={10} /> Attach Screenshot (optional)
+                    </label>
+                    {imagePreview ? (
+                      <div
+                        className="relative rounded-xl overflow-hidden"
+                        style={{ border: "1px solid rgba(255,255,255,0.1)" }}
+                      >
+                        <img
+                          src={imagePreview}
+                          alt="Preview"
+                          className="w-full max-h-32 object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={removeImage}
+                          className="absolute top-2 right-2 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center"
+                          style={{
+                            touchAction: "manipulation",
+                            WebkitTapHighlightColor: "transparent",
+                          }}
+                        >
+                          <X size={10} className="text-white" />
+                        </button>
+                      </div>
+                    ) : (
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="p-2 rounded-xl text-slate-500 hover:text-emerald-400 hover:bg-slate-800/60 shrink-0"
-                        style={{ ...tapStyle, touchAction: "manipulation", minHeight: "44px", minWidth: "44px" }}
-                      >
-                        {uploading ? (
-                          <Loader2 size={16} className="animate-spin" />
-                        ) : (
-                          <Paperclip size={16} />
-                        )}
-                      </button>
-                      <textarea
-                        value={text}
-                        onChange={(e) => setText(e.target.value)}
-                        onKeyDown={handleKeyDown}
-                        placeholder="Type a message..."
-                        rows={1}
-                        className="flex-1 bg-slate-800/60 border border-slate-700/40 rounded-xl px-3 py-2 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 resize-none"
-                        style={{ maxHeight: "80px" }}
-                      />
-                      <button
-                        type="button"
-                        onClick={sendMessage}
-                        disabled={sending || (!text.trim() && !imageFile)}
-                        className="p-2.5 rounded-xl disabled:opacity-40 shrink-0"
+                        className="w-full py-3 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-300 flex items-center justify-center gap-2 border-dashed"
                         style={{
-                          background: "linear-gradient(135deg,#059669,#10b981)",
+                          background: "rgba(30,41,59,0.4)",
+                          border: "1px dashed rgba(255,255,255,0.1)",
                           ...tapStyle,
                           touchAction: "manipulation",
-                          minHeight: "44px",
-                          minWidth: "44px",
-                          pointerEvents: "auto",
                         }}
                       >
-                        {sending ? (
-                          <Loader2
-                            size={15}
-                            className="text-white animate-spin"
-                          />
-                        ) : (
-                          <Send size={15} className="text-white" />
-                        )}
+                        <Paperclip size={12} /> Click to attach image or
+                        screenshot
                       </button>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={handleImageSelect}
+                    )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleImageSelect}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleStartChat}
+                    disabled={loading || !formMessage.trim()}
+                    className="w-full py-3 rounded-xl font-black text-sm text-white flex items-center justify-center gap-2 disabled:opacity-40"
+                    style={{
+                      background: "linear-gradient(135deg,#059669,#10b981)",
+                      ...tapStyle,
+                      touchAction: "manipulation",
+                      minHeight: "44px",
+                      pointerEvents: "auto",
+                    }}
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" /> Starting
+                        chat...
+                      </>
+                    ) : (
+                      <>
+                        <Send size={14} /> Start Chat
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+
+              {/* chat */}
+              {stage === "chat" && (
+                <>
+                  <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                    {loading ? (
+                      <div className="flex justify-center pt-8">
+                        <Loader2
+                          size={20}
+                          className="text-emerald-400 animate-spin"
+                        />
+                      </div>
+                    ) : messages.length === 0 ? (
+                      <div className="text-center pt-6 text-slate-500 text-sm">
+                        No messages yet
+                      </div>
+                    ) : (
+                      messages.map((msg) => {
+                        const txt = getText(msg);
+                        if (!txt && !msg.image_url) return null;
+                        return (
+                          <div
+                            key={msg.id}
+                            className={`flex ${msg.is_admin ? "justify-start" : "justify-end"}`}
+                          >
+                            {msg.is_admin && (
+                              <div className="w-6 h-6 rounded-full bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center shrink-0 mr-2 mt-1">
+                                <Headphones
+                                  size={10}
+                                  className="text-emerald-400"
+                                />
+                              </div>
+                            )}
+                            <div className="max-w-[80%] space-y-1">
+                              {txt && (
+                                <div
+                                  className={`px-3 py-2.5 rounded-2xl text-sm leading-relaxed ${msg.is_admin ? "rounded-tl-sm" : "rounded-tr-sm"}`}
+                                  style={
+                                    msg.is_admin
+                                      ? {
+                                          background: "rgba(30,41,59,0.9)",
+                                          border:
+                                            "1px solid rgba(255,255,255,0.07)",
+                                          color: "#e2e8f0",
+                                        }
+                                      : {
+                                          background:
+                                            "linear-gradient(135deg,#059669,#047857)",
+                                          color: "white",
+                                        }
+                                  }
+                                >
+                                  {txt}
+                                </div>
+                              )}
+                              {msg.image_url && (
+                                <a
+                                  href={msg.image_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="block rounded-xl overflow-hidden"
+                                  style={{
+                                    border: "1px solid rgba(255,255,255,0.1)",
+                                  }}
+                                >
+                                  <img
+                                    src={msg.image_url}
+                                    alt={msg.image_name || "Attachment"}
+                                    className="max-h-48 w-full object-cover"
+                                  />
+                                </a>
+                              )}
+                              <div
+                                className={`flex items-center gap-1 text-[10px] text-slate-600 ${msg.is_admin ? "justify-start" : "justify-end"}`}
+                              >
+                                <span>
+                                  {new Date(msg.created_at).toLocaleTimeString(
+                                    "en",
+                                    { hour: "2-digit", minute: "2-digit" },
+                                  )}
+                                </span>
+                                {!msg.is_admin &&
+                                  (msg.seen ? (
+                                    <CheckCheck
+                                      size={10}
+                                      className="text-emerald-400"
+                                    />
+                                  ) : (
+                                    <Check size={10} />
+                                  ))}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                    <div ref={messagesEndRef} />
+                  </div>
+
+                  {imagePreview && (
+                    <div className="px-3 py-2 border-t border-slate-800/50 flex items-center gap-2">
+                      <img
+                        src={imagePreview}
+                        alt="Preview"
+                        className="w-10 h-10 rounded-lg object-cover"
                       />
+                      <p className="text-white text-xs font-bold truncate flex-1">
+                        {imageFile?.name}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={removeImage}
+                        className="text-slate-500 hover:text-red-400"
+                        style={{
+                          touchAction: "manipulation",
+                          WebkitTapHighlightColor: "transparent",
+                        }}
+                      >
+                        <X size={14} />
+                      </button>
                     </div>
                   )}
-                </div>
-              </>
-            )}
+
+                  <div className="px-3 pb-3 pt-2 border-t border-slate-800/50 shrink-0">
+                    {ticket?.status === "resolved" ||
+                    ticket?.status === "closed" ? (
+                      <div className="text-center py-2">
+                        <p className="text-slate-500 text-xs">
+                          This ticket is {ticket.status}.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTicket(null);
+                            setStage("start");
+                            setMessages([]);
+                            try {
+                              localStorage.removeItem(GUEST_KEY);
+                            } catch {
+                              /* ignore */
+                            }
+                          }}
+                          className="text-emerald-400 text-xs hover:underline mt-1"
+                          style={{
+                            touchAction: "manipulation",
+                            WebkitTapHighlightColor: "transparent",
+                          }}
+                        >
+                          Open new ticket
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="p-2 rounded-xl text-slate-500 hover:text-emerald-400 hover:bg-slate-800/60 shrink-0"
+                          style={{
+                            ...tapStyle,
+                            touchAction: "manipulation",
+                            minHeight: "44px",
+                            minWidth: "44px",
+                          }}
+                        >
+                          {uploading ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <Paperclip size={16} />
+                          )}
+                        </button>
+                        <textarea
+                          value={text}
+                          onChange={(e) => setText(e.target.value)}
+                          onKeyDown={handleKeyDown}
+                          placeholder="Type a message..."
+                          rows={1}
+                          className="flex-1 bg-slate-800/60 border border-slate-700/40 rounded-xl px-3 py-2 text-white text-sm placeholder-slate-600 focus:outline-none focus:border-emerald-500/50 resize-none"
+                          style={{ maxHeight: "80px" }}
+                        />
+                        <button
+                          type="button"
+                          onClick={sendMessage}
+                          disabled={sending || (!text.trim() && !imageFile)}
+                          className="p-2.5 rounded-xl disabled:opacity-40 shrink-0"
+                          style={{
+                            background:
+                              "linear-gradient(135deg,#059669,#10b981)",
+                            ...tapStyle,
+                            touchAction: "manipulation",
+                            minHeight: "44px",
+                            minWidth: "44px",
+                            pointerEvents: "auto",
+                          }}
+                        >
+                          {sending ? (
+                            <Loader2
+                              size={15}
+                              className="text-white animate-spin"
+                            />
+                          ) : (
+                            <Send size={15} className="text-white" />
+                          )}
+                        </button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={handleImageSelect}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-        </div>
         )}
 
         {/* Chat Button - Always visible, draggable */}
@@ -874,9 +937,8 @@ export default function SupportChat() {
           </div>
         )}
         <button
-          onClick={() => setOpen((v) => !v)}
-          className="relative w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-95 cursor-grab active:cursor-grabbing"
           type="button"
+          className="relative w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-95 cursor-grab active:cursor-grabbing"
           style={{
             background: open
               ? "#1e293b"
@@ -887,14 +949,8 @@ export default function SupportChat() {
             userSelect: "none",
             pointerEvents: "auto",
           }}
-          onMouseDown={(e) => {
-            // Allow drag when holding mouse button
-            handleDragStart(e);
-          }}
-          onTouchStart={(e) => {
-            // Allow drag on touch
-            handleDragStart(e);
-          }}
+          onMouseDown={(e) => handleDragStart(e)}
+          onTouchStart={(e) => handleDragStart(e)}
         >
           {open ? (
             <X size={22} className="text-white" />

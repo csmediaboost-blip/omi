@@ -102,7 +102,7 @@ const FALLBACK_MODULES: Module[] = [
   },
 ];
 
-export default function AcademyPage() {
+export default function company-disclosurePage() {
   const [modules, setModules] = useState<Module[]>([]);
   const [completions, setCompletions] = useState<Completion[]>([]);
   const [userTier, setUserTier] = useState("observer");
