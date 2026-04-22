@@ -136,7 +136,7 @@ export default function company-disclosurePage() {
         .single();
       setUserTier(profile?.tier || "observer");
       const { data: moduleData } = await supabase
-        .from("academy_modules")
+        .from("company-disclosure")
         .select("*")
         .order("order", { ascending: true });
       setModules(
@@ -144,13 +144,13 @@ export default function company-disclosurePage() {
       );
       if (user.id) {
         const { data: completionData } = await supabase
-          .from("academy_completions")
+          .from("company-disclosure_completions")
           .select("module_id, completed_at")
           .eq("user_id", user.id);
         setCompletions(completionData || []);
       }
     } catch (err) {
-      console.error("[Academy] load error:", err);
+      console.error("[company-disclosure] load error:", err);
       setModules(FALLBACK_MODULES);
     } finally {
       setLoading(false);
@@ -169,7 +169,7 @@ export default function company-disclosurePage() {
     if (!userId) return;
     setMarking(true);
     try {
-      await supabase.from("academy_completions").upsert({
+      await supabase.from("company-disclosure_completions").upsert({
         user_id: userId,
         module_id: moduleId,
         completed_at: new Date().toISOString(),
@@ -179,7 +179,7 @@ export default function company-disclosurePage() {
         { module_id: moduleId, completed_at: new Date().toISOString() },
       ]);
     } catch (err) {
-      console.error("[Academy] mark complete error:", err);
+      console.error("[company-disclosure] mark complete error:", err);
     } finally {
       setMarking(false);
     }
@@ -206,7 +206,7 @@ export default function company-disclosurePage() {
           <div className="flex items-start justify-between gap-8">
             <div className="flex-1">
               <h1 className="text-5xl font-black text-white mb-3">
-                OmniTask Academy
+                OmniTask company-disclosure
               </h1>
               <p className="text-slate-400 text-lg max-w-2xl leading-relaxed">
                 Master GPU rental economics, advanced task optimization, and
