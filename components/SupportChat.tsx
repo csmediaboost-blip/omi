@@ -36,7 +36,6 @@ type Ticket = {
   created_at: string;
 };
 
-// Works with both old (body) and new (message) column
 function getText(msg: Message): string {
   return msg.message || msg.body || "";
 }
@@ -74,29 +73,32 @@ export default function SupportChat() {
   const [unreadCount, setUnreadCount] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ─── DRAGGABLE POSITION ────────────────────────────────────────
-  // Desktop default: bottom-right corner { bottom: 20, right: 20 }
-  // Mobile default: CENTERED horizontally above the bottom nav so it
-  //                 never overlaps the "More" icon on either side.
-  //                 We set this in useEffect (client-only, SSR-safe).
-  const [position, setPosition] = useState({ bottom: 20, right: 20 });
+  // ─── POSITION ──────────────────────────────────────────────────
+  // We don't set position until after mount so we can read window.innerWidth.
+  // Until then, render nothing (avoids SSR mismatch AND the flash to right: 20).
+  const [position, setPosition] = useState<{
+    bottom: number;
+    right: number;
+  } | null>(null);
+
+  useEffect(() => {
+    // Mobile (< 768px): center horizontally, sit above the ~64px bottom nav
+    // Desktop: bottom-right corner
+    if (window.innerWidth < 768) {
+      // button w-14 = 56px. (screenWidth - 56) / 2 = centered right offset
+      const centeredRight = Math.round((window.innerWidth - 56) / 2);
+      setPosition({ bottom: 84, right: centeredRight });
+    } else {
+      setPosition({ bottom: 20, right: 20 });
+    }
+  }, []);
+
+  // ─── DRAG STATE ────────────────────────────────────────────────
   const [isDragging, setIsDragging] = useState(false);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const chatButtonRef = useRef<HTMLDivElement>(null);
 
-  // One-time mobile centering on mount
-  useEffect(() => {
-    if (window.innerWidth < 768) {
-      // button is w-14 = 56px wide
-      // (screenWidth - 56) / 2  →  centers it horizontally
-      // bottom: 84  →  64px nav + 20px gap, safely above all nav icons
-      const centeredRight = Math.round((window.innerWidth - 56) / 2);
-      setPosition({ bottom: 84, right: centeredRight });
-    }
-    // Desktop keeps the default { bottom: 20, right: 20 }
-  }, []);
-
-  // ─── Track drag distance so we can tell a tap from a drag ─────
+  // Track drag distance to distinguish tap (<6px) from drag (≥6px)
   const dragStartPos = useRef({ x: 0, y: 0 });
   const didDrag = useRef(false);
 
@@ -262,7 +264,7 @@ export default function SupportChat() {
         sender_id: senderId,
         is_admin: isAdmin,
         message: msgText,
-        body: msgText, // write to BOTH columns
+        body: msgText,
         image_url: imgUrl ?? null,
         image_name: imgName ?? null,
         seen: false,
@@ -329,7 +331,6 @@ export default function SupportChat() {
       imgName,
     );
 
-    // Send auto-reply without delay
     const reply = `Hi ${name}! 👋 Thanks for reaching out about "${formTopic}". Our support team will respond within 2 hours (09:00–18:00 UTC). Ticket ID: #${newTicket.id.slice(0, 8).toUpperCase()}.`;
     await insertMessage(newTicket.id, reply, true, null);
 
@@ -390,27 +391,16 @@ export default function SupportChat() {
   }
 
   // ─── DRAG HANDLERS ─────────────────────────────────────────────
-  // Records start position so handleDragEnd can tell tap from drag.
-  // A movement < 6px is treated as a tap → toggles open.
-  // A movement >= 6px is a drag → repositions the button, no toggle.
   const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
-    // Don't intercept clicks on buttons/inputs inside the chat window
     if ((e.target as HTMLElement).closest("button, textarea, input, a")) return;
-
     setIsDragging(true);
     didDrag.current = false;
-
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;
-
     dragStartPos.current = { x: clientX, y: clientY };
-
     if (chatButtonRef.current) {
       const rect = chatButtonRef.current.getBoundingClientRect();
-      setDragOffset({
-        x: clientX - rect.left,
-        y: clientY - rect.top,
-      });
+      setDragOffset({ x: clientX - rect.left, y: clientY - rect.top });
     }
   };
 
@@ -418,17 +408,11 @@ export default function SupportChat() {
     if (!isDragging) return;
     const clientX = e instanceof TouchEvent ? e.touches[0].clientX : e.clientX;
     const clientY = e instanceof TouchEvent ? e.touches[0].clientY : e.clientY;
-
-    // Mark as a real drag once the pointer moves more than 6px
     const dx = clientX - dragStartPos.current.x;
     const dy = clientY - dragStartPos.current.y;
-    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-      didDrag.current = true;
-    }
-
+    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) didDrag.current = true;
     const newRight = window.innerWidth - clientX + dragOffset.x;
     const newBottom = window.innerHeight - clientY + dragOffset.y;
-
     setPosition({
       bottom: Math.max(0, Math.min(newBottom, window.innerHeight - 100)),
       right: Math.max(0, Math.min(newRight, window.innerWidth - 56)),
@@ -437,10 +421,7 @@ export default function SupportChat() {
 
   const handleDragEnd = () => {
     setIsDragging(false);
-    // Only toggle open/close when it was a tap (not a drag)
-    if (!didDrag.current) {
-      setOpen((v) => !v);
-    }
+    if (!didDrag.current) setOpen((v) => !v);
     didDrag.current = false;
   };
 
@@ -450,7 +431,6 @@ export default function SupportChat() {
     window.addEventListener("mouseup", handleDragEnd);
     window.addEventListener("touchmove", handleDragMove, { passive: false });
     window.addEventListener("touchend", handleDragEnd);
-
     return () => {
       window.removeEventListener("mousemove", handleDragMove);
       window.removeEventListener("mouseup", handleDragEnd);
@@ -463,6 +443,9 @@ export default function SupportChat() {
     WebkitTapHighlightColor: "transparent",
     outline: "none",
   } as React.CSSProperties;
+
+  // ── Don't render at all until position is known (avoids flash to wrong corner)
+  if (!position) return null;
 
   return (
     <>
@@ -477,7 +460,7 @@ export default function SupportChat() {
           userSelect: "none",
         }}
       >
-        {/* Chat Container - Draggable */}
+        {/* Chat Container */}
         {open && (
           <div
             className="flex flex-col rounded-2xl shadow-2xl overflow-hidden cursor-grab active:cursor-grabbing"
@@ -930,12 +913,14 @@ export default function SupportChat() {
           </div>
         )}
 
-        {/* Chat Button - Always visible, draggable */}
+        {/* Tooltip */}
         {!open && (
           <div className="bg-slate-800 border border-slate-700 text-white text-xs font-bold px-3 py-1.5 rounded-full shadow-lg animate-bounce pointer-events-none select-none">
             Need help? 💬
           </div>
         )}
+
+        {/* Button — drag to move, tap to open/close */}
         <button
           type="button"
           className="relative w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-95 cursor-grab active:cursor-grabbing"

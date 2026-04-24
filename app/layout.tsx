@@ -202,6 +202,6 @@ export default function RootLayout({
         <Toaster richColors position="top-center" />
         <Analytics />
       </body>
-    </html>
+    </html>     
   );
 }

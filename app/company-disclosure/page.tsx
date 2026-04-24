@@ -206,7 +206,7 @@ export default function company-disclosurePage() {
           <div className="flex items-start justify-between gap-8">
             <div className="flex-1">
               <h1 className="text-5xl font-black text-white mb-3">
-                OmniTask company-disclosure
+                OmniTask 
               </h1>
               <p className="text-slate-400 text-lg max-w-2xl leading-relaxed">
                 Master GPU rental economics, advanced task optimization, and

@@ -1,14 +1,22 @@
-// middleware.ts  (replace your existing file with this)
-// ─────────────────────────────────────────────────────────────────────────────
-// Changes from your original:
-//   1. After PIN check, fetches the user's role from public.users
-//   2. /admin routes → requires role = 'admin', otherwise → /dashboard
-//   3. Everything else is identical to your original
-// ─────────────────────────────────────────────────────────────────────────────
+// middleware.ts
+// Replace your existing middleware.ts with this entire file.
+//
+// WHAT WAS BROKEN:
+//   - After PIN verify, it always redirected to /dashboard — never back to /admin
+//   - Cookie set() only wrote to res, not req, so Supabase couldn't read
+//     the session on the very same request, causing user = null → signin redirect
+//
+// WHAT IS FIXED:
+//   - Cookie set/remove now writes to BOTH req and res (required for SSR)
+//   - PIN redirect passes ?next= so after PIN you land on /admin not /dashboard
+//   - verify-pin page reads ?next= and redirects there after success
+//   - Admin check: role column = 'admin' AND email in ADMIN_EMAILS allowlist
 
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 
+// ── Public routes (no auth required) ───────────────────────────────────────
 const PUBLIC_ROUTES = [
   "/auth/signin",
   "/auth/signup",
@@ -19,118 +27,126 @@ const PUBLIC_ROUTES = [
   "/auth/reset-pin",
 ];
 
-// ── Add every admin email here as a backup safety net ──────────────────────
-// These are checked in addition to the role column.
-// Even if someone edits the DB, they still need to be logged in as one
-// of these emails to access /admin.
+// ── Admin email allowlist — add your backup emails here ─────────────────────
 const ADMIN_EMAILS = [
-  "princemercy329@gmail.com", // your primary admin
-  // "backup1@gmail.com",       // uncomment and add your backup emails
-  // "backup2@gmail.com",
-  // "backup3@gmail.com",
-  // "backup4@gmail.com",
+  "princemercy329@gmail.com",
+  // "your-backup2@gmail.com",
+  // "your-backup3@gmail.com",
+  // "your-backup4@gmail.com",
 ];
 
 const PIN_COOKIE = "pin_verified";
 
-export default async function middleware(req) {
-  const res = NextResponse.next();
-  const pathname = req.nextUrl.pathname;
+export default async function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl;
+  const origin = req.nextUrl.origin;
 
-  // ── Security headers ────────────────────────────────────────────────────
-  res.headers.set("X-Content-Type-Options", "nosniff");
-  res.headers.set("X-Frame-Options", "DENY");
-  res.headers.set("X-XSS-Protection", "1; mode=block");
-  res.headers.set(
-    "Strict-Transport-Security",
-    "max-age=31536000; includeSubDomains",
-  );
-  res.headers.set(
-    "Content-Security-Policy",
-    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:;",
-  );
-
-  // Skip static files and API routes
+  // ── Skip static files and API routes ────────────────────────────────────
   if (
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api") ||
     pathname.startsWith("/favicon") ||
     pathname.includes(".")
   ) {
-    return res;
+    return NextResponse.next();
   }
 
-  // Allow homepage and public routes
+  // ── Build response so we can attach cookies and headers ─────────────────
+  const res = NextResponse.next();
+
+  res.headers.set("X-Content-Type-Options", "nosniff");
+  res.headers.set("X-Frame-Options", "DENY");
+  res.headers.set("X-XSS-Protection", "1; mode=block");
+  res.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.headers.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https: wss:;"
+  );
+
+  // ── Allow homepage and all public routes ─────────────────────────────────
   if (pathname === "/" || PUBLIC_ROUTES.some((r) => pathname.startsWith(r))) {
     return res;
   }
 
-  // ── Supabase SSR client ─────────────────────────────────────────────────
+  // ── Supabase SSR client ──────────────────────────────────────────────────
+  // IMPORTANT: cookie set() must write to BOTH req AND res.
+  // If you only write to res, the auth session cannot be read on this
+  // same request, which causes getUser() to return null → signin redirect.
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        get: (name) => req.cookies.get(name)?.value,
-        set: (name, value, options) => {
-          res.cookies.set({ name, value, ...options });
+        get(name) {
+          return req.cookies.get(name)?.value;
         },
-        remove: (name, options) => {
+        set(name, value, options) {
+          req.cookies.set({ name, value, ...options });   // ← write to req
+          res.cookies.set({ name, value, ...options });   // ← write to res
+        },
+        remove(name, options) {
+          req.cookies.set({ name, value: "", ...options });
           res.cookies.set({ name, value: "", ...options });
         },
       },
-    },
+    }
   );
 
-  // ── Auth check ──────────────────────────────────────────────────────────
+  // ── Get authenticated user ───────────────────────────────────────────────
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Not logged in → signin
+  // Not signed in → redirect to signin, remember intended destination
   if (!user) {
-    return NextResponse.redirect(new URL("/auth/signin", req.url));
+    const to = new URL("/auth/signin", origin);
+    to.searchParams.set("next", pathname);
+    return NextResponse.redirect(to);
   }
 
-  // ── PIN check ───────────────────────────────────────────────────────────
-  const pinCookie = req.cookies.get(PIN_COOKIE)?.value;
+  // ── PIN verification check ───────────────────────────────────────────────
+  const pinCookie  = req.cookies.get(PIN_COOKIE)?.value;
   const pinVerified = pinCookie === user.id;
 
+  // User is on the verify-pin page
   if (pathname.startsWith("/auth/verify-pin")) {
     if (pinVerified) {
-      return NextResponse.redirect(new URL("/dashboard", req.url));
+      // Already verified — send them to where they were going
+      const next = req.nextUrl.searchParams.get("next") || "/dashboard";
+      return NextResponse.redirect(new URL(next, origin));
     }
-    return res;
+    return res; // let them see the PIN page
   }
 
-  // Dashboard + admin both need PIN
+  // /dashboard and /admin both require PIN
   if (pathname.startsWith("/dashboard") || pathname.startsWith("/admin")) {
     if (!pinVerified) {
-      return NextResponse.redirect(new URL("/auth/verify-pin", req.url));
+      // Pass ?next= so after PIN they land back on /admin (not /dashboard)
+      const pinUrl = new URL("/auth/verify-pin", origin);
+      pinUrl.searchParams.set("next", pathname);
+      return NextResponse.redirect(pinUrl);
     }
   }
 
-  // ── Admin role check ────────────────────────────────────────────────────
-  // Only runs for /admin routes — after PIN is verified
+  // ── Admin role check (only for /admin routes) ────────────────────────────
   if (pathname.startsWith("/admin")) {
-    // Dual guard: check both the DB role column AND the email allowlist
     const { data: profile } = await supabase
       .from("users")
       .select("role, email")
       .eq("id", user.id)
       .single();
 
-    const isAdminByRole = profile?.role === "admin";
-    const isAdminByEmail = ADMIN_EMAILS.includes(
-      profile?.email ?? user.email ?? "",
-    );
+    const email        = (profile?.email ?? user.email ?? "").toLowerCase();
+    const isAdminRole  = profile?.role === "admin";
+    const isAdminEmail = ADMIN_EMAILS.map((e) => e.toLowerCase()).includes(email);
 
-    // Must pass BOTH checks
-    if (!isAdminByRole || !isAdminByEmail) {
-      // Not an admin — send them to their dashboard silently
-      // Do NOT show an error page that reveals /admin exists
-      return NextResponse.redirect(new URL("/dashboard", req.url));
+    if (!isAdminRole || !isAdminEmail) {
+      // Not an admin — silently send to dashboard (don't reveal /admin exists)
+      return NextResponse.redirect(new URL("/dashboard", origin));
     }
+
+    // ✅ Confirmed admin — let them through
+    return res;
   }
 
   return res;
