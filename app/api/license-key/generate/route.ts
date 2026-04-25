@@ -1,12 +1,12 @@
 // app/api/license-key/generate/route.ts
 // POST /api/license-key/generate
-// — Creates a new key in license_keys table
 // — Expires any previous active key for this user
-// — Sends the key to the user's email via Resend (or any SMTP)
+// — Creates a new key in license_keys table
+// — Sends the key to the user's email via Resend (non-blocking)
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import { Resend } from "resend"; // npm install resend
+import { Resend } from "resend";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -21,10 +21,6 @@ function getSupabaseAdmin() {
   );
 }
 
-function getResend() {
-  return new Resend(process.env.RESEND_API_KEY!);
-}
-
 function generateKey(): string {
   const seg = () =>
     Math.random().toString(36).substring(2, 6).toUpperCase().padEnd(4, "X");
@@ -35,34 +31,29 @@ export async function POST(req: NextRequest) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
 
-    // 1. Verify the user is logged in - get from request headers
+    // 1. Verify the user is logged in
     const authHeader = req.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     const token = authHeader.substring(7);
-    
-    // 2. Decode and verify the JWT token to get user ID
-    // The token format is: header.payload.signature
-    // We need to decode the payload and extract the sub (user ID)
+
+    // 2. Decode JWT to get user ID
     let userId: string;
     try {
-      const parts = token.split('.');
+      const parts = token.split(".");
       if (parts.length !== 3) throw new Error("Invalid token format");
-      
-      // Decode the payload (second part)
       const payload = JSON.parse(
-        Buffer.from(parts[1], 'base64').toString('utf-8')
+        Buffer.from(parts[1], "base64").toString("utf-8"),
       );
-      
-      userId = payload.sub; // sub is the user ID
+      userId = payload.sub;
       if (!userId) throw new Error("No user ID in token");
-    } catch (err: any) {
+    } catch {
       return NextResponse.json({ error: "Invalid token" }, { status: 401 });
     }
 
-    // 3. Verify user exists in the system
+    // 3. Verify user exists
     const { data: user, error: userError } = await supabaseAdmin
       .from("users")
       .select("id, email, full_name")
@@ -82,36 +73,42 @@ export async function POST(req: NextRequest) {
 
     // 5. Generate a new key
     const key = generateKey();
-    const expiresAt = new Date(Date.now() + KEY_TTL_MINUTES * 60 * 1000).toISOString();
+    const expiresAt = new Date(
+      Date.now() + KEY_TTL_MINUTES * 60 * 1000,
+    ).toISOString();
 
-    // 6. Insert into license_keys
+    // 6. Insert into license_keys — using "license_key" column to match your schema
     const { data: inserted, error: insertError } = await supabaseAdmin
       .from("license_keys")
       .insert({
-        user_id:     userId,
-        key:         key,
-        status:      "active",
-        expires_at:  expiresAt,
+        user_id: userId,
+        license_key: key, // ✅ fixed: was "key", now matches your schema column
+        status: "active",
+        expires_at: expiresAt,
       })
       .select()
       .single();
 
     if (insertError || !inserted) {
       console.error("insert error:", insertError);
-      return NextResponse.json({ error: "Failed to create key" }, { status: 500 });
+      return NextResponse.json(
+        { error: "Failed to create key" },
+        { status: 500 },
+      );
     }
 
-    // 7. Send email via Resend
-    const email = user.email;
-    const name = user.full_name || "Operator";
-    
-    const resend = getResend();
-    if (resend) {
-      const { error: emailError } = await resend.emails.send({
-        from: "OmniTask Pro <noreply@omnitaskpro.io>",
-        to:   email,
-        subject: "Your OmniTask Pro License Key",
-        html: `
+    // 7. Send email via Resend — NON-BLOCKING, key is always returned
+    const resendApiKey = process.env.RESEND_API_KEY;
+    let emailSent = false;
+
+    if (resendApiKey) {
+      try {
+        const resend = new Resend(resendApiKey);
+        const { error: emailError } = await resend.emails.send({
+          from: "OmniTask Pro <noreply@omnitaskpro.io>",
+          to: user.email,
+          subject: "Your OmniTask Pro License Key",
+          html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -123,8 +120,6 @@ export async function POST(req: NextRequest) {
     <tr>
       <td align="center">
         <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;border:1px solid #e5e7eb;overflow:hidden;">
-
-          <!-- Header -->
           <tr>
             <td style="background:#000000;padding:28px 36px;">
               <p style="margin:0;color:#ffffff;font-size:20px;font-weight:900;letter-spacing:-0.5px;">
@@ -135,11 +130,9 @@ export async function POST(req: NextRequest) {
               </p>
             </td>
           </tr>
-
-          <!-- Body -->
           <tr>
             <td style="padding:36px;">
-              <p style="margin:0 0 8px;font-size:14px;color:#6b7280;">Hello, ${name}</p>
+              <p style="margin:0 0 8px;font-size:14px;color:#6b7280;">Hello, ${user.full_name || "Operator"}</p>
               <h1 style="margin:0 0 20px;font-size:22px;font-weight:900;color:#111827;font-family:Georgia,serif;line-height:1.3;">
                 Your License Key Is Ready
               </h1>
@@ -147,75 +140,75 @@ export async function POST(req: NextRequest) {
                 A new Certified AI Operator License key has been generated for your account.
                 This key is <strong style="color:#111827;">single-use</strong> and expires in
                 <strong style="color:#111827;">${KEY_TTL_MINUTES} minutes</strong>.
-                Copy it and paste it into the License Manager on the license page.
               </p>
-
-              <!-- Key box -->
               <div style="background:#f9fafb;border:2px dashed #d1d5db;border-radius:8px;padding:20px 24px;text-align:center;margin:0 0 24px;">
                 <p style="margin:0 0 4px;font-size:11px;text-transform:uppercase;letter-spacing:2px;color:#9ca3af;font-weight:700;">Your License Key</p>
                 <p style="margin:0;font-family:monospace;font-size:20px;font-weight:900;color:#111827;letter-spacing:3px;">${key}</p>
               </div>
-
-              <!-- Expiry warning -->
               <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin:0 0 24px;">
                 <p style="margin:0;font-size:13px;color:#92400e;line-height:1.5;">
-                  ⏱ <strong>Expires at ${new Date(expiresAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}</strong>
-                  &nbsp;·&nbsp; You have ${KEY_TTL_MINUTES} minutes from the time this email was sent.
+                  ⏱ <strong>Expires in ${KEY_TTL_MINUTES} minutes</strong> from when this email was sent.
                   If it expires, return to the license page and generate a new one.
                 </p>
               </div>
-
-              <!-- Steps -->
               <p style="margin:0 0 12px;font-size:13px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:1px;">How to use your key:</p>
               <ol style="margin:0 0 24px;padding-left:20px;color:#6b7280;font-size:14px;line-height:1.8;">
                 <li>Go to your <strong style="color:#111827;">Dashboard → License</strong> page</li>
-                <li>Scroll to <strong style="color:#111827;">Section 3 — License Key</strong></li>
-                <li>Paste the key above into the <em>Step B</em> input field</li>
+                <li>Paste the key into the <em>Step B</em> input field</li>
                 <li>Click <strong style="color:#111827;">Validate Key</strong></li>
                 <li>Complete checkout — your node activates immediately</li>
               </ol>
-
               <p style="margin:0;font-size:12px;color:#9ca3af;line-height:1.6;">
                 If you did not request this key, you can safely ignore this email.
-                Your account has not been charged. Each key is tied to your account and cannot be used by anyone else.
               </p>
             </td>
           </tr>
-
-          <!-- Footer -->
           <tr>
             <td style="background:#f9fafb;border-top:1px solid #e5e7eb;padding:20px 36px;">
               <p style="margin:0;font-size:11px;color:#9ca3af;line-height:1.6;">
-                OmniTask Pro Ltd. · Reg. OT-2024-GB-7741902 · Level 14, One Canada Square, Canary Wharf, London E14 5AB<br/>
-                compliance@omnitaskpro.io · omnitaskpro.online
+                OmniTask Pro Ltd. · compliance@omnitaskpro.io · omnitaskpro.online
               </p>
             </td>
           </tr>
-
         </table>
       </td>
     </tr>
   </table>
 </body>
 </html>
-        `,
-      });
-
-      if (emailError) {
-        console.error("email error:", emailError);
-        // Key was created but email failed — still return the key so the user isn't blocked
-        return NextResponse.json({
-          key,
-          expiresAt,
-          emailSent: false,
-          warning: "Key created but email delivery failed. Copy the key from this page.",
+          `,
         });
+
+        if (emailError) {
+          console.warn("Email delivery failed:", emailError);
+        } else {
+          emailSent = true;
+        }
+      } catch (emailErr) {
+        // Email failed — key still returned below
+        console.warn("Resend threw an error:", emailErr);
       }
+    } else {
+      console.warn("RESEND_API_KEY not set — skipping email.");
     }
 
-    return NextResponse.json({ key, expiresAt, emailSent: true });
+    // ✅ Always return the key regardless of email status
+    return NextResponse.json({
+      key,
+      expiresAt,
+      emailSent,
+      ...(emailSent
+        ? {}
+        : {
+            warning:
+              "Key created but email not sent. Copy the key from this page.",
+          }),
+    });
   } catch (err: any) {
     console.error("Generate error:", err);
-    return NextResponse.json({ error: err.message || "Failed to generate key" }, { status: 500 });
+    return NextResponse.json(
+      { error: err.message || "Failed to generate key" },
+      { status: 500 },
+    );
   }
 }
