@@ -683,7 +683,7 @@ export default function VerificationPage() {
                             <option value="male">Male</option>
                             <option value="female">Female</option>
                           
-                            </option>
+                            <option value="female">Female</option>
                           </select>
                         </div>
                       </div>
