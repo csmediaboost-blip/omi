@@ -941,6 +941,11 @@ export default function SupportChat() {
             userSelect: "none",
             pointerEvents: "auto",
           }}
+          onClick={(e) => {
+            if (!didDrag.current) {
+              setOpen(!open);
+            }
+          }}
           onMouseDown={(e) => handleDragStart(e)}
           onTouchStart={(e) => handleDragStart(e)}
         >
