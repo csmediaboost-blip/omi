@@ -171,8 +171,27 @@ export default function RootLayout({
           name="apple-mobile-web-app-status-bar-style"
           content="black-translucent"
         />
+        <meta
+          name="apple-mobile-web-app-title"
+          content="OmniTask Pro"
+        />
         <meta name="geo.region" content="GB" />
         <meta name="geo.placename" content="London" />
+        
+        {/* Service Worker registration script - runs immediately */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              if ('serviceWorker' in navigator) {
+                window.addEventListener('load', function() {
+                  navigator.serviceWorker.register('/sw.js', { scope: '/' })
+                    .then(reg => console.log('[v0] SW registered:', reg.scope))
+                    .catch(err => console.error('[v0] SW registration failed:', err));
+                });
+              }
+            `,
+          }}
+        />
 
         {/* JSON-LD */}
         <script

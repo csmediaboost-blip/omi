@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import Link from "next/link";
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 
 export default function AdminDashboard() {
+  const router = useRouter();
   const [stats, setStats] = useState({
     totalUsers: 0,
     totalTransactions: 0,
@@ -30,10 +32,44 @@ export default function AdminDashboard() {
     rlhfQuestions: 0,
   });
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   useEffect(() => {
-    fetchStats();
+    checkAdminAccess();
   }, []);
+
+  const checkAdminAccess = async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push("/signin");
+        return;
+      }
+
+      const { data: profile } = await supabase
+        .from("users")
+        .select("role, is_admin")
+        .eq("id", user.id)
+        .single();
+
+      if (profile?.role !== "admin" && !profile?.is_admin) {
+        router.push("/dashboard");
+        return;
+      }
+
+      setIsAdmin(true);
+      fetchStats();
+    } catch (error) {
+      console.error("Admin access check failed:", error);
+      router.push("/signin");
+    }
+  };
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetchStats();
+    }
+  }, [isAdmin]);
 
   const fetchStats = async () => {
     try {
@@ -123,7 +159,7 @@ export default function AdminDashboard() {
     </Card>
   );
 
-  if (loading) {
+  if (!isAdmin || loading) {
     return (
       <AdminLayout>
         <div className="flex items-center justify-center h-96">

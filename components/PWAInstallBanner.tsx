@@ -66,27 +66,44 @@ export default function PWAInstallBanner() {
 
   // ── Capture install prompt ───────────────────────────────────────────────
   useEffect(() => {
-    // Don't show if already dismissed recently
+    // Don't show if already dismissed recently (48 hours, not 7 days, for mobile)
     const dismissed = localStorage.getItem("pwa_install_dismissed");
-    if (dismissed && Date.now() - parseInt(dismissed) < 7 * 86400000) {
+    if (dismissed && Date.now() - parseInt(dismissed) < 2 * 86400000) {
       console.log("[PWA] Recently dismissed, skipping");
       return;
     }
+
+    // Check if running on mobile
+    const isMobile = /iPhone|iPad|iPod|Android|Windows Phone|webOS/i.test(navigator.userAgent);
+    console.log("[v0] Mobile detected:", isMobile);
 
     const handler = (e: Event) => {
       console.log("[v0] beforeinstallprompt event fired on", new Date().toISOString());
       e.preventDefault();
       setInstallEvent(e as BeforeInstallPromptEvent);
-      console.log("[v0] Install event captured, will show after 2 seconds");
-      // Wait 2 seconds before showing instead of 4 to be more responsive
+      console.log("[v0] Install event captured, will show after 1 second");
       setTimeout(() => {
         setShowInstall(true);
         console.log("[v0] Install prompt displayed to user");
-      }, 2000);
+      }, 1000);
     };
     
     window.addEventListener("beforeinstallprompt", handler);
     console.log("[v0] beforeinstallprompt listener attached");
+    
+    // For mobile users where beforeinstallprompt doesn't fire, show prompt anyway after delay
+    if (isMobile) {
+      const mobileTimer = setTimeout(() => {
+        if (!installEvent) {
+          console.log("[v0] No beforeinstallprompt on mobile, showing manual prompt");
+          setShowInstall(true);
+        }
+      }, 5000);
+      return () => {
+        clearTimeout(mobileTimer);
+        window.removeEventListener("beforeinstallprompt", handler);
+      };
+    }
     
     // Log if PWA criteria not met
     window.addEventListener("appinstalled", () => {
@@ -95,18 +112,18 @@ export default function PWAInstallBanner() {
       setShowInstall(false);
     });
     
-    // Debug: Log if user is on HTTPS (PWA requirement)
+    // Debug: Log HTTPS status
     if (typeof window !== "undefined") {
       const isHTTPS = window.location.protocol === "https:";
       const isLocalhost = window.location.hostname === "localhost";
-      console.log(`[v0] PWA Check: HTTPS=${isHTTPS}, localhost=${isLocalhost}, protocol=${window.location.protocol}`);
+      console.log(`[v0] PWA Check: HTTPS=${isHTTPS}, localhost=${isLocalhost}`);
       if (!isHTTPS && !isLocalhost) {
-        console.warn("[v0] PWA Install requires HTTPS (or localhost for testing)");
+        console.warn("[v0] PWA Install requires HTTPS");
       }
     }
     
     return () => window.removeEventListener("beforeinstallprompt", handler);
-  }, []);
+  }, [installEvent]);
 
   // ── Check notification status ────────────────────────────────────────────
   useEffect(() => {
@@ -182,7 +199,7 @@ export default function PWAInstallBanner() {
         touchAction: "manipulation"
       }}
     >
-      {/* ── Install banner ─────────────────────────────────────────────── */}
+      {/* ── Install banner ──────────────────────────────────────────���──── */}
       {showInstall && !installDone && (
         <div className="bg-slate-900/98 border border-emerald-500/30 rounded-2xl p-4 flex gap-3 shadow-2xl">
           <div className="shrink-0">
