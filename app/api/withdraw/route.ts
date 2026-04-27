@@ -1,9 +1,19 @@
 // app/api/withdraw/route.ts
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { z } from "zod";
 import { isBusinessDay } from "@/lib/business-days";
+import {
+  apiSuccess,
+  apiValidationError,
+  apiAuthError,
+  apiAuthorizationError,
+  apiNotFoundError,
+  apiRateLimitError,
+  apiServerError,
+  apiConflictError,
+} from "@/lib/api-response";
 
 export const dynamic = "force-dynamic";
 
@@ -60,25 +70,23 @@ export async function POST(req: NextRequest) {
       error: authErr,
     } = await supabase.auth.getUser();
     if (authErr || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return apiAuthError('Session expired. Please sign in again.');
     }
 
     // ── 2. Parse and validate input ─────────────────────────
-    let body: any;
+    let body: unknown;
     try {
       body = await req.json();
     } catch {
-      return NextResponse.json(
-        { error: "Invalid request body" },
-        { status: 400 },
-      );
+      return apiValidationError('Invalid request body');
     }
 
     const parsed = WithdrawSchema.safeParse(body);
     if (!parsed.success) {
-      return NextResponse.json(
-        { error: parsed.error.issues[0].message },
-        { status: 400 },
+      const firstError = parsed.error.issues[0];
+      return apiValidationError(
+        firstError.message,
+        { field: firstError.path.join('.') }
       );
     }
     const { amount } = parsed.data;
@@ -87,9 +95,8 @@ export async function POST(req: NextRequest) {
     if (!isBusinessDay()) {
       const day = new Date().getDay();
       const dayName = day === 0 ? "Sunday" : "Saturday";
-      return NextResponse.json(
-        { error: `Withdrawals are only available on business days (Mon-Fri). It's currently ${dayName}. Please try again on Monday.` },
-        { status: 403 }
+      return apiAuthorizationError(
+        `Withdrawals available Mon-Fri only. It's ${dayName}. Try again Monday.`
       );
     }
 
@@ -114,18 +121,12 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (!userData?.pin_hash || providedPinHash !== userData.pin_hash) {
-      return NextResponse.json(
-        { error: "Invalid PIN. Withdrawal cannot be processed." },
-        { status: 403 }
-      );
+      return apiAuthorizationError('Invalid PIN. Withdrawal cannot be processed.');
     }
 
     // ── 3. Rate limit check ─────────────────────────────────
     if (isRateLimited(user.id)) {
-      return NextResponse.json(
-        { error: "Too many withdrawal requests. Try again later." },
-        { status: 429 },
-      );
+      return apiRateLimitError(3600); // 1 hour
     }
 
     // ── 4. Load fresh user data from DB (NEVER trust client) ─
@@ -141,71 +142,47 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (profileErr || !profile) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+      return apiNotFoundError('User profile');
     }
 
     // ── 5. Security checks ──────────────────────────────────
     if (profile.account_flagged) {
-      return NextResponse.json(
-        { error: "Account flagged. Contact support." },
-        { status: 403 },
-      );
+      return apiAuthorizationError('Account flagged. Please contact support.');
     }
     if (profile.withdwals_fronzen) {
-      return NextResponse.json(
-        { error: "Withdrawals frozen. Contact support." },
-        { status: 403 },
-      );
+      return apiAuthorizationError('Withdrawals temporarily frozen. Please contact support.');
     }
-    const kycOk =
-      profile.kyc_verified === true || profile.kyc_status === "approved";
+    
+    const kycOk = profile.kyc_verified === true || profile.kyc_status === "approved";
     if (!kycOk) {
-      return NextResponse.json(
-        { error: "KYC verification required." },
-        { status: 403 },
-      );
+      return apiAuthorizationError('KYC verification required before withdrawal.');
     }
+    
     if (!profile.payout_registered || !profile.payout_account_number) {
-      return NextResponse.json(
-        { error: "No payout account registered." },
-        { status: 403 },
-      );
+      return apiConflictError('No payout account registered. Please add one in settings.');
     }
+    
     if (!profile.payout_kyc_match) {
-      return NextResponse.json(
-        { error: "Payout account name mismatch. Contact support." },
-        { status: 403 },
-      );
+      return apiConflictError('Payout account name mismatch. Please contact support.');
     }
+    
     if (profile.payout_locked) {
-      return NextResponse.json(
-        { error: "Payout account locked. Contact support." },
-        { status: 403 },
-      );
+      return apiAuthorizationError('Payout account locked. Please contact support.');
     }
-    if (
-      profile.earnings_locked_until &&
-      new Date(profile.earnings_locked_until) > new Date()
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "Earnings locked until " +
-            new Date(profile.earnings_locked_until).toLocaleDateString(),
-        },
-        { status: 403 },
-      );
+    
+    if (profile.earnings_locked_until && new Date(profile.earnings_locked_until) > new Date()) {
+      const unlockDate = new Date(profile.earnings_locked_until).toLocaleDateString();
+      return apiAuthorizationError(`Earnings locked until ${unlockDate}`);
     }
+    
     if (amount < 10) {
-      return NextResponse.json(
-        { error: "Minimum withdrawal is $10" },
-        { status: 400 },
-      );
+      return apiValidationError('Minimum withdrawal is $10');
     }
+    
     if (amount > (profile.balance_available ?? 0)) {
-      return NextResponse.json(
-        { error: "Insufficient balance" },
-        { status: 400 },
+      return apiValidationError(
+        'Insufficient balance for this withdrawal',
+        { available: profile.balance_available, requested: amount }
       );
     }
 
@@ -233,10 +210,7 @@ export async function POST(req: NextRequest) {
       .in("status", ["queued", "processing"]);
 
     if ((pending || []).length >= 3) {
-      return NextResponse.json(
-        { error: "Too many pending withdrawals." },
-        { status: 403 },
-      );
+      return apiConflictError('Too many pending withdrawals. Wait for current ones to complete.');
     }
 
     // ── 7. Atomic balance deduction ─────────────────────────
@@ -245,9 +219,8 @@ export async function POST(req: NextRequest) {
       { p_user_id: user.id, p_amount: amount },
     );
     if (deductErr || !deducted) {
-      return NextResponse.json(
-        { error: deductErr?.message || "Balance deduction failed" },
-        { status: 400 },
+      return apiServerError(
+        deductErr?.message || 'Failed to process withdrawal. Balance unchanged.'
       );
     }
 
@@ -276,10 +249,7 @@ export async function POST(req: NextRequest) {
         p_user_id: user.id,
         p_amount: amount,
       });
-      return NextResponse.json(
-        { error: "Withdrawal failed. Balance refunded." },
-        { status: 500 },
-      );
+      return apiServerError('Withdrawal request failed. Balance has been refunded.');
     }
 
     // ── 9. Ledger entry ─────────────────────────────────────
@@ -294,12 +264,16 @@ export async function POST(req: NextRequest) {
       })
       .then(() => {});
 
-    return NextResponse.json({ success: true, amount, expectedDate });
+    return apiSuccess({
+      amount,
+      expectedDate,
+      message: 'Withdrawal request submitted successfully',
+    });
   } catch (err: any) {
-    console.error("Withdrawal API error:", err);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 },
+    console.error('[WITHDRAW_API] Unhandled error:', err);
+    return apiServerError(
+      'An unexpected error occurred. Please try again.',
+      { cause: err }
     );
   }
 }

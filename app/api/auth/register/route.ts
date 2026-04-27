@@ -1,19 +1,43 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest } from 'next/server';
 import { getSupabaseServiceClient } from '@/lib/supabase';
+import {
+  apiSuccess,
+  apiValidationError,
+  apiConflictError,
+  apiServerError,
+} from '@/lib/api-response';
+import { z } from 'zod';
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+// Validation schema
+const RegisterSchema = z.object({
+  email: z.string().email('Invalid email format'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  name: z.string().min(2, 'Name must be at least 2 characters').max(100),
+  role: z.enum(['investor', 'worker', 'contributor']).optional().default('investor'),
+});
+
 export async function POST(req: NextRequest) {
   try {
-    const { email, password, name, role } = await req.json();
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return apiValidationError('Invalid request body');
+    }
 
-    if (!email || !password || !name) {
-      return NextResponse.json(
-        { error: 'Missing required fields' },
-        { status: 400 }
+    // Validate input
+    const parsed = RegisterSchema.safeParse(body);
+    if (!parsed.success) {
+      return apiValidationError(
+        'Validation failed',
+        { errors: parsed.error.flatten() }
       );
     }
+
+    const { email, password, name, role } = parsed.data;
 
     // Get service role client for server-side operations
     const supabase = getSupabaseServiceClient();
@@ -22,37 +46,41 @@ export async function POST(req: NextRequest) {
     const { data: authData, error: authError } = await supabase.auth.admin.createUser({
       email,
       password,
-      user_metadata: {
-        name,
-      },
+      user_metadata: { name, role },
     });
 
     if (authError) {
-      console.error('Auth creation error:', authError);
+      console.error('[AUTH] Creation error:', authError);
+      
       if (authError.message.includes('already exists')) {
-        return NextResponse.json(
-          { error: 'Email already in use' },
-          { status: 400 }
-        );
+        return apiConflictError('Email already registered', { email });
       }
-      throw authError;
+      
+      return apiServerError(
+        'Failed to create user account',
+        { details: { authError: authError.message } }
+      );
+    }
+
+    if (!authData.user?.id) {
+      return apiServerError('User creation returned no ID');
     }
 
     // User profile is created automatically by database trigger
-    // Just return success
-    return NextResponse.json(
+    return apiSuccess(
       {
         success: true,
-        uid: authData.user?.id,
-        message: 'User created successfully',
+        uid: authData.user.id,
+        email,
+        message: 'Account created successfully',
       },
-      { status: 201 }
+      201
     );
   } catch (error: any) {
-    console.error('Registration error:', error);
-    return NextResponse.json(
-      { error: error.message || 'Registration failed' },
-      { status: 500 }
+    console.error('[REGISTER_API] Unhandled error:', error);
+    return apiServerError(
+      'Registration failed. Please try again.',
+      { cause: error }
     );
   }
 }
