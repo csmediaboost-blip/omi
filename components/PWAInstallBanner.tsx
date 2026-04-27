@@ -68,24 +68,42 @@ export default function PWAInstallBanner() {
   useEffect(() => {
     // Don't show if already dismissed recently
     const dismissed = localStorage.getItem("pwa_install_dismissed");
-    if (dismissed && Date.now() - parseInt(dismissed) < 7 * 86400000) return;
+    if (dismissed && Date.now() - parseInt(dismissed) < 7 * 86400000) {
+      console.log("[PWA] Recently dismissed, skipping");
+      return;
+    }
 
     const handler = (e: Event) => {
-      console.log("[PWA] beforeinstallprompt fired");
+      console.log("[v0] beforeinstallprompt event fired on", new Date().toISOString());
       e.preventDefault();
       setInstallEvent(e as BeforeInstallPromptEvent);
-      // Wait 4 seconds before showing — Chrome requires engagement
-      setTimeout(() => setShowInstall(true), 4000);
+      console.log("[v0] Install event captured, will show after 2 seconds");
+      // Wait 2 seconds before showing instead of 4 to be more responsive
+      setTimeout(() => {
+        setShowInstall(true);
+        console.log("[v0] Install prompt displayed to user");
+      }, 2000);
     };
     
     window.addEventListener("beforeinstallprompt", handler);
+    console.log("[v0] beforeinstallprompt listener attached");
     
     // Log if PWA criteria not met
     window.addEventListener("appinstalled", () => {
-      console.log("[PWA] App installed!");
+      console.log("[v0] App successfully installed!");
       setInstallDone(true);
       setShowInstall(false);
     });
+    
+    // Debug: Log if user is on HTTPS (PWA requirement)
+    if (typeof window !== "undefined") {
+      const isHTTPS = window.location.protocol === "https:";
+      const isLocalhost = window.location.hostname === "localhost";
+      console.log(`[v0] PWA Check: HTTPS=${isHTTPS}, localhost=${isLocalhost}, protocol=${window.location.protocol}`);
+      if (!isHTTPS && !isLocalhost) {
+        console.warn("[v0] PWA Install requires HTTPS (or localhost for testing)");
+      }
+    }
     
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
