@@ -13,6 +13,7 @@ import {
   apiServerError,
   apiSuccess,
 } from "@/lib/api-response";
+import { sendPaymentReceipt } from "@/lib/email-service";
 import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
