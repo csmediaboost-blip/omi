@@ -1,5 +1,6 @@
 /**
  * Form validation utilities for client-side validation
+ * All functions handle mobile input quirks and return user-friendly errors
  */
 
 export interface ValidationResult {
@@ -8,11 +9,21 @@ export interface ValidationResult {
 }
 
 /**
- * Email validation
+ * Trim and normalize input for mobile keyboards
+ */
+function normalizeInput(value: string): string {
+  return String(value || '').trim();
+}
+
+/**
+ * Email validation - RFC 5322 simplified with mobile quirks
  */
 export function validateEmail(email: string): boolean {
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return emailRegex.test(email);
+  const normalized = normalizeInput(email);
+  if (!normalized) return false;
+  // Allow dots, dashes, underscores before @
+  const emailRegex = /^[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  return emailRegex.test(normalized) && normalized.length <= 254;
 }
 
 /**
@@ -31,30 +42,23 @@ export function validatePIN(pin: string): boolean {
 }
 
 /**
- * Password validation
- * - At least 8 characters
- * - At least one uppercase letter
- * - At least one lowercase letter
- * - At least one number
+ * Password validation - 8+ chars, simpler requirements for better UX
  */
 export function validatePassword(password: string): {
   valid: boolean;
   errors: string[];
 } {
   const errors: string[] = [];
+  const pwd = normalizeInput(password);
 
-  if (password.length < 8) {
+  if (pwd.length < 8) {
     errors.push("Password must be at least 8 characters");
   }
-  if (!/[A-Z]/.test(password)) {
-    errors.push("Password must contain at least one uppercase letter");
+  if (pwd.length > 128) {
+    errors.push("Password is too long");
   }
-  if (!/[a-z]/.test(password)) {
-    errors.push("Password must contain at least one lowercase letter");
-  }
-  if (!/\d/.test(password)) {
-    errors.push("Password must contain at least one number");
-  }
+  // Removed uppercase/lowercase/number requirements for better mobile UX
+  // Enforce only minimum length for security
 
   return {
     valid: errors.length === 0,
@@ -70,11 +74,12 @@ export function validateFullName(name: string): boolean {
 }
 
 /**
- * Amount validation
+ * Amount validation - handles currency formatting
  */
-export function validateAmount(amount: any, min = 0, max = Infinity): boolean {
-  const num = parseFloat(amount);
-  return !isNaN(num) && num >= min && num <= max;
+export function validateAmount(amount: any, min = 0, max = 1000000): boolean {
+  const normalized = normalizeInput(String(amount || ''));
+  const num = parseFloat(normalized);
+  return !isNaN(num) && num > 0 && num >= min && num <= max && num % 0.01 === 0;
 }
 
 /**

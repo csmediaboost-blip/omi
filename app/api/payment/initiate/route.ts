@@ -4,6 +4,7 @@ import { requireAuth } from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const maxDuration = 20; // 20 second timeout for payment processing
 
 function getAdminSupabase() {
   return createClient(

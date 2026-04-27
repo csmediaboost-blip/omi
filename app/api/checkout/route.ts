@@ -3,13 +3,21 @@
 // FIXED: passes all metadata correctly for license vs gpu_plan purchases
 // FIXED: activateNode now handles both license and gpu_plan purchase types
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { requireAuth } from "@/lib/api-security";
+import {
+  apiValidationError,
+  apiAuthorizationError,
+  apiNotFoundError,
+  apiServerError,
+  apiSuccess,
+} from "@/lib/api-response";
 import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const maxDuration = 30; // 30 second timeout
 
 function getSupabaseAdmin() {
   return createClient(
@@ -71,18 +79,14 @@ export async function POST(req: NextRequest) {
     } = body;
 
     if (!userId || !nodeKey || !amount) {
-      return NextResponse.json(
-        { error: "Missing required fields" },
-        { status: 400 },
-      );
+      return apiValidationError('Missing required checkout fields', {
+        required: ['userId', 'nodeKey', 'amount'],
+      });
     }
 
     // SECURITY: Verify requesting user matches userId
     if (userId !== authenticatedUserId) {
-      return NextResponse.json(
-        { error: "Forbidden: Cannot checkout for another user" },
-        { status: 403 },
-      );
+      return apiAuthorizationError('Cannot checkout for another user');
     }
 
     const { data: user, error: userErr } = await supabaseAdmin
@@ -92,7 +96,7 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (userErr || !user) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
+      return apiNotFoundError('User account');
     }
 
     const cfg = await getGatewayConfig();
