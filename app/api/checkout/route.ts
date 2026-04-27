@@ -3,7 +3,7 @@
 // FIXED: passes all metadata correctly for license vs gpu_plan purchases
 // FIXED: activateNode now handles both license and gpu_plan purchase types
 
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { requireAuth } from "@/lib/api-security";
 import {
