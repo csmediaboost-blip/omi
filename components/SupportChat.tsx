@@ -82,12 +82,19 @@ export default function SupportChat() {
   } | null>(null);
 
   useEffect(() => {
-    // Mobile (< 768px): center horizontally, sit above the ~64px bottom nav
+    // Mobile (< 768px): position on the right, above the mobile nav
+    // Mobile nav is 64px tall, add safe-area-inset-bottom (usually 0-20px)
+    // Button is 56px (w-14), so position it 12px from right edge
     // Desktop: bottom-right corner
     if (window.innerWidth < 768) {
-      // button w-14 = 56px. (screenWidth - 56) / 2 = centered right offset
-      const centeredRight = Math.round((window.innerWidth - 56) / 2);
-      setPosition({ bottom: 84, right: centeredRight });
+      const safeAreaBottom = parseInt(
+        getComputedStyle(document.documentElement).getPropertyValue(
+          "env(safe-area-inset-bottom)"
+        ) || "0"
+      );
+      // Bottom position: 64px (nav height) + 12px (spacing) + safe area
+      const bottomPos = 64 + 12 + safeAreaBottom;
+      setPosition({ bottom: bottomPos, right: 12 });
     } else {
       setPosition({ bottom: 20, right: 20 });
     }
