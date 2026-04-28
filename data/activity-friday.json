@@ -1,0 +1,422 @@
+[
+  {
+    "user": "contributor****",
+    "country": "Brazil",
+    "event": "received $120.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "India",
+    "event": "received $85.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Germany",
+    "event": "received $210.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Nigeria",
+    "event": "received $44.80 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "UK",
+    "event": "received $175.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Philippines",
+    "event": "received $33.60 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Canada",
+    "event": "received $315.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "South Africa",
+    "event": "received $90.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Indonesia",
+    "event": "received $28.80 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "USA",
+    "event": "received $450.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Kenya",
+    "event": "received $50.40 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "France",
+    "event": "received $157.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Japan",
+    "event": "received $225.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Mexico",
+    "event": "received $67.20 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Australia",
+    "event": "received $140.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Egypt",
+    "event": "received $22.40 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Brazil",
+    "event": "received $180.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "Germany",
+    "event": "received $262.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Vietnam",
+    "event": "received $19.20 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "South Korea",
+    "event": "received $270.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "India",
+    "event": "received $76.80 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Nigeria",
+    "event": "received $38.40 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "UK",
+    "event": "received $360.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Pakistan",
+    "event": "received $16.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "Canada",
+    "event": "received $189.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "India",
+    "event": "received $405.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Spain",
+    "event": "received $57.60 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "France",
+    "event": "received $122.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Argentina",
+    "event": "received $44.80 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "Brazil",
+    "event": "received $210.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Philippines",
+    "event": "received $157.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "USA",
+    "event": "received $96.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Australia",
+    "event": "received $105.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Germany",
+    "event": "received $495.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Indonesia",
+    "event": "received $38.40 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "Kenya",
+    "event": "received $63.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Canada",
+    "event": "received $337.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Egypt",
+    "event": "received $28.80 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "UK",
+    "event": "received $192.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "South Africa",
+    "event": "received $57.60 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Japan",
+    "event": "received $247.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "India",
+    "event": "received $147.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Mexico",
+    "event": "received $48.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "Brazil",
+    "event": "received $202.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Vietnam",
+    "event": "received $14.40 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Nigeria",
+    "event": "received $57.60 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "Germany",
+    "event": "received $283.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "node****",
+    "country": "USA",
+    "event": "received $472.50 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "India",
+    "event": "received $64.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "analyst****",
+    "country": "South Korea",
+    "event": "received $189.00 weekly payout",
+    "type": "payout"
+  },
+  {
+    "user": "contributor****",
+    "country": "Brazil",
+    "event": "completed Data Labeling task",
+    "type": "task"
+  },
+  {
+    "user": "node****",
+    "country": "Germany",
+    "event": "finished AI Response Evaluation task",
+    "type": "task"
+  },
+  {
+    "user": "analyst****",
+    "country": "India",
+    "event": "validated NLP training dataset",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Nigeria",
+    "event": "completed Sentiment Analysis task",
+    "type": "task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "UK",
+    "event": "approved AI model evaluation results",
+    "type": "task"
+  },
+  {
+    "user": "node****",
+    "country": "Canada",
+    "event": "finished AI Data Quality Assessment",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Philippines",
+    "event": "completed Image Classification task",
+    "type": "task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Kenya",
+    "event": "validated training data batch",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "USA",
+    "event": "completed Content Moderation task",
+    "type": "task"
+  },
+  {
+    "user": "node****",
+    "country": "Brazil",
+    "event": "processed AI Training Dataset submission",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "South Africa",
+    "event": "completed Model Bias Detection task",
+    "type": "task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "France",
+    "event": "accepted AI Text Classification task",
+    "type": "task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Japan",
+    "event": "reviewed Cognitive Reasoning task output",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Indonesia",
+    "event": "submitted Data Verification task",
+    "type": "task"
+  },
+  {
+    "user": "node****",
+    "country": "South Korea",
+    "event": "completed multilingual classification",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Egypt",
+    "event": "completed Arabic NLP annotation task",
+    "type": "task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Australia",
+    "event": "approved Knowledge Graph Tagging task",
+    "type": "task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Mexico",
+    "event": "validated structured data pipeline batch",
+    "type": "task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Vietnam",
+    "event": "completed Vietnamese text labeling task",
+    "type": "task"
+  },
+  {
+    "user": "node****",
+    "country": "UK",
+    "event": "completed 10 microtasks in AI Annotation",
+    "type": "task"
+  }
+]

@@ -1,0 +1,26 @@
+# supabase/config.toml
+# Add these cron schedules for automated payout processing
+
+[functions.payout-processor]
+enabled = true
+
+# Schedule the payout processor to run on Fridays at 10AM, 2PM, 6PM UTC
+# Using cron syntax: minute hour day-of-month month day-of-week
+# Run every Friday at 10:00 UTC
+[crons."friday-morning-payout"]
+schedule = "0 10 * * 5"
+function = "payout-processor"
+
+# Run every Friday at 14:00 UTC
+[crons."friday-afternoon-payout"]
+schedule = "0 14 * * 5"
+function = "payout-processor"
+
+# Run every Friday at 18:00 UTC
+[crons."friday-evening-payout"]
+schedule = "0 18 * * 5"
+function = "payout-processor"
+
+# NOTE: If using Supabase dashboard instead:
+# Go to: Project → Edge Functions → payout-processor → Schedule
+# Add three schedules: "0 10 * * 5", "0 14 * * 5", "0 18 * * 5"
