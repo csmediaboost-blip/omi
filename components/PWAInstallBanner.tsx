@@ -187,8 +187,16 @@ export default function PWAInstallBanner() {
     localStorage.setItem("notif_dismissed", "1");
   };
 
-  // Nothing to show
-  if ((!showInstall || installDone) && (!showNotif || notifDone)) return null;
+  // Check if mobile device
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const checkMobile = /iPhone|iPad|iPod|Android|webOS|BlackBerry/i.test(navigator.userAgent);
+    setIsMobile(checkMobile);
+    console.log("[v0] Device type check: mobile=" + checkMobile);
+  }, []);
+
+  // Nothing to show, or show install only on mobile
+  if ((!showInstall || installDone || !isMobile) && (!showNotif || notifDone)) return null;
 
   return (
     <div 
@@ -199,9 +207,9 @@ export default function PWAInstallBanner() {
         touchAction: "manipulation"
       }}
     >
-      {/* ── Install banner ──────────────────────────────────────────���──── */}
-      {showInstall && !installDone && (
-        <div className="bg-slate-900/98 border border-emerald-500/30 rounded-2xl p-4 flex gap-3 shadow-2xl">
+      {/* ── Install banner (MOBILE ONLY) ─────────────────────────────────── */}
+      {showInstall && !installDone && isMobile && (
+        <div className="bg-slate-900/98 border border-emerald-500/30 rounded-2xl p-4 flex gap-3 shadow-2xl active:shadow-lg">
           <div className="shrink-0">
             <AppLogo size={40} />
           </div>
@@ -214,18 +222,22 @@ export default function PWAInstallBanner() {
             </p>
             <div className="flex gap-2 mt-3">
               <button
-                onClick={handleInstall}
+                onClick={() => {
+                  console.log("[v0] Install button tapped, installEvent:", !!installEvent);
+                  handleInstall();
+                }}
+                onTouchStart={() => console.log("[v0] Install touch started")}
                 type="button"
-                className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-1.5 rounded-lg transition"
-                style={{ WebkitTapHighlightColor: "transparent" }}
+                className="bg-emerald-500 active:bg-emerald-600 hover:bg-emerald-400 text-slate-950 font-bold text-xs px-3.5 py-2 rounded-lg transition active:scale-95"
+                style={{ WebkitTapHighlightColor: "transparent", cursor: "pointer" }}
               >
                 Install
               </button>
               <button
                 onClick={dismissInstall}
                 type="button"
-                className="bg-transparent text-slate-400 text-xs px-2.5 py-1.5 rounded-lg border border-slate-600 hover:border-slate-500 transition"
-                style={{ WebkitTapHighlightColor: "transparent" }}
+                className="bg-transparent text-slate-400 text-xs px-2.5 py-2 rounded-lg border border-slate-600 hover:border-slate-500 transition active:scale-95"
+                style={{ WebkitTapHighlightColor: "transparent", cursor: "pointer" }}
               >
                 Not now
               </button>
@@ -234,16 +246,16 @@ export default function PWAInstallBanner() {
           <button
             onClick={dismissInstall}
             type="button"
-            className="text-slate-500 hover:text-white transition p-1 shrink-0"
-            style={{ WebkitTapHighlightColor: "transparent" }}
+            className="text-slate-500 hover:text-white transition p-1 shrink-0 active:scale-90"
+            style={{ WebkitTapHighlightColor: "transparent", cursor: "pointer" }}
           >
             ✕
           </button>
         </div>
       )}
 
-      {/* ── Notification banner ────────────────────────────────────────── */}
-      {showNotif && !notifDone && (
+      {/* ── Notification banner (MOBILE ONLY) ──────────────────────────── */}
+      {showNotif && !notifDone && isMobile && (
         <div className="bg-slate-900/98 border border-blue-500/30 rounded-2xl p-4 flex gap-3 shadow-2xl">
           <div className="shrink-0">
             <AppLogo size={40} />

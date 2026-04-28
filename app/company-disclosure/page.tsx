@@ -197,36 +197,36 @@ export default function CompanyDisclosurePage() {
   const totalModules = modules.length;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-6 space-y-6">
+    <div className="min-h-screen bg-slate-950 text-slate-200 p-3 md:p-6 space-y-4 md:space-y-6">
       {/* ── HEADER ── */}
-      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-950 via-slate-900 to-slate-950 border border-blue-900/40 p-10">
+      <div className="relative overflow-hidden rounded-2xl md:rounded-3xl bg-gradient-to-br from-blue-950 via-slate-900 to-slate-950 border border-blue-900/40 p-5 md:p-10">
         <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,rgba(59,130,246,0.1),transparent_60%)]" />
         <div className="absolute top-0 right-0 w-80 h-80 bg-blue-600/5 rounded-full blur-3xl -translate-y-1/3 translate-x-1/4" />
         <div className="relative z-10">
-          <div className="flex items-start justify-between gap-8">
+          <div className="flex flex-col md:flex-row items-start justify-between gap-4 md:gap-8">
             <div className="flex-1">
-              <h1 className="text-5xl font-black text-white mb-3">
+              <h1 className="text-3xl md:text-5xl font-black text-white mb-2 md:mb-3">
                 OmniTask 
               </h1>
-              <p className="text-slate-400 text-lg max-w-2xl leading-relaxed">
+              <p className="text-slate-400 text-sm md:text-lg max-w-2xl leading-relaxed">
                 Master GPU rental economics, advanced task optimization, and
                 build enterprise-scale networks. Professional training for the
                 next generation of compute operators and network architects.
               </p>
             </div>
-            <div className="shrink-0">
-              <div className="bg-blue-950/60 border border-blue-900/50 rounded-2xl p-6 text-center">
-                <div className="text-xs text-blue-400 font-bold uppercase tracking-widest mb-2">
+            <div className="shrink-0 w-full md:w-auto">
+              <div className="bg-blue-950/60 border border-blue-900/50 rounded-xl md:rounded-2xl p-4 md:p-6 text-center">
+                <div className="text-xs text-blue-400 font-bold uppercase tracking-widest mb-1 md:mb-2">
                   Your Progress
                 </div>
-                <div className="text-4xl font-black text-white mb-1">
+                <div className="text-3xl md:text-4xl font-black text-white mb-1">
                   {completedCount}/{totalModules}
                 </div>
                 <div className="text-xs text-slate-500">Modules Completed</div>
               </div>
             </div>
           </div>
-          <div className="mt-6 w-full bg-slate-800/60 rounded-full h-2.5 overflow-hidden border border-blue-900/20">
+          <div className="mt-3 md:mt-6 w-full bg-slate-800/60 rounded-full h-2.5 overflow-hidden border border-blue-900/20">
             <div
               className="bg-gradient-to-r from-blue-600 to-blue-400 h-full rounded-full transition-all duration-700"
               style={{
@@ -241,7 +241,7 @@ export default function CompanyDisclosurePage() {
       </div>
 
       {/* ── TABS ── */}
-      <div className="flex gap-2 bg-slate-900/60 border border-slate-800/60 p-1.5 rounded-xl">
+      <div className="flex flex-wrap gap-1.5 md:gap-2 bg-slate-900/60 border border-slate-800/60 p-1.5 rounded-lg md:rounded-xl">
         {[
           { id: "modules", label: "Training Modules", icon: BookOpen },
           { id: "gpu", label: "GPU Rental Mechanics", icon: Cpu },
@@ -250,13 +250,13 @@ export default function CompanyDisclosurePage() {
           <button
             key={id}
             onClick={() => setActiveTab(id as "modules" | "gpu" | "tasks")}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-lg transition-all text-sm font-semibold ${
+            className={`flex items-center gap-1 md:gap-2 px-2.5 md:px-4 py-2 md:py-2.5 rounded-lg transition-all text-xs md:text-sm font-semibold whitespace-nowrap ${
               activeTab === id
                 ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20"
                 : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
             }`}
           >
-            <Icon size={16} /> {label}
+            <Icon size={14} className="md:block" /> <span className="hidden sm:inline">{label}</span><span className="sm:hidden">{label.split(" ")[0]}</span>
           </button>
         ))}
       </div>

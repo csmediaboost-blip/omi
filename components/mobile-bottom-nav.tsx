@@ -58,11 +58,6 @@ const MORE_SECTIONS = [
     title: "Account",
     items: [
       { label: "Network", href: "/dashboard/network", icon: Users },
-      {
-        label: "company-disclosure",
-        href: "/dashboard/company-disclosure",
-        icon: BookOpen,
-      },
       { label: "Settings", href: "/dashboard/settings", icon: Settings },
     ],
   },
