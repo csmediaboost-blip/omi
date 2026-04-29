@@ -47,6 +47,10 @@ async function savePushToken(token: string): Promise<void> {
 
 // ── Main component ─────────────────────────────────────────────────────────
 export default function PWAInstallBanner() {
+  // PWA install moved to mobile menu (mobile-bottom-nav.tsx)
+  // This component now only handles service worker registration and push notifications
+  // Banner functionality disabled in favor of menu-based install
+  
   const [installEvent, setInstallEvent] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [showInstall, setShowInstall] = useState(false);
@@ -187,16 +191,9 @@ export default function PWAInstallBanner() {
     localStorage.setItem("notif_dismissed", "1");
   };
 
-  // Check if mobile device
-  const [isMobile, setIsMobile] = useState(false);
-  useEffect(() => {
-    const checkMobile = /iPhone|iPad|iPod|Android|webOS|BlackBerry/i.test(navigator.userAgent);
-    setIsMobile(checkMobile);
-    console.log("[v0] Device type check: mobile=" + checkMobile);
-  }, []);
-
-  // Nothing to show, or show install only on mobile
-  if ((!showInstall || installDone || !isMobile) && (!showNotif || notifDone)) return null;
+  // PWA install banner disabled - moved to mobile menu
+  // Return null to prevent rendering the banner
+  if (true) return null;
 
   return (
     <div 

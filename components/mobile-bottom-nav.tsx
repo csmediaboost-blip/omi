@@ -19,8 +19,10 @@ import {
   HelpCircle,
   Receipt,
   Building2,
+  Download,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import Image from "next/image";
 
 const PRIMARY_NAV = [
   { label: "Home", href: "/dashboard", icon: Home },
@@ -63,13 +65,58 @@ const MORE_SECTIONS = [
   },
 ];
 
+// PWA Install section (mobile only)
+const PWA_SECTION = {
+  title: "Install App",
+  items: [
+    { label: "Add to Home Screen", id: "pwa-install", icon: Download },
+  ],
+};
+
 const ALL_MORE_HREFS = MORE_SECTIONS.flatMap((s) => s.items.map((i) => i.href));
 
 const HIDDEN_ON = ["/dashboard/checkout", "/auth"];
 
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
 export default function MobileBottomNav() {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
+  const [installEvent, setInstallEvent] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
+  const [showPWA, setShowPWA] = useState(false);
+
+  // Check if mobile and capture install prompt
+  useEffect(() => {
+    const checkMobile = /iPhone|iPad|iPod|Android|webOS|BlackBerry/i.test(navigator.userAgent);
+    setIsMobile(checkMobile);
+
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setInstallEvent(e as BeforeInstallPromptEvent);
+      setShowPWA(true);
+    };
+
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  const handleInstallPWA = async () => {
+    if (!installEvent) return;
+    try {
+      await installEvent.prompt();
+      const { outcome } = await installEvent.userChoice;
+      console.log("[v0] PWA install outcome:", outcome);
+      setInstallEvent(null);
+      setShowPWA(false);
+      setMoreOpen(false);
+    } catch (error) {
+      console.error("[v0] PWA install error:", error);
+    }
+  };
 
   const shouldHide =
     !pathname.startsWith("/dashboard") ||
@@ -113,6 +160,34 @@ export default function MobileBottomNav() {
 
           {/* Sections — overflow-y-auto here, NOT on the parent */}
           <div className="p-3 space-y-4 overflow-y-auto" style={{ maxHeight: "65vh" }}>
+            {/* PWA Install Section (Mobile Only) */}
+            {isMobile && showPWA && installEvent && (
+              <div>
+                <p className="text-[9px] font-bold uppercase tracking-widest px-1 mb-2 text-slate-500">
+                  {PWA_SECTION.title}
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    onClick={handleInstallPWA}
+                    className="flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl transition-all bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 active:scale-95"
+                  >
+                    <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-emerald-500/15">
+                      <Image
+                        src="/logo-main.png"
+                        alt="OmniTask"
+                        width={20}
+                        height={20}
+                        className="w-5 h-5"
+                      />
+                    </div>
+                    <span className="text-[10px] font-medium text-center leading-tight text-emerald-400">
+                      Install App
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {MORE_SECTIONS.map(({ title, items }) => (
               <div key={title}>
                 <p className="text-[9px] font-bold uppercase tracking-widest px-1 mb-2 text-slate-500">
