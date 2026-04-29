@@ -263,7 +263,7 @@ export default function CompanyDisclosurePage() {
 
       {/* ── MODULES TAB ── */}
       {activeTab === "modules" && (
-        <div className="grid lg:grid-cols-3 gap-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 md:gap-5">
           {modules.map((mod) => {
             const locked = isTierLocked(mod.tier_required);
             const completed = isCompleted(mod.id);
@@ -283,13 +283,13 @@ export default function CompanyDisclosurePage() {
                 <div
                   className={`absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r ${TIER_COLORS[mod.tier_required as keyof typeof TIER_COLORS] || "from-slate-700 to-slate-600"}`}
                 />
-                <div className="p-6 space-y-4">
+                <div className="p-4 md:p-6 space-y-2 md:space-y-4">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
-                      <h3 className="font-bold text-white text-base leading-snug mb-1">
+                      <h3 className="font-bold text-white text-sm md:text-base leading-snug mb-1">
                         {mod.title}
                       </h3>
-                      <p className="text-slate-500 text-xs">
+                      <p className="text-slate-500 text-xs leading-relaxed">
                         {mod.description}
                       </p>
                     </div>
@@ -352,18 +352,17 @@ export default function CompanyDisclosurePage() {
 
       {/* ── GPU TAB ── */}
       {activeTab === "gpu" && (
-        <div className="space-y-5">
-          <div className="grid lg:grid-cols-2 gap-5">
-            <Card className="bg-gradient-to-br from-blue-950/50 to-slate-900/60 border border-blue-900/40 rounded-2xl p-8">
+        <div className="space-y-3 md:space-y-5">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-5">
+            <Card className="bg-gradient-to-br from-blue-950/50 to-slate-900/60 border border-blue-900/40 rounded-2xl p-4 md:p-8">
               <div className="flex items-center gap-3 mb-6">
                 <div className="w-12 h-12 bg-blue-600/15 border border-blue-500/20 rounded-xl flex items-center justify-center">
                   <Cpu size={22} className="text-blue-400" />
                 </div>
-                <h2 className="text-2xl font-bold text-white">
+                <h2 className="text-lg md:text-2xl font-bold text-white">
                   GPU Rental Economics
                 </h2>
-              </div>
-              <div className="space-y-5">
+              <div className="space-y-3 md:space-y-5">
                 <div>
                   <h3 className="font-semibold text-blue-300 mb-2">
                     What is GPU Rental?
@@ -468,7 +467,7 @@ export default function CompanyDisclosurePage() {
             <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
               <Shield size={22} className="text-blue-400" /> Fair Pricing Model
             </h2>
-            <div className="grid md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 md:gap-6">
               {[
                 ["Your Cut", "70%", "of task revenue goes directly to you"],
                 ["Platform Fee", "20%", "covers infrastructure & matching"],
@@ -498,7 +497,7 @@ export default function CompanyDisclosurePage() {
       {/* ── TASKS TAB ── */}
       {activeTab === "tasks" && (
         <div className="space-y-5">
-          <div className="grid lg:grid-cols-2 gap-5">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-5">
             <Card className="bg-gradient-to-br from-slate-900/60 to-blue-950/50 border border-slate-800/60 rounded-2xl p-8">
               <div className="flex items-center gap-3 mb-6">
                 <div className="w-12 h-12 bg-blue-600/15 border border-blue-500/20 rounded-xl flex items-center justify-center">
@@ -612,7 +611,7 @@ export default function CompanyDisclosurePage() {
             <h2 className="text-2xl font-bold text-white mb-6">
               Task Lifecycle & Earning Flow
             </h2>
-            <div className="grid md:grid-cols-5 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 md:gap-4">
               {[
                 {
                   num: "1",
@@ -673,7 +672,7 @@ export default function CompanyDisclosurePage() {
               <AlertCircle size={22} className="text-blue-400" />
               Pro Strategies for Maximum Task Volume
             </h2>
-            <div className="grid md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-6">
               <div>
                 <h3 className="font-semibold text-blue-300 mb-3">
                   Infrastructure Setup
