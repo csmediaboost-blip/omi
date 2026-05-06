@@ -1,5 +1,4 @@
 // app/api/korapay/checkout/route.ts
-// Initiates KoraPay checkout session
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
@@ -16,17 +15,15 @@ function getSupabaseAdmin() {
   );
 }
 
-// ── Currency → minor-unit multiplier ──────────────────────────
-// KoraPay expects amounts in the SMALLEST unit of the currency.
-// NGN, KES, GHS, TZS, XAF, XOF, EGP → kobo / cents / pesewas etc.
-// Most African currencies use 100 subunits, TZS uses 100 too.
+// KoraPay expects amounts in MINOR units for most currencies
+// XAF and XOF have no subunits — send whole numbers
 const MINOR_UNIT_MULTIPLIER: Record<string, number> = {
   NGN: 100,
   KES: 100,
   GHS: 100,
   ZAR: 100,
-  XAF: 1, // XAF has no subunit — KoraPay accepts whole units
-  XOF: 1, // same
+  XAF: 1,
+  XOF: 1,
   EGP: 100,
   TZS: 100,
   USD: 100,
@@ -37,7 +34,6 @@ function toMinorUnits(amount: number, currency: string): number {
   return Math.round(amount * multiplier);
 }
 
-// ── Derive currency from country code (fallback) ──────────────
 function currencyForCountry(countryCode: string): string {
   const map: Record<string, string> = {
     NG: "NGN",
@@ -49,21 +45,21 @@ function currencyForCountry(countryCode: string): string {
     EG: "EGP",
     TZ: "TZS",
   };
-  return map[countryCode] ?? "USD";
+  return map[countryCode] ?? "NGN";
 }
 
 export async function POST(req: NextRequest) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
-
     const body = await req.json();
+
     const {
       userId,
       phone,
       nodeKey,
       nodeName,
-      price, // converted local-currency amount (e.g. 766000 NGN)
-      originalPrice, // USD amount (e.g. 1000)
+      price,
+      originalPrice,
       currency: rawCurrency,
       daily,
       gpu,
@@ -83,7 +79,7 @@ export async function POST(req: NextRequest) {
       countryName,
     } = body;
 
-    console.log("[korapay] checkout request:", {
+    console.log("[korapay] Request:", {
       userId,
       price,
       rawCurrency,
@@ -91,20 +87,17 @@ export async function POST(req: NextRequest) {
       originalPrice,
     });
 
-    // ── Guard: userId must be present ─────────────────────────
     if (!userId) {
       return NextResponse.json({ error: "Missing userId" }, { status: 400 });
     }
 
-    // ── Resolve currency — FIX: was using broken ternary ──────
-    // Always use the currency passed from the frontend; fall back
-    // to deriving it from countryCode; last resort USD.
+    // ── Resolve currency ──────────────────────────────────────
     const currency: string =
-      rawCurrency && rawCurrency !== "USD" && rawCurrency !== ""
+      rawCurrency && rawCurrency !== "" && rawCurrency !== "USD"
         ? rawCurrency
         : currencyForCountry(countryCode);
 
-    // ── Validate USD limit ─────────────────────────────────────
+    // ── Validate limit ────────────────────────────────────────
     if (originalPrice > 10000) {
       return NextResponse.json(
         {
@@ -115,22 +108,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Sanitise phone ─────────────────────────────────────────
-    let finalPhone = (phone || "").trim();
-    if (!finalPhone || finalPhone.length < 10) {
-      // Build a numeric fallback from userId — never null
-      finalPhone = userId
-        .replace(/[^0-9]/g, "")
-        .padEnd(11, "0")
-        .slice(0, 11);
-    }
-    // Strip non-numeric except leading +
-    finalPhone = finalPhone.replace(/[^0-9+]/g, "");
-    if (finalPhone.length < 10) {
-      finalPhone = finalPhone.padEnd(10, "0");
-    }
-
-    // ── Load KoraPay key from payment_config ──────────────────
+    // ── Load KoraPay key ──────────────────────────────────────
     const { data: configData } = await supabaseAdmin
       .from("payment_config")
       .select("key, value");
@@ -154,21 +132,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Load user email ────────────────────────────────────────
+    // ── Load user ─────────────────────────────────────────────
     const { data: user } = await supabaseAdmin
       .from("users")
       .select("email, full_name")
       .eq("id", userId)
       .single();
 
-    const customerEmail =
-      user?.email || cfg.support_email || "noreply@omnitaskpro.online";
+    const customerEmail = user?.email || "noreply@omnitaskpro.online";
     const customerName = user?.full_name || "OmniTask User";
 
-    // ── Build reference ────────────────────────────────────────
+    // ── Build reference ───────────────────────────────────────
     const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 
-    // ── Insert pending transaction ─────────────────────────────
+    // ── Insert pending transaction ────────────────────────────
     const { data: txn, error: txnErr } = await supabaseAdmin
       .from("payment_transactions")
       .insert({
@@ -185,7 +162,6 @@ export async function POST(req: NextRequest) {
         metadata: {
           gateway: "korapay",
           externalId,
-          phone: finalPhone,
           countryCode,
           countryName,
           currency,
@@ -215,24 +191,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: txnErr.message }, { status: 500 });
     }
 
-    // ── Compute amount in minor units ──────────────────────────
-    // FIX: always use the correct multiplier per currency
+    // ── Compute amount in minor units ─────────────────────────
     const amountInMinorUnits = toMinorUnits(price, currency);
 
-    console.log("[korapay] Sending to KoraPay:", {
+    // ── Build KoraPay customer object ─────────────────────────
+    // Phone is OPTIONAL in KoraPay — only include if user provided one
+    const customerObj: Record<string, string> = {
+      name: customerName,
+      email: customerEmail,
+    };
+
+    // Only add phone if user provided a valid one (7+ digits)
+    const cleanPhone = (phone || "").replace(/[^0-9+]/g, "");
+    if (cleanPhone.length >= 7) {
+      customerObj.phone = cleanPhone;
+    }
+
+    const appUrl =
+      process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online";
+
+    console.log("[korapay] Sending:", {
       reference: externalId,
       amount: amountInMinorUnits,
       currency,
       email: customerEmail,
+      appUrl,
     });
 
-    // ── Call KoraPay initialize endpoint ──────────────────────
+    // ── Call KoraPay ──────────────────────────────────────────
     try {
-      const appUrl =
-        process.env.NEXT_PUBLIC_APP_URL || process.env.VERCEL_URL
-          ? `https://${process.env.VERCEL_URL}`
-          : "https://omnitaskpro.online";
-
       const koraRes = await fetch(
         "https://api.korapay.com/merchant/api/v1/charges/initialize",
         {
@@ -244,15 +231,11 @@ export async function POST(req: NextRequest) {
           body: JSON.stringify({
             reference: externalId,
             amount: amountInMinorUnits,
-            currency, // ← FIX: now always correct
-            customer: {
-              name: customerName,
-              email: customerEmail, // ← required by KoraPay
-              phone: finalPhone,
-            },
+            currency,
+            customer: customerObj,
             notification_url: `${appUrl}/api/korapay/webhook`,
             redirect_url: `${appUrl}/api/korapay/callback?reference=${externalId}&userId=${userId}`,
-            channels: ["card", "bank_transfer", "mobile_money"], // allow all
+            channels: ["card", "bank_transfer", "mobile_money"],
             metadata: {
               userId,
               nodeKey,
@@ -272,33 +255,31 @@ export async function POST(req: NextRequest) {
       );
 
       const koraData = await koraRes.json();
-      console.log("[korapay] API response status:", koraRes.status);
-      console.log("[korapay] API response body:", JSON.stringify(koraData));
+      console.log("[korapay] Response status:", koraRes.status);
+      console.log("[korapay] Response body:", JSON.stringify(koraData));
 
       if (!koraRes.ok || !koraData.data?.checkout_url) {
-        console.error("[korapay] Initialization failed:", koraData);
+        console.error("[korapay] Failed:", koraData);
 
-        // Mark transaction failed
         await supabaseAdmin
           .from("payment_transactions")
           .update({
             status: "failed",
-            failure_reason: koraData.message || "KoraPay initialization failed",
+            failure_reason: koraData.message || "Initialization failed",
             updated_at: new Date().toISOString(),
           })
           .eq("id", txn.id);
 
+        // Return the EXACT error from KoraPay so we can show it to user
         return NextResponse.json(
           {
             error:
-              koraData.message ||
-              "Failed to initialize payment. Please try again.",
+              koraData.message || "Payment gateway error. Please try again.",
           },
           { status: 500 },
         );
       }
 
-      // ── Store checkout URL ─────────────────────────────────
       await supabaseAdmin
         .from("payment_transactions")
         .update({
@@ -315,7 +296,6 @@ export async function POST(req: NextRequest) {
       });
     } catch (err: any) {
       console.error("[korapay] API call error:", err);
-
       await supabaseAdmin
         .from("payment_transactions")
         .update({
