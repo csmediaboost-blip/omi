@@ -3,7 +3,13 @@
 // Global PWA install state management
 // Used by both PWAInstallBanner and mobile-bottom-nav components
 
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  ReactNode,
+} from "react";
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -27,7 +33,8 @@ const PWAContext = createContext<PWAContextType>({
 });
 
 export function PWAProvider({ children }: { children: ReactNode }) {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [deferredPrompt, setDeferredPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
   const [canInstall, setCanInstall] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
@@ -64,9 +71,12 @@ export function PWAProvider({ children }: { children: ReactNode }) {
 
     // On desktop or if no beforeinstallprompt in 3 seconds, allow install via other means
     const timer = setTimeout(() => {
-      if (!deferredPrompt && !window.matchMedia("(display-mode: standalone)").matches) {
+      if (
+        !deferredPrompt &&
+        !window.matchMedia("(display-mode: standalone)").matches
+      ) {
         // Even without beforeinstallprompt, user can install PWA
-        console.log("[PWA] No beforeinstallprompt detected, enabling fallback install");
+        console.log("[PWA] No  detected, enabling fallback install");
         setCanInstall(true);
       }
     }, 3000);
@@ -85,14 +95,20 @@ export function PWAProvider({ children }: { children: ReactNode }) {
 
     return () => {
       clearTimeout(timer);
-      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener(
+        "beforeinstallprompt",
+        handleBeforeInstallPrompt,
+      );
       window.removeEventListener("appinstalled", handleAppInstalled);
     };
   }, []);
 
   const handleInstall = async () => {
-    console.log("[PWA] Install handler called, has deferred prompt:", !!deferredPrompt);
-    
+    console.log(
+      "[PWA] Install handler called, has deferred prompt:",
+      !!deferredPrompt,
+    );
+
     try {
       setIsInstalling(true);
 
@@ -101,9 +117,9 @@ export function PWAProvider({ children }: { children: ReactNode }) {
         console.log("[PWA] Auto-triggering beforeinstallprompt for Android");
         await deferredPrompt.prompt();
         const { outcome } = await deferredPrompt.userChoice;
-        
+
         console.log("[PWA] Install prompt outcome:", outcome);
-        
+
         if (outcome === "accepted") {
           console.log("[PWA] User accepted installation");
           setDeferredPrompt(null);
@@ -120,8 +136,9 @@ export function PWAProvider({ children }: { children: ReactNode }) {
       else if (isIOS) {
         console.log("[PWA] iOS detected, initiating home screen add");
         const userAgent = navigator.userAgent.toLowerCase();
-        const isSafari = /safari/.test(userAgent) && !/chrome|crios|firefox/.test(userAgent);
-        
+        const isSafari =
+          /safari/.test(userAgent) && !/chrome|crios|firefox/.test(userAgent);
+
         if (isSafari) {
           // For Safari on iOS, trigger the share sheet
           try {
@@ -136,7 +153,9 @@ export function PWAProvider({ children }: { children: ReactNode }) {
               setTimeout(() => setCanInstall(false), 1500);
             } else {
               // Fallback: show direct instructions
-              alert("To install OmniTask Pro on iOS:\n\n1. Tap Share (box with arrow)\n2. Tap 'Add to Home Screen'\n3. Tap 'Add'");
+              alert(
+                "To install OmniTask Pro on iOS:\n\n1. Tap Share (box with arrow)\n2. Tap 'Add to Home Screen'\n3. Tap 'Add'",
+              );
               setIsInstalling(false);
             }
           } catch (err) {
@@ -145,7 +164,9 @@ export function PWAProvider({ children }: { children: ReactNode }) {
           }
         } else {
           // Chrome/Firefox on iOS - show native instructions
-          alert("To install OmniTask Pro on iOS:\n\n1. Tap the browser menu (⋮)\n2. Select 'Add to Home Screen'\n3. Tap 'Add'");
+          alert(
+            "To install OmniTask Pro on iOS:\n\n1. Tap the browser menu (⋮)\n2. Select 'Add to Home Screen'\n3. Tap 'Add'",
+          );
           setIsInstalling(false);
         }
       }
@@ -157,13 +178,13 @@ export function PWAProvider({ children }: { children: ReactNode }) {
         const desktopTimeout = setTimeout(() => {
           alert(
             "To install OmniTask Pro:\n\n" +
-            "Chrome/Edge: Click the install icon in the address bar\n" +
-            "Firefox: Click the install icon in the address bar\n" +
-            "Safari: File → Add to Dock"
+              "Chrome/Edge: Click the install icon in the address bar\n" +
+              "Firefox: Click the install icon in the address bar\n" +
+              "Safari: File → Add to Dock",
           );
           setIsInstalling(false);
         }, 2500);
-        
+
         // Clean up timeout if prompt comes through
         return () => clearTimeout(desktopTimeout);
       }
@@ -174,7 +195,9 @@ export function PWAProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <PWAContext.Provider value={{ deferredPrompt, isInstalling, canInstall, isIOS, handleInstall }}>
+    <PWAContext.Provider
+      value={{ deferredPrompt, isInstalling, canInstall, isIOS, handleInstall }}
+    >
       {children}
     </PWAContext.Provider>
   );

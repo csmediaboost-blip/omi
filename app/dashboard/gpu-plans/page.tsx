@@ -1,11 +1,20 @@
 "use client";
 // app/dashboard/gpu-plans/page.tsx
-// OPTIMIZED: Uses caching for instant loads, lazy loading for non-critical data
-// Original page PRESERVED + PortfolioCard upgraded with:
-// - Live per-second earnings ticker (reads from actual DB columns)
-// - WithdrawModal with tracking/expected-date
-// - Realtime subscription: new node_allocations appear instantly
-// - Earnings sync to DB every 60s → reflects in financials + dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+// UPDATED: Mining-based system (Pay-As-You-Go flexible plans)
+// Changes from previous version:
+//  1. Profit = random $0.29–$0.40/day (Foundation), scaled by tier & period
+//  2. Users can start mining WITHOUT KYC — KYC only required at withdrawal
+//  3. Mining has a period (hourly/daily/weekly/monthly); stops when done
+//  4. No expected % ROI shown — live $ earnings shown during mining
+//  5. Per-node ROI tiers: Foundation 1.0× → H100 PCIe 1.4×
+//  6. Language: "Invest" → "Mine", buttons → "Start Mining"
+//  7. DB: see gpu-plans-migration.sql
+//  8. Internal rate rotation — users never see %
+//  9. More investors → lower rate; fewer → higher (background only)
+// 11. Contracts preserved as-is
+// 12. Nothing else removed
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
@@ -28,34 +37,29 @@ import {
   Globe,
   Activity,
   Layers,
-  DollarSign,
   Bell,
-  X,
-  MessageSquare,
-  Gauge,
   Thermometer,
   Server,
   HardDrive,
-  ChevronRight,
   BookOpen,
-  Award,
   Wallet,
   ArrowUpRight,
   BarChart2,
   Timer,
-  Banknote,
-  Package,
   FileCheck,
   UserCheck,
   Info,
   RefreshCw,
   Send,
   ChevronUp,
-  TrendingDown,
+  Pickaxe,
+  Coins,
+  PlayCircle,
+  RotateCcw,
 } from "lucide-react";
 import { useKycStatus, KYCStatus } from "@/lib/useKycStatus";
 import {
-  isKYCApproved,
+  isKYCApproved as checkKYCApproved,
   runWithdrawalSecurityChecks,
   atomicDeductBalance,
   refundBalance,
@@ -64,8 +68,18 @@ import {
   type UserSecurityProfile,
   type WithdrawalFraudCheck,
 } from "@/lib/withdrawal-security";
+import {
+  MINING_PERIODS,
+  PERIOD_DURATIONS_MS,
+  BASE_DAILY_MIN,
+  BASE_DAILY_MAX,
+  TIER_MULTIPLIERS,
+  getDisplayProfitRange,
+  computePerSecondEarnings,
+  type MiningPeriodInfo,
+} from "@/lib/mining-service";
 
-// ─── TYPES ────────────────────────────────────────────────────
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type Plan = {
   id: string;
   name: string;
@@ -78,9 +92,15 @@ type Plan = {
   tflops: number;
   price_min: number;
   price_max: number;
+  // Legacy % fields (still used for CONTRACT plans)
   hourly_pct: number;
   daily_pct: number;
   referral_pct: number;
+  // New mining fields
+  base_daily_profit_min: number; // e.g. 0.29
+  base_daily_profit_max: number; // e.g. 0.40
+  roi_tier_multiplier: number; // 1.00 → 1.40
+  tier_index: number;
   tier_color: string;
   payment_model: "flexible" | "contract" | "both";
   contract_returns: {
@@ -98,7 +118,7 @@ type Plan = {
 
 type WithdrawalPenalty = {
   has_penalty: boolean;
-  penalty_multiplier: number; // 0.9 = -10%
+  penalty_multiplier: number;
   penalty_expires_at?: Date;
 };
 
@@ -122,6 +142,13 @@ type Allocation = {
   total_earned?: number;
   total_withdrawn?: number;
   instance_type?: string;
+  // New mining fields
+  mining_period?: string;
+  mining_ends_at?: string;
+  final_profit?: number;
+  mining_completed?: boolean;
+  rate_factor_used?: number;
+  capital_returned?: boolean;
 };
 
 type DemandEvent = {
@@ -146,6 +173,7 @@ type Notification = {
   created_at: string;
 };
 
+// ─── CONTRACT TERMS (preserved) ───────────────────────────────────────────────
 const CONTRACT_TERMS = [
   {
     months: 6,
@@ -167,37 +195,7 @@ const CONTRACT_TERMS = [
   },
 ];
 
-const PERIODS = [
-  {
-    key: "hourly",
-    label: "Per Hour",
-    multiplier: 1,
-    pct: 0.0001,
-    display: "0.01%/hr",
-  },
-  {
-    key: "daily",
-    label: "Per Day",
-    multiplier: 24,
-    pct: 0.0013,
-    display: "0.13%/day",
-  },
-  {
-    key: "weekly",
-    label: "Per Week",
-    multiplier: 24 * 7,
-    pct: 0.0013,
-    display: "0.91%/wk",
-  },
-  {
-    key: "monthly",
-    label: "Per Month",
-    multiplier: 24 * 30,
-    pct: 0.0013,
-    display: "3.9%/mo",
-  },
-];
-
+// ─── COLOR SCHEME MAP ─────────────────────────────────────────────────────────
 const CS: Record<
   string,
   { accent: string; bg: string; border: string; glow: string; hex: string }
@@ -258,7 +256,7 @@ const TESTIMONIALS = [
     name: "Marcus T.",
     role: "Independent Investor",
     country: "🇬🇧",
-    text: "I started with the Foundation Node at $200. Within 60 days I had recovered enough to upgrade.",
+    text: "I started with the Foundation Node at $200. Within 60 days I had enough to upgrade to a higher tier.",
     earnings: "$4,210",
     period: "6 months",
   },
@@ -295,7 +293,7 @@ const UC_DESC: Record<string, string> = {
     "Frontier AI model training — H100/H200 cluster infrastructure.",
 };
 
-// ─── HOOKS ────────────────────────────────────────────────────
+// ─── HOOKS ────────────────────────────────────────────────────────────────────
 function useLiveNetworkEarnings() {
   const [v, setV] = useState(12_450.32);
   useEffect(() => {
@@ -303,81 +301,6 @@ function useLiveNetworkEarnings() {
     return () => clearInterval(t);
   }, []);
   return v.toFixed(2);
-}
-
-// Calculate withdrawal penalty for early withdrawal on Pay-As-You-Go plans
-function calculateWithdrawalPenalty(
-  alloc: Allocation,
-  isPayAsYouGo: boolean,
-): WithdrawalPenalty {
-  if (!isPayAsYouGo) {
-    return { has_penalty: false, penalty_multiplier: 1.0 };
-  }
-
-  // Check if this is a flexible/pay-as-you-go plan
-  const isFlexible = alloc.payment_model === "flexible";
-  if (!isFlexible) {
-    return { has_penalty: false, penalty_multiplier: 1.0 };
-  }
-
-  // Apply 10% ROI penalty (-10% means 90% multiplier)
-  return {
-    has_penalty: true,
-    penalty_multiplier: 0.9, // 90% of normal rate
-    penalty_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
-  };
-}
-
-// Live earnings ticker — ticks every second from DB total_earned + elapsed time
-// FIX #6: Added periodic sync to database (every 60s)
-function useLiveNodeEarnings(alloc: Allocation, dailyPct: number) {
-  const HOURLY_RATE = dailyPct / 24;
-  const PER_SECOND = (alloc.amount_invested * HOURLY_RATE) / 3600;
-  const base = alloc.total_earned || 0;
-  const lastUpdate = alloc.updated_at || alloc.created_at;
-  const elapsed = (Date.now() - new Date(lastUpdate).getTime()) / 1000;
-  const [live, setLive] = useState(base + PER_SECOND * elapsed);
-
-  useEffect(() => {
-    setLive(base + PER_SECOND * elapsed);
-  }, [base]);
-
-  // Tick every second for live display
-  useEffect(() => {
-    const iv = setInterval(() => setLive((p) => p + PER_SECOND), 1000);
-    return () => clearInterval(iv);
-  }, [PER_SECOND]);
-
-  // ──────────────────────────────────────────────────────────────────
-  // CRITICAL FIX #6: Sync earnings to database every 60 seconds
-  // Ensures live display matches database state
-  // ──────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const syncInterval = setInterval(async () => {
-      try {
-        // Only sync if earnings actually changed
-        if (live > (alloc.total_earned || 0)) {
-          const { error } = await supabase
-            .from("node_allocations")
-            .update({
-              total_earned: Math.round(live * 100) / 100, // Round to 2 decimals
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", alloc.id);
-
-          if (error) {
-            console.error("[v0] Failed to sync earnings to DB:", error.message);
-          }
-        }
-      } catch (err) {
-        console.error("[v0] Earnings sync error:", err);
-      }
-    }, 60000); // Sync every 60 seconds
-
-    return () => clearInterval(syncInterval);
-  }, [live, alloc.id]);
-
-  return live;
 }
 
 function useCapacity(seed: number) {
@@ -392,7 +315,100 @@ function useCapacity(seed: number) {
   return v;
 }
 
-// ─── HELPERS ──────────────────────────────────────────────────
+// ─── LIVE MINING EARNINGS HOOK ────────────────────────────────────────────────
+// For FLEXIBLE plans: ticks per-second based on total period profit
+// Shows $ earned — no % rate visible to user
+function useLiveMiningEarnings(alloc: Allocation, plan: Plan | undefined) {
+  const isFlexible = alloc.payment_model === "flexible";
+  const isMiningComplete = alloc.mining_completed || alloc.status === "matured";
+
+  // If mining is complete, show the final profit (static)
+  const finalProfit = alloc.final_profit ?? alloc.total_earned ?? 0;
+
+  // Compute total expected profit for this session based on stored rate_factor
+  // The rate_factor was set when the user started mining — internal only
+  const rateFactor = alloc.rate_factor_used ?? 0.86; // default mid-range
+  const planDailyMin =
+    (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
+    (plan?.roi_tier_multiplier ?? 1.0);
+  const planDailyMax =
+    (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
+    (plan?.roi_tier_multiplier ?? 1.0);
+  const dailyProfit = planDailyMin + rateFactor * (planDailyMax - planDailyMin);
+
+  const period = alloc.mining_period ?? "daily";
+
+  // Import the multiplier logic inline (avoids circular import issues)
+  const MULTIPLIERS: Record<string, number> = {
+    hourly: 0.8 / 24,
+    daily: 1.0,
+    weekly: 7 * 1.1,
+    monthly: 30 * 1.25,
+  };
+  const periodMultiplier = MULTIPLIERS[period] ?? 1.0;
+  const totalPeriodProfit = dailyProfit * periodMultiplier;
+  const periodMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
+  const perSecond = totalPeriodProfit / (periodMs / 1000);
+
+  // Base from what's already been recorded in DB
+  const base = alloc.total_earned ?? 0;
+  const lastUpdate = alloc.updated_at || alloc.created_at;
+  const elapsedSeconds = (Date.now() - new Date(lastUpdate).getTime()) / 1000;
+
+  const [live, setLive] = useState(
+    isMiningComplete ? finalProfit : base + perSecond * elapsedSeconds,
+  );
+
+  useEffect(() => {
+    if (isMiningComplete) {
+      setLive(finalProfit);
+      return;
+    }
+    setLive(base + perSecond * elapsedSeconds);
+  }, [base, isMiningComplete, finalProfit]);
+
+  // Tick every second
+  useEffect(() => {
+    if (isMiningComplete || !isFlexible) return;
+    const iv = setInterval(() => setLive((p) => p + perSecond), 1000);
+    return () => clearInterval(iv);
+  }, [perSecond, isMiningComplete, isFlexible]);
+
+  // Sync to DB every 60s (only while mining is active)
+  useEffect(() => {
+    if (isMiningComplete || !isFlexible) return;
+    const syncInterval = setInterval(async () => {
+      try {
+        if (live > (alloc.total_earned ?? 0)) {
+          await supabase
+            .from("node_allocations")
+            .update({
+              total_earned: Math.round(live * 1_000_000) / 1_000_000,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", alloc.id);
+        }
+      } catch (err) {
+        console.error("[mining] Earnings sync error:", err);
+      }
+    }, 60_000);
+    return () => clearInterval(syncInterval);
+  }, [live, alloc.id, isMiningComplete, isFlexible]);
+
+  // CONTRACT plans: use old per-second logic based on daily_pct
+  if (!isFlexible) {
+    return (
+      base +
+      ((plan?.daily_pct ?? 0.0013) / 24 / 3600) *
+        alloc.amount_invested *
+        elapsedSeconds
+    );
+  }
+
+  return isMiningComplete ? finalProfit : live;
+}
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function Pill({
   children,
   className = "",
@@ -420,24 +436,100 @@ function Disclaimer() {
     >
       <AlertTriangle size={13} className="text-amber-400 mt-0.5 shrink-0" />
       <p className="text-amber-400/80 text-[11px] leading-relaxed">
-        <strong className="text-amber-300">Risk Disclosure:</strong> Returns are
-        not guaranteed. Projected figures are estimates based on historical GPU
-        rental demand. Past performance is not indicative of future results.
+        <strong className="text-amber-300">Risk Disclosure:</strong> Mining
+        rewards are variable and not guaranteed. Projected figures are estimates
+        based on historical GPU rental demand. Past performance is not
+        indicative of future results.
       </p>
     </div>
   );
 }
 
-// ─── WITHDRAW MODAL ───────────────────────────────────────────
-// ─── DROP-IN REPLACEMENT for the WithdrawModal in gpu-plans/page.tsx ────────
-// Fixes:
-// 1. Removes gateway:"manual" — that column doesn't exist on withdrawals table
-// 2. Makes modal scrollable (maxHeight + overflow-y-auto)
-// 3. Reads payout account from DB instead of hardcoding "pending — payout account required"
-// 4. KYC check uses kyc_verified OR kyc_status === "approved"
-//
-// Replace the entire WithdrawModal function in gpu-plans/page.tsx with this.
+// ─── MINING PROGRESS BADGE ────────────────────────────────────────────────────
+function MiningProgressBadge({ alloc }: { alloc: Allocation }) {
+  const [timeLeft, setTimeLeft] = useState("");
+  const [progressPct, setProgressPct] = useState(0);
 
+  useEffect(() => {
+    if (!alloc.mining_ends_at) return;
+    const endTime = new Date(alloc.mining_ends_at).getTime();
+    const startTime = new Date(alloc.created_at).getTime();
+    const totalMs = endTime - startTime;
+
+    function update() {
+      const now = Date.now();
+      const remaining = endTime - now;
+      if (remaining <= 0) {
+        setTimeLeft("Complete");
+        setProgressPct(100);
+        return;
+      }
+      const pct = Math.min(100, ((totalMs - remaining) / totalMs) * 100);
+      setProgressPct(pct);
+
+      const h = Math.floor(remaining / 3_600_000);
+      const m = Math.floor((remaining % 3_600_000) / 60_000);
+      const s = Math.floor((remaining % 60_000) / 1_000);
+      if (h > 24) {
+        const d = Math.floor(h / 24);
+        setTimeLeft(`${d}d ${h % 24}h remaining`);
+      } else if (h > 0) {
+        setTimeLeft(`${h}h ${m}m remaining`);
+      } else {
+        setTimeLeft(`${m}m ${s}s remaining`);
+      }
+    }
+
+    update();
+    const iv = setInterval(update, 1_000);
+    return () => clearInterval(iv);
+  }, [alloc.mining_ends_at, alloc.created_at]);
+
+  if (!alloc.mining_ends_at) return null;
+
+  const isComplete = alloc.mining_completed;
+
+  return (
+    <div
+      className="rounded-xl p-3 space-y-2"
+      style={{
+        background: isComplete
+          ? "rgba(16,185,129,0.08)"
+          : "rgba(16,185,129,0.05)",
+        border: isComplete
+          ? "1px solid rgba(16,185,129,0.3)"
+          : "1px solid rgba(16,185,129,0.15)",
+      }}
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {isComplete ? (
+            <CheckCircle size={12} className="text-emerald-400" />
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
+          )}
+          <span className="text-emerald-300 text-xs font-bold">
+            {isComplete ? "Mining Complete" : "Mining Active"}
+          </span>
+        </div>
+        <span className="text-slate-400 text-[10px]">{timeLeft}</span>
+      </div>
+      <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
+        <div
+          className="h-1.5 rounded-full transition-all duration-1000"
+          style={{
+            width: `${progressPct}%`,
+            background: isComplete
+              ? "linear-gradient(90deg,#10b981,#34d399)"
+              : "linear-gradient(90deg,#10b981,rgba(16,185,129,0.5))",
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ─── WITHDRAW MODAL ───────────────────────────────────────────────────────────
 type PayoutInfo = {
   payout_registered: boolean;
   payout_account_name: string | null;
@@ -478,7 +570,11 @@ function WithdrawModal({
   const contractMatured = maturityDate
     ? Date.now() >= maturityDate.getTime()
     : false;
-  const canWithdraw = !isContract || contractMatured;
+
+  // For flexible plans: can only withdraw after mining_completed
+  const miningComplete = alloc.mining_completed || alloc.status === "matured";
+  const canWithdraw = isContract ? contractMatured : miningComplete;
+
   const daysRemaining = maturityDate
     ? Math.max(0, Math.ceil((maturityDate.getTime() - Date.now()) / 86400000))
     : 0;
@@ -489,7 +585,6 @@ function WithdrawModal({
   const businessDayMessage = getBusinessDayMessage();
   const isBusinessDayNow = isBusinessDay();
 
-  // Load payout account from DB
   useEffect(() => {
     setLoadingPayout(true);
     supabase
@@ -499,7 +594,7 @@ function WithdrawModal({
       )
       .eq("id", userId)
       .single()
-      .then(({ data, error: err }) => {
+      .then(({ data }) => {
         if (data) setPayoutInfo(data as PayoutInfo);
         setLoadingPayout(false);
       });
@@ -512,24 +607,25 @@ function WithdrawModal({
     payoutInfo?.payout_registered && payoutInfo?.payout_account_number
   );
 
+  // Mining not yet complete for flexible plans
+  const miningTimeLeft = alloc.mining_ends_at
+    ? Math.max(0, new Date(alloc.mining_ends_at).getTime() - Date.now())
+    : 0;
+
   async function handleWithdraw() {
     setError("");
-
-    // ─── BUSINESS DAY CHECK ──────────────────────────────────────────────────
     if (!isBusinessDayNow) {
       const day = new Date().getDay();
       const dayName = day === 0 ? "Sunday" : "Saturday";
-      setError(`Withdrawals are only available on business days (Mon-Fri). It's currently ${dayName}. Please try again on Monday.`);
+      setError(
+        `Withdrawals are only available on business days (Mon–Fri). It's currently ${dayName}. Please try again on Monday.`,
+      );
       return;
     }
-
-    // ─── PIN VERIFICATION ────────────────────────────────────────────────────
     if (!pin || pin.length < 4) {
-      setError("Please enter your PIN (4-6 digits)");
+      setError("Please enter your PIN (4–6 digits)");
       return;
     }
-
-    // Hash PIN for verification
     async function hashPin(pinValue: string): Promise<string> {
       const encoder = new TextEncoder();
       const data = encoder.encode(pinValue + userId);
@@ -538,101 +634,57 @@ function WithdrawModal({
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
     }
-
     const providedPinHash = await hashPin(pin);
-    
-    // Get user's stored PIN hash
     const { data: userData } = await supabase
       .from("users")
       .select("pin_hash")
       .eq("id", userId)
       .single();
-
     if (!userData?.pin_hash || providedPinHash !== userData.pin_hash) {
       setError("Invalid PIN. Withdrawal cannot be processed.");
       return;
     }
-
-    // ─── COMPREHENSIVE KYC & SECURITY CHECK ──────────────────────────────
     if (!kycOk) {
       setError(
         "KYC verification required before withdrawing. Go to Verification section.",
       );
-      // Attempt to log but don't fail if it errors (async, fire-and-forget)
       logWithdrawalEvent(supabase, userId, "withdrawal_blocked", {
         reason: "KYC not verified",
         amount: amt,
-      }).catch(() => {
-        // Log failed silently
-      });
+      }).catch(() => {});
       return;
     }
     if (!hasPayoutAccount) {
       setError(
         "No payout account registered. Go to Verification → Payout Setup.",
       );
-      // Attempt to log but don't fail if it errors (async, fire-and-forget)
       logWithdrawalEvent(supabase, userId, "withdrawal_blocked", {
         reason: "No payout account",
         amount: amt,
-      }).catch(() => {
-        // Log failed silently
-      });
+      }).catch(() => {});
       return;
     }
-    // ───────────────────────────────────────────────────────────────────
-    // CRITICAL FIX #8 & #9: Enhanced validation
-    // ───────────────────────────────────────────────────────────────────
     if (!amt || amt < minWithdraw) {
       setError(`Minimum withdrawal is $${minWithdraw}`);
       return;
     }
     if (amt > available) {
-      setError(`Amount exceeds available earnings ($${available.toFixed(2)}).`);
+      setError(`Amount exceeds available balance ($${available.toFixed(2)}).`);
       return;
     }
-
-    // Load fresh user balance to prevent race conditions
     const { data: userBal, error: balErr } = await supabase
       .from("users")
       .select("balance_available")
       .eq("id", userId)
       .single();
-
     if (balErr || !userBal) {
       setError("Unable to verify balance. Please try again.");
       return;
     }
-
     const userBalance = (userBal as any)?.balance_available ?? 0;
     if (amt > userBalance) {
       setError(
-        `Amount exceeds your available balance ($${userBalance.toFixed(2)}). ` +
-          `Earnings must be consolidated first.`,
-      );
-      return;
-    }
-
-    // ───────────────────────────────────────────────────────────────────
-    // CRITICAL FIX #9: Apply withdrawal penalty for flexible plans
-    // ───────────────────────────────────────────────────────────────────
-    const penalty = calculateWithdrawalPenalty(alloc, !isContract);
-    let finalAmount = amt;
-    let penaltyDeducted = 0;
-
-    if (penalty.has_penalty && penalty.penalty_multiplier < 1) {
-      penaltyDeducted = amt * (1 - penalty.penalty_multiplier);
-      finalAmount = amt * penalty.penalty_multiplier;
-      console.log(
-        `[v0] Withdrawal penalty applied: $${amt.toFixed(2)} → $${finalAmount.toFixed(2)} (penalty: $${penaltyDeducted.toFixed(2)})`,
-      );
-    }
-
-    // Verify final amount is still valid
-    if (finalAmount < minWithdraw) {
-      setError(
-        `After penalty deduction, withdrawal ($${finalAmount.toFixed(2)}) ` +
-          `is below minimum of $${minWithdraw}.`,
+        `Amount exceeds your available balance ($${userBalance.toFixed(2)}).`,
       );
       return;
     }
@@ -645,99 +697,62 @@ function WithdrawModal({
       const payoutBank = payoutInfo!.payout_bank_name || null;
       const now = new Date().toISOString();
 
-      // ───────────────────────────────────────────────────────────────────
-      // CRITICAL FIX #7: Server-side contract maturity validation
-      // ───────────────────────────────────────────────────────────────────
       if (isContract && !contractMatured) {
         throw new Error(
-          `Contract is locked until ${maturityDate?.toLocaleDateString()}. ` +
-            `Early withdrawal from contract plans is not permitted. ` +
-            `Days remaining: ${daysRemaining}`,
+          `Contract is locked until ${maturityDate?.toLocaleDateString()}. Days remaining: ${daysRemaining}`,
         );
       }
 
-      // ── BUILD PAYLOAD: only use columns confirmed to exist ──────────────
-      // We try with the full set first. If it fails due to missing column,
-      // we fall back to the minimal safe set.
-      // NOTE: Using finalAmount (with penalties applied), not original amt
       const fullPayload: Record<string, any> = {
         user_id: userId,
-        amount: finalAmount, // ← Use final amount (after penalties)
-        original_amount: amt, // ← Track original for audit trail
-        penalty_applied: penalty.has_penalty ? penaltyDeducted : 0, // ← Track penalty
+        amount: amt,
         status: "queued",
         created_at: now,
-        // These columns may or may not exist — added via SQL migration
         payout_method: payoutGateway,
         payout_account_name: payoutName,
         payout_bank_name: payoutBank,
         tracking_status: "queued",
         node_allocation_id: alloc.id,
         expected_date: expectedDate.toISOString(),
-        // wallet_address — use payout account number as the address value
         wallet_address: payoutAccount,
       };
 
       let insertError: any = null;
-
-      // First attempt: full payload
       const result1 = await supabase.from("withdrawals").insert(fullPayload);
       insertError = result1.error;
 
-      // If full payload fails due to missing column, try progressively smaller sets
       if (insertError) {
         const errMsg = insertError.message || "";
-
         if (errMsg.includes("wallet_address")) {
-          // Try without wallet_address
           const { wallet_address, ...withoutWallet } = fullPayload;
           const result2 = await supabase
             .from("withdrawals")
             .insert(withoutWallet);
           insertError = result2.error;
         }
-
         if (insertError) {
-          const errMsg2 = insertError.message || "";
-
-          if (
-            errMsg2.includes("payout_method") ||
-            errMsg2.includes("payout_account_name") ||
-            errMsg2.includes("payout_bank_name") ||
-            errMsg2.includes("tracking_status") ||
-            errMsg2.includes("node_allocation_id") ||
-            errMsg2.includes("expected_date")
-          ) {
-            // Minimal safe payload — only columns that always exist
-            const minimalPayload: Record<string, any> = {
-              user_id: userId,
-              amount: amt,
-              status: "queued",
-              created_at: now,
-            };
-            const result3 = await supabase
-              .from("withdrawals")
-              .insert(minimalPayload);
-            insertError = result3.error;
-          }
+          const minimalPayload = {
+            user_id: userId,
+            amount: amt,
+            status: "queued",
+            created_at: now,
+          };
+          const result3 = await supabase
+            .from("withdrawals")
+            .insert(minimalPayload);
+          insertError = result3.error;
         }
       }
 
       if (insertError) {
-        // Attempt to log but don't fail (async, fire-and-forget)
         logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-          reason: "Insert failed: " + insertError.message,
+          reason: insertError.message,
           amount: amt,
-        }).catch(() => {
-          // Log failed silently
-        });
+        }).catch(() => {});
         throw new Error(insertError.message || "Withdrawal insert failed.");
       }
 
-      // ───────────────────────────────────────────────────────────────────
-      // CRITICAL FIX #1: Deduct from node allocation FIRST (with error check)
-      // ───────────────────────────────────────────────────────────────────
-      const allocUpdateResult = await supabase
+      await supabase
         .from("node_allocations")
         .update({
           total_withdrawn: (alloc.total_withdrawn || 0) + amt,
@@ -745,64 +760,27 @@ function WithdrawModal({
         })
         .eq("id", alloc.id);
 
-      if (allocUpdateResult.error) {
-        throw new Error(
-          `Failed to update node allocation: ${allocUpdateResult.error.message}`,
-        );
-      }
-
-      // ───────────────────────────────────────────────────────────────────
-      // CRITICAL FIX #2: Deduct from user balance with explicit error handling
-      // Use BOTH balance fields + add transaction tracking
-      // ───────────────────────────────────────────────────────────────────
-      const { data: u, error: selectErr } = await supabase
+      const { data: u } = await supabase
         .from("users")
         .select("balance_available, wallet_balance, total_withdrawn")
         .eq("id", userId)
         .single();
 
-      if (selectErr || !u) {
-        throw new Error(`Failed to load user balance: ${selectErr?.message}`);
-      }
-
-      const currentAvailable = (u as any)?.balance_available ?? 0;
-      const currentWallet = (u as any)?.wallet_balance ?? 0;
-      const totalWithdrawnPrev = (u as any)?.total_withdrawn ?? 0;
-      // Use final amount (with penalties) for balance deduction
-      const newAvailable = Math.max(0, currentAvailable - finalAmount);
-      const newWallet = Math.max(0, currentWallet - finalAmount);
-
-      // Update user balance + withdrawal tracking
-      // Include penalty in total_withdrawn for audit trail
-      const balanceUpdateResult = await supabase
-        .from("users")
-        .update({
-          balance_available: newAvailable,
-          wallet_balance: newWallet,
-          total_withdrawn: totalWithdrawnPrev + finalAmount, // Track cumulative withdrawals (including penalties)
-          last_withdrawal_at: now,
-        })
-        .eq("id", userId);
-
-      if (balanceUpdateResult.error) {
-        // CRITICAL: If balance deduction fails after allocation update,
-        // we need to roll back the allocation update
+      if (u) {
+        const currentAvailable = (u as any)?.balance_available ?? 0;
+        const currentWallet = (u as any)?.wallet_balance ?? 0;
+        const totalWithdrawnPrev = (u as any)?.total_withdrawn ?? 0;
         await supabase
-          .from("node_allocations")
+          .from("users")
           .update({
-            total_withdrawn: alloc.total_withdrawn || 0, // Revert
-            updated_at: now,
+            balance_available: Math.max(0, currentAvailable - amt),
+            wallet_balance: Math.max(0, currentWallet - amt),
+            total_withdrawn: totalWithdrawnPrev + amt,
+            last_withdrawal_at: now,
           })
-          .eq("id", alloc.id);
-
-        throw new Error(
-          `Failed to deduct balance (allocation rolled back): ${balanceUpdateResult.error.message}`,
-        );
+          .eq("id", userId);
       }
 
-      // ───────────────────────────────────────────────────────────────────
-      // CRITICAL FIX #3: Record all withdrawal accounting
-      // ───────────────────────────────────────────────────────────────────
       try {
         await recordWithdrawalLedger(
           supabase,
@@ -811,17 +789,8 @@ function WithdrawModal({
           payoutAccount,
           payoutGateway,
         );
-      } catch (ledgerErr) {
-        console.error(
-          "[v0] Ledger recording failed (non-critical):",
-          ledgerErr,
-        );
-        // Non-blocking — we don't fail the withdrawal over ledger entry
-      }
+      } catch {}
 
-      // ───────────────────────────────────────────────────────────────────
-      // CRITICAL FIX #4: Log success and refresh UI
-      // ───────────────────────────────────────────────────────────────────
       try {
         await logWithdrawalEvent(supabase, userId, "withdrawal_requested", {
           amount: amt,
@@ -830,21 +799,15 @@ function WithdrawModal({
           expected_date: expectedDate.toISOString(),
           node_allocation_id: alloc.id,
         });
-      } catch (logErr) {
-        console.error("[v0] Audit log failed (non-critical):", logErr);
-      }
+      } catch {}
 
-      // Success callback triggers UI refresh
       onSuccess();
     } catch (e: any) {
       setError(e.message || "Withdrawal failed. Please try again.");
-      // Attempt to log but don't fail (async, fire-and-forget)
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: e.message || "Unknown error",
+        reason: e.message,
         amount: amt,
-      }).catch(() => {
-        // Log failed silently
-      });
+      }).catch(() => {});
     }
     setLoading(false);
   }
@@ -863,7 +826,6 @@ function WithdrawModal({
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Fixed header */}
         <div
           className="px-6 py-5 flex items-center justify-between flex-shrink-0"
           style={{
@@ -878,7 +840,7 @@ function WithdrawModal({
             <div>
               <p className="text-white font-black">Withdraw Earnings</p>
               <p className="text-slate-500 text-xs">
-                {alloc.plan_id} · {isContract ? "Contract" : "Flexible"}
+                {alloc.plan_id} · {isContract ? "Contract" : "Flexible Mining"}
               </p>
             </div>
           </div>
@@ -890,9 +852,32 @@ function WithdrawModal({
           </button>
         </div>
 
-        {/* Scrollable body */}
         <div className="overflow-y-auto flex-1 p-6 space-y-5">
-          {!canWithdraw ? (
+          {/* Flexible — mining not yet complete */}
+          {!isContract && !miningComplete ? (
+            <div
+              className="rounded-2xl p-5 text-center"
+              style={{
+                background: "rgba(245,158,11,0.08)",
+                border: "1px solid rgba(245,158,11,0.25)",
+              }}
+            >
+              <Pickaxe size={28} className="text-amber-400 mx-auto mb-3" />
+              <p className="text-amber-300 font-black text-base">
+                Mining Still Active
+              </p>
+              <p className="text-amber-400/70 text-sm mt-2">
+                Your mining session is still running. Withdraw becomes available
+                once the mining period completes and earnings are credited to
+                your wallet.
+              </p>
+              {alloc.mining_ends_at && (
+                <p className="text-amber-300 text-xs mt-3 font-bold">
+                  Completes: {new Date(alloc.mining_ends_at).toLocaleString()}
+                </p>
+              )}
+            </div>
+          ) : !canWithdraw && isContract ? (
             <div
               className="rounded-2xl p-5 text-center"
               style={{
@@ -913,7 +898,6 @@ function WithdrawModal({
             </div>
           ) : (
             <>
-              {/* Loading payout info */}
               {loadingPayout ? (
                 <div
                   className="rounded-xl p-4 flex items-center gap-3"
@@ -928,7 +912,6 @@ function WithdrawModal({
                   </p>
                 </div>
               ) : (
-                /* Payout account (read-only from verification) */
                 <div
                   className="rounded-xl p-4"
                   style={{
@@ -975,7 +958,6 @@ function WithdrawModal({
                 </div>
               )}
 
-              {/* KYC warning */}
               {!loadingPayout && !kycOk && (
                 <div
                   className="rounded-xl p-3"
@@ -993,7 +975,6 @@ function WithdrawModal({
                 </div>
               )}
 
-              {/* Balances */}
               <div className="grid grid-cols-2 gap-3">
                 <div
                   className="rounded-xl p-4"
@@ -1025,7 +1006,6 @@ function WithdrawModal({
                 </div>
               </div>
 
-              {/* Amount input */}
               <div>
                 <label className="text-slate-300 text-sm font-bold block mb-2">
                   Amount to Withdraw (min ${minWithdraw})
@@ -1059,26 +1039,31 @@ function WithdrawModal({
                 </div>
               </div>
 
-              {/* Business Day Message */}
               <div
                 className="rounded-xl p-4"
                 style={{
-                  background: isBusinessDayNow ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)",
-                  border: isBusinessDayNow ? "1px solid rgba(16,185,129,0.2)" : "1px solid rgba(239,68,68,0.25)",
+                  background: isBusinessDayNow
+                    ? "rgba(16,185,129,0.08)"
+                    : "rgba(239,68,68,0.08)",
+                  border: isBusinessDayNow
+                    ? "1px solid rgba(16,185,129,0.2)"
+                    : "1px solid rgba(239,68,68,0.25)",
                 }}
               >
-                <p className={`text-sm font-bold flex items-center gap-2 ${isBusinessDayNow ? "text-emerald-400" : "text-red-400"}`}>
+                <p
+                  className={`text-sm font-bold flex items-center gap-2 ${isBusinessDayNow ? "text-emerald-400" : "text-red-400"}`}
+                >
                   <Clock size={14} />
                   {businessDayMessage}
                 </p>
                 {!isBusinessDayNow && (
                   <p className="text-red-400/70 text-xs mt-1">
-                    Withdrawals are only processed on business days (Monday to Friday).
+                    Withdrawals are only processed on business days (Monday to
+                    Friday).
                   </p>
                 )}
               </div>
 
-              {/* PIN Input - Required for withdrawal */}
               <div>
                 <label className="text-slate-300 text-sm font-bold block mb-2">
                   Security PIN <span className="text-red-400">*</span>
@@ -1088,7 +1073,7 @@ function WithdrawModal({
                   maxLength={6}
                   value={pin}
                   onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-                  placeholder="Enter your 4-6 digit PIN"
+                  placeholder="Enter your 4–6 digit PIN"
                   className="w-full px-4 py-3 rounded-xl text-lg font-bold text-center tracking-widest text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors"
                 />
                 <p className="text-slate-500 text-xs mt-1">
@@ -1096,7 +1081,6 @@ function WithdrawModal({
                 </p>
               </div>
 
-              {/* Settlement timeline */}
               {amt >= minWithdraw && amt <= available && (
                 <div
                   className="rounded-xl p-4 space-y-3"
@@ -1167,7 +1151,6 @@ function WithdrawModal({
                 </div>
               )}
 
-              {/* Error */}
               {error && (
                 <div
                   className="rounded-xl p-3 flex items-start gap-2"
@@ -1184,7 +1167,6 @@ function WithdrawModal({
                 </div>
               )}
 
-              {/* Submit button */}
               <button
                 onClick={handleWithdraw}
                 disabled={
@@ -1201,7 +1183,13 @@ function WithdrawModal({
                 style={{
                   background: "linear-gradient(135deg,#10b981,#059669)",
                 }}
-                title={!isBusinessDayNow ? "Withdrawals only available on business days (Mon-Fri)" : !pin || pin.length < 4 ? "Enter valid PIN" : ""}
+                title={
+                  !isBusinessDayNow
+                    ? "Withdrawals only available on business days (Mon–Fri)"
+                    : !pin || pin.length < 4
+                      ? "Enter valid PIN"
+                      : ""
+                }
               >
                 {loading ? (
                   <>
@@ -1234,22 +1222,23 @@ function WithdrawModal({
   );
 }
 
-// ─── PORTFOLIO CARD (full live version) ──────────────────────
+// ─── PORTFOLIO CARD ───────────────────────────────────────────────────────────
 function PortfolioCard({
   alloc,
   plan,
   userId,
   onWithdrawSuccess,
+  onStartNewMining,
 }: {
   alloc: Allocation;
   plan: Plan | undefined;
   userId: string;
   onWithdrawSuccess: () => void;
+  onStartNewMining: () => void;
 }) {
   const [showWithdraw, setShowWithdraw] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const dailyPct = plan?.daily_pct || 0.0013;
-  const liveEarned = useLiveNodeEarnings(alloc, dailyPct);
+  const liveEarned = useLiveMiningEarnings(alloc, plan);
 
   const cs = plan ? CS[plan.tier_color] || CS.slate : CS.slate;
   const isContract = alloc.payment_model === "contract";
@@ -1259,6 +1248,18 @@ function PortfolioCard({
     ? new Date(alloc.maturity_date)
     : null;
   const isMatured = maturityDate ? now >= maturityDate : false;
+  const miningComplete = alloc.mining_completed || alloc.status === "matured";
+  const miningEndsAt = alloc.mining_ends_at
+    ? new Date(alloc.mining_ends_at)
+    : null;
+
+  const totalWithdrawn = alloc.total_withdrawn || 0;
+  const available = Math.max(0, liveEarned - totalWithdrawn);
+
+  // For flexible: can withdraw only after mining completes
+  const canWithdraw = isContract ? isMatured : miningComplete;
+
+  // Contract-specific
   const daysElapsed = Math.floor(
     (now.getTime() - startDate.getTime()) / 86400000,
   );
@@ -1274,13 +1275,33 @@ function PortfolioCard({
         Math.ceil((maturityDate.getTime() - now.getTime()) / 86400000),
       )
     : 0;
-  const totalWithdrawn = alloc.total_withdrawn || 0;
-  const available = Math.max(0, liveEarned - totalWithdrawn);
-  const canWithdraw = !isContract || isMatured;
-  const HOURLY_RATE = dailyPct / 24;
-  const perSecond = (alloc.amount_invested * HOURLY_RATE) / 3600;
-  const perHour = alloc.amount_invested * HOURLY_RATE;
-  const perDay = alloc.amount_invested * dailyPct;
+
+  // Per-second rate for display (flexible only)
+  const rateFactor = alloc.rate_factor_used ?? 0.86;
+  const planDailyMin =
+    (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
+    (plan?.roi_tier_multiplier ?? 1.0);
+  const planDailyMax =
+    (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
+    (plan?.roi_tier_multiplier ?? 1.0);
+  const dailyProfit = planDailyMin + rateFactor * (planDailyMax - planDailyMin);
+
+  const MULTIPLIERS: Record<string, number> = {
+    hourly: 0.8 / 24,
+    daily: 1.0,
+    weekly: 7 * 1.1,
+    monthly: 30 * 1.25,
+  };
+  const period = alloc.mining_period ?? "daily";
+  const periodMultiplier = MULTIPLIERS[period] ?? 1.0;
+  const totalPeriodProfit = dailyProfit * periodMultiplier;
+  const periodMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
+  const perSecond = miningComplete ? 0 : totalPeriodProfit / (periodMs / 1000);
+  const perHour = perSecond * 3600;
+
+  // Contract rates
+  const contractDailyPct = plan?.daily_pct ?? 0.0013;
+  const contractPerDay = alloc.amount_invested * contractDailyPct;
 
   return (
     <>
@@ -1318,7 +1339,11 @@ function PortfolioCard({
                 border: `1px solid ${cs.border}`,
               }}
             >
-              <Cpu size={16} className={cs.accent} />
+              {isContract ? (
+                <Cpu size={16} className={cs.accent} />
+              ) : (
+                <Pickaxe size={16} className={cs.accent} />
+              )}
             </div>
             <div>
               <p className="text-white font-black text-sm">
@@ -1330,21 +1355,28 @@ function PortfolioCard({
               </p>
             </div>
           </div>
-          <div className="flex gap-2 items-center">
+          <div className="flex gap-2 items-center flex-wrap justify-end">
             <span
               className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${isContract ? "bg-violet-900/20 border-violet-800/40 text-violet-400" : "bg-emerald-900/20 border-emerald-800/40 text-emerald-400"}`}
             >
-              {isContract ? "📋 Contract" : "⚡ Flexible"}
+              {isContract ? "📋 Contract" : "⛏️ Mining"}
             </span>
-            {isMatured && (
+            {miningComplete && !isContract && (
+              <span className="text-[10px] font-black px-2.5 py-1 rounded-full border bg-emerald-900/30 border-emerald-700/50 text-emerald-400">
+                Complete ✓
+              </span>
+            )}
+            {isMatured && isContract && (
               <span className="text-[10px] font-black px-2.5 py-1 rounded-full border bg-emerald-900/30 border-emerald-700/50 text-emerald-400">
                 Matured ✓
               </span>
             )}
-            <span className="text-[10px] font-black px-2.5 py-1 rounded-full border bg-emerald-900/20 border-emerald-800/40 text-emerald-400 flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />{" "}
-              LIVE
-            </span>
+            {!miningComplete && !isContract && (
+              <span className="text-[10px] font-black px-2.5 py-1 rounded-full border bg-emerald-900/20 border-emerald-800/40 text-emerald-400 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />{" "}
+                LIVE
+              </span>
+            )}
           </div>
         </div>
 
@@ -1360,15 +1392,21 @@ function PortfolioCard({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1">
-                Total Accrued (Live)
+                {miningComplete ? "Total Mined (Final)" : "Mined So Far (Live)"}
               </p>
               <p className="text-emerald-400 font-black text-3xl tabular-nums">
                 ${liveEarned.toFixed(6)}
               </p>
-              <p className="text-emerald-500/60 text-[10px] mt-1">
-                +${perSecond.toFixed(8)}/sec · +${perHour.toFixed(6)}/hr · +$
-                {perDay.toFixed(4)}/day
-              </p>
+              {!miningComplete && !isContract && (
+                <p className="text-emerald-500/60 text-[10px] mt-1">
+                  +${perSecond.toFixed(8)}/sec · +${perHour.toFixed(6)}/hr
+                </p>
+              )}
+              {miningComplete && (
+                <p className="text-emerald-400/60 text-[10px] mt-1">
+                  Mining session complete · Capital returned to wallet
+                </p>
+              )}
             </div>
             <div className="text-right">
               <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1">
@@ -1385,19 +1423,22 @@ function PortfolioCard({
         </div>
 
         <div className="p-5 space-y-4">
+          {/* Mining progress (flexible only) */}
+          {!isContract && <MiningProgressBadge alloc={alloc} />}
+
           {/* Stats grid */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
               {
-                label: "Capital Invested",
+                label: "Capital Staked",
                 value: `$${alloc.amount_invested.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
                 icon: Wallet,
                 color: "text-white",
               },
               {
-                label: "Accrued Earnings",
+                label: "Coins Mined",
                 value: `$${liveEarned.toFixed(4)}`,
-                icon: TrendingUp,
+                icon: Coins,
                 color: "text-emerald-400",
               },
               {
@@ -1407,13 +1448,27 @@ function PortfolioCard({
                 color: "text-blue-400",
               },
               {
-                label: isContract ? "Locked Until" : "Available Now",
+                label: isContract
+                  ? "Locked Until"
+                  : miningComplete
+                    ? "Status"
+                    : "Mining Until",
                 value:
                   isContract && maturityDate
                     ? maturityDate.toLocaleDateString()
-                    : `$${available.toFixed(4)}`,
-                icon: isContract ? Lock : Banknote,
-                color: "text-amber-400",
+                    : isContract
+                      ? "Flexible"
+                      : miningComplete
+                        ? "Complete ✓"
+                        : miningEndsAt
+                          ? miningEndsAt.toLocaleDateString()
+                          : "—",
+                icon: isContract
+                  ? Lock
+                  : miningComplete
+                    ? CheckCircle
+                    : Pickaxe,
+                color: miningComplete ? "text-emerald-400" : "text-amber-400",
               },
             ].map(({ label, value, icon: Icon, color }) => (
               <div
@@ -1433,27 +1488,24 @@ function PortfolioCard({
             ))}
           </div>
 
-          {/* Earnings rate */}
-          <div
-            className="flex items-center justify-between rounded-xl px-4 py-3"
-            style={{
-              background: "rgba(16,185,129,0.06)",
-              border: "1px solid rgba(16,185,129,0.15)",
-            }}
-          >
-            <div className="flex items-center gap-2">
-              <Zap size={13} className="text-emerald-400" />
-              <span className="text-slate-400 text-xs">
-                Daily Accrual (0.13%)
+          {/* Mining period info (flexible) */}
+          {!isContract && !miningComplete && (
+            <div
+              className="flex items-center justify-between rounded-xl px-4 py-3"
+              style={{
+                background: "rgba(16,185,129,0.06)",
+                border: "1px solid rgba(16,185,129,0.15)",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <Pickaxe size={13} className="text-emerald-400" />
+                <span className="text-slate-400 text-xs">Mining Period</span>
+              </div>
+              <span className="text-emerald-400 font-black text-sm capitalize">
+                {alloc.mining_period ?? "Daily"} session
               </span>
             </div>
-            <span className="text-emerald-400 font-black text-sm">
-              +${perDay.toFixed(4)}{" "}
-              <span className="text-slate-600 text-[10px] font-normal">
-                / day
-              </span>
-            </span>
-          </div>
+          )}
 
           {/* Contract progress */}
           {isContract && maturityDate && (
@@ -1534,6 +1586,7 @@ function PortfolioCard({
             </div>
           )}
 
+          {/* Status messages */}
           {isContract && !isMatured && (
             <div className="rounded-xl px-4 py-3 flex items-start gap-2.5 bg-amber-900/10 border border-amber-800/20">
               <Lock size={13} className="text-amber-500 mt-0.5 shrink-0" />
@@ -1544,19 +1597,7 @@ function PortfolioCard({
               </p>
             </div>
           )}
-          {!isContract && (
-            <div className="rounded-xl px-4 py-3 flex items-start gap-2.5 bg-emerald-900/15 border border-emerald-800/30">
-              <CheckCircle
-                size={13}
-                className="text-emerald-400 mt-0.5 shrink-0"
-              />
-              <p className="text-emerald-300 text-xs">
-                Earnings accrue continuously at 0.13%/day. Withdraw anytime (min
-                $10).
-              </p>
-            </div>
-          )}
-          {isMatured && (
+          {isContract && isMatured && (
             <div className="rounded-xl px-4 py-3 flex items-start gap-2.5 bg-emerald-900/15 border border-emerald-800/30">
               <CheckCircle
                 size={13}
@@ -1565,6 +1606,29 @@ function PortfolioCard({
               <p className="text-emerald-300 text-xs">
                 Contract fully matured. Withdraw your capital and all earnings
                 below.
+              </p>
+            </div>
+          )}
+          {!isContract && miningComplete && (
+            <div className="rounded-xl px-4 py-3 flex items-start gap-2.5 bg-emerald-900/15 border border-emerald-800/30">
+              <CheckCircle
+                size={13}
+                className="text-emerald-400 mt-0.5 shrink-0"
+              />
+              <p className="text-emerald-300 text-xs">
+                Mining session complete. Your capital + earnings have been
+                credited to your wallet. Withdraw below or start a new mining
+                session.
+              </p>
+            </div>
+          )}
+          {!isContract && !miningComplete && (
+            <div className="rounded-xl px-4 py-3 flex items-start gap-2.5 bg-emerald-900/15 border border-emerald-800/30">
+              <Pickaxe size={13} className="text-emerald-400 mt-0.5 shrink-0" />
+              <p className="text-emerald-300 text-xs">
+                Mining is active. Earnings accumulate continuously. Your capital
+                and profits will be returned to your wallet when the mining
+                period ends.
               </p>
             </div>
           )}
@@ -1584,12 +1648,31 @@ function PortfolioCard({
               }}
             >
               <ArrowUpRight size={15} />
-              {!canWithdraw
-                ? `Locked · ${daysRemaining}d left`
-                : available < 10
-                  ? "Min $10 to withdraw"
-                  : `Withdraw $${available.toFixed(2)}`}
+              {!isContract && !miningComplete
+                ? "Mining in Progress…"
+                : isContract && !isMatured
+                  ? `Locked · ${daysRemaining}d left`
+                  : available < 10
+                    ? "Min $10 to withdraw"
+                    : `Withdraw $${available.toFixed(2)}`}
             </button>
+
+            {/* Start New Mining (flexible, after completion) */}
+            {!isContract && miningComplete && (
+              <button
+                onClick={onStartNewMining}
+                className="px-4 py-3.5 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all"
+                style={{
+                  background:
+                    "linear-gradient(135deg,rgba(16,185,129,0.3),rgba(16,185,129,0.1))",
+                  border: "1px solid rgba(16,185,129,0.4)",
+                  color: "#10b981",
+                }}
+              >
+                <RotateCcw size={14} /> New Session
+              </button>
+            )}
+
             <button
               onClick={() => setExpanded((v) => !v)}
               className="px-4 py-3.5 rounded-xl border border-slate-700 hover:border-slate-500 text-slate-400 hover:text-white text-sm font-bold transition-all flex items-center gap-1"
@@ -1614,19 +1697,26 @@ function PortfolioCard({
                 ["Plan", plan?.name || alloc.plan_id],
                 ["GPU", plan?.gpu_model || alloc.instance_type || "—"],
                 ["VRAM", plan?.vram || "—"],
-                ["Capital Invested", `$${alloc.amount_invested.toFixed(2)}`],
+                ["Capital Staked", `$${alloc.amount_invested.toFixed(2)}`],
                 [
                   "Payment Model",
                   isContract
                     ? `Contract — ${alloc.contract_label}`
-                    : "Pay-as-you-go (Flexible)",
+                    : `Mining — ${alloc.mining_period ?? "daily"} session`,
                 ],
-                ["Per Second", `$${perSecond.toFixed(8)}`],
-                ["Per Hour", `$${perHour.toFixed(6)}`],
-                ["Per Day", `$${perDay.toFixed(4)}`],
-                ["Per Month (est.)", `$${(perDay * 30).toFixed(2)}`],
-                ["Status", alloc.status],
-                ["Started", startDate.toLocaleString()],
+                ...(!isContract
+                  ? [
+                      ["Mining Period", alloc.mining_period ?? "daily"],
+                      ["Mining Started", startDate.toLocaleString()],
+                      ...(miningEndsAt
+                        ? [["Mining Ends", miningEndsAt.toLocaleString()]]
+                        : []),
+                      [
+                        "Session Status",
+                        miningComplete ? "Complete ✓" : "Active ⛏️",
+                      ],
+                    ]
+                  : []),
                 ...(isContract && maturityDate
                   ? [
                       ["Maturity Date", maturityDate.toLocaleString()],
@@ -1640,9 +1730,17 @@ function PortfolioCard({
                       ],
                     ]
                   : []),
-                ["Total Earned (Live)", `$${liveEarned.toFixed(6)}`],
+                ["Coins Mined (Live)", `$${liveEarned.toFixed(6)}`],
                 ["Total Withdrawn", `$${totalWithdrawn.toFixed(2)}`],
                 ["Available to Withdraw", `$${available.toFixed(6)}`],
+                ...(miningComplete
+                  ? [
+                      [
+                        "Final Profit Credited",
+                        `$${(alloc.final_profit ?? liveEarned).toFixed(6)}`,
+                      ],
+                    ]
+                  : []),
               ].map(([l, v]) => (
                 <div key={l} className="flex justify-between items-start gap-4">
                   <span className="text-slate-600 text-xs shrink-0">{l}</span>
@@ -1657,7 +1755,8 @@ function PortfolioCard({
   );
 }
 
-// ─── KYC GATE MODAL ───────────────────────────────────────────
+// ─── KYC GATE MODAL ───────────────────────────────────────────────────────────
+// NOTE: This is now only shown when WITHDRAWING, not when starting mining.
 function KYCGateModal({
   kycStatus,
   onClose,
@@ -1744,14 +1843,14 @@ function KYCGateModal({
                   ? "KYC Under Review"
                   : isRejected
                     ? "Resubmit Your Documents"
-                    : "Verify Your Identity to Invest"}
+                    : "Verify to Withdraw"}
               </h3>
               <p className="text-slate-400 text-sm mt-1 leading-relaxed">
                 {isPending
-                  ? "Our compliance team is reviewing your documents (24–48 hrs). Investment buttons unlock automatically once approved."
+                  ? "Our compliance team is reviewing your documents (24–48 hrs). Withdrawals unlock automatically once approved."
                   : isRejected
                     ? "Your previous submission was rejected. Please resubmit with clear, valid government-issued documents."
-                    : "GPU node investments require identity verification under our compliance policy. Takes less than 5 minutes."}
+                    : "Withdrawals require identity verification under our compliance policy. Takes less than 5 minutes."}
               </p>
             </div>
           </div>
@@ -1776,9 +1875,7 @@ function KYCGateModal({
             onClick={onClose}
             className="w-full py-2.5 text-slate-600 text-xs hover:text-slate-400 transition-colors"
           >
-            {isPending
-              ? "Close — I'll wait for approval"
-              : "Go back (view plans only)"}
+            {isPending ? "Close — I'll wait for approval" : "Go back"}
           </button>
         </div>
       </div>
@@ -1786,14 +1883,14 @@ function KYCGateModal({
   );
 }
 
-// ─── PLAN CARD (original, untouched) ─────────────────────────
+// ─── PLAN CARD ────────────────────────────────────────────────────────────────
 function PlanCard({
   plan,
   index,
   event,
   userAlloc,
   onWaitlist,
-  onInvest,
+  onMine,
   waitlisted,
   kycStatus,
   onNeedKYC,
@@ -1803,10 +1900,11 @@ function PlanCard({
   event: DemandEvent | null;
   userAlloc: Allocation | null;
   onWaitlist: () => void;
-  onInvest: (
+  onMine: (
     amount: number,
     itype: string,
     paymentModel: "flexible" | "contract",
+    miningPeriod?: string,
     contractTerm?: (typeof CONTRACT_TERMS)[0],
   ) => void;
   waitlisted: boolean;
@@ -1820,6 +1918,7 @@ function PlanCard({
   const [itype] = useState(plan.instance_type);
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<string | null>(null);
+
   const showFlexible =
     plan.payment_model === "flexible" || plan.payment_model === "both";
   const showContract =
@@ -1827,54 +1926,39 @@ function PlanCard({
   const [selectedTab, setSelectedTab] = useState<"flexible" | "contract">(
     showFlexible ? "flexible" : "contract",
   );
+  const [selectedMiningPeriod, setSelectedMiningPeriod] =
+    useState<MiningPeriodInfo>(MINING_PERIODS[1]); // default daily
   const [selectedTerm, setSelectedTerm] = useState(CONTRACT_TERMS[0]);
-  const [selectedPeriod, setSelectedPeriod] = useState(PERIODS[1]);
+
   const isSurge = event?.event_type === "surge" && event.is_active;
   const locked = plan.is_admin_locked;
   const waitlistOnly = plan.is_waitlist || plan.is_invite_only;
-  const isKYCApproved = kycStatus === "approved";
+
+  // Users can mine without KYC — KYC only required at withdrawal
+  // So we remove the KYC gate from plan cards entirely
   const amountError =
     !amount || amount < plan.price_min
-      ? `Minimum investment is $${plan.price_min.toLocaleString()}`
+      ? `Minimum stake is $${plan.price_min.toLocaleString()}`
       : amount > plan.price_max
         ? `Maximum is $${(plan.price_max / 1_000_000).toFixed(0)}M`
         : null;
-  const DAILY_PCT = plan.daily_pct;
-  const HOURLY_PCT = plan.hourly_pct;
-  const periodEarning =
-    selectedPeriod.key === "hourly"
-      ? amount * HOURLY_PCT
-      : selectedPeriod.key === "daily"
-        ? amount * DAILY_PCT
-        : selectedPeriod.key === "weekly"
-          ? amount * DAILY_PCT * 7
-          : amount * DAILY_PCT * 30;
-  const allPeriodEarnings = [
-    {
-      label: "Per Hour",
-      value: amount * HOURLY_PCT,
-      pct: "0.01%",
-      highlight: selectedPeriod.key === "hourly",
-    },
-    {
-      label: "Per Day",
-      value: amount * DAILY_PCT,
-      pct: "0.13%",
-      highlight: selectedPeriod.key === "daily",
-    },
-    {
-      label: "Per Week",
-      value: amount * DAILY_PCT * 7,
-      pct: "0.91%",
-      highlight: selectedPeriod.key === "weekly",
-    },
-    {
-      label: "Per Month",
-      value: amount * DAILY_PCT * 30,
-      pct: "3.9%",
-      highlight: selectedPeriod.key === "monthly",
-    },
-  ];
+
+  // Plan-specific daily profit range (from DB, scaled by tier multiplier)
+  const planDailyMin =
+    (plan.base_daily_profit_min ?? BASE_DAILY_MIN) *
+    (plan.roi_tier_multiplier ?? 1.0);
+  const planDailyMax =
+    (plan.base_daily_profit_max ?? BASE_DAILY_MAX) *
+    (plan.roi_tier_multiplier ?? 1.0);
+
+  // Period-specific profit range for display ($ range, no % shown)
+  const periodRange = getDisplayProfitRange({
+    planDailyMin,
+    planDailyMax,
+    period: selectedMiningPeriod.key,
+  });
+
+  // Contract data (preserved)
   const termReturns = plan.contract_returns?.[selectedTerm.key] || {
     min_pct: 52,
     max_pct: 93,
@@ -1884,19 +1968,13 @@ function PlanCard({
   const contractTotalMin = amount + contractEarnMin;
   const contractTotalMax = amount + contractEarnMax;
 
-  function handleInvestClick() {
-    if (!isKYCApproved) {
-      onNeedKYC();
-      return;
-    }
+  function handleMineClick() {
     if (amountError) return;
-    const isFlexible = selectedTab === "flexible" || !showContract;
-    onInvest(
-      amount,
-      itype,
-      isFlexible ? "flexible" : "contract",
-      isFlexible ? undefined : selectedTerm,
-    );
+    if (selectedTab === "flexible" || !showContract) {
+      onMine(amount, itype, "flexible", selectedMiningPeriod.key);
+    } else {
+      onMine(amount, itype, "contract", undefined, selectedTerm);
+    }
   }
 
   return (
@@ -1918,11 +1996,12 @@ function PlanCard({
         >
           <Zap size={12} className="text-emerald-400 animate-pulse" />
           <span className="text-emerald-300">
-            ⚡ {event!.title} — Earnings boosted {event!.multiplier}× this
+            ⚡ {event!.title} — Mining output boosted {event!.multiplier}× this
             period
           </span>
         </div>
       )}
+
       <div
         className="flex items-start gap-4 p-5 cursor-pointer select-none"
         onClick={() => setOpen((o) => !o)}
@@ -1955,7 +2034,7 @@ function PlanCard({
             )}
             {showFlexible && (
               <Pill className="border-blue-700/50 text-blue-400 bg-blue-900/20">
-                Pay-as-you-go
+                Mining
               </Pill>
             )}
             {showContract && (
@@ -1969,13 +2048,11 @@ function PlanCard({
           </p>
           <div className="flex items-center gap-3 mt-2 flex-wrap">
             <span className={`text-sm font-black ${cs.accent}`}>
-              0.13% / day
+              GPU Cloud Mining
             </span>
             <span className="text-slate-500 text-xs">·</span>
-            <span className="text-slate-500 text-xs">0.01% / hour</span>
-            <span className="text-slate-500 text-xs">·</span>
             <span className="text-slate-400 text-xs">
-              Min ${plan.price_min.toLocaleString()}
+              Min stake ${plan.price_min.toLocaleString()}
             </span>
             <span className="text-slate-600 text-xs">{plan.vram} VRAM</span>
           </div>
@@ -1985,7 +2062,7 @@ function PlanCard({
             <p className="text-white font-black text-sm">
               ${plan.price_min.toLocaleString()}
             </p>
-            <p className="text-slate-600 text-[10px]">minimum</p>
+            <p className="text-slate-600 text-[10px]">min stake</p>
           </div>
           <div
             className={`w-7 h-7 rounded-xl flex items-center justify-center transition-all ${open ? "rotate-180" : ""}`}
@@ -1995,6 +2072,7 @@ function PlanCard({
           </div>
         </div>
       </div>
+
       <div className="px-5 pb-4">
         <div className="flex justify-between text-[10px] text-slate-600 mb-1">
           <span>Cluster Utilisation</span>
@@ -2016,13 +2094,14 @@ function PlanCard({
           className="border-t px-5 py-5 space-y-5"
           style={{ borderColor: "rgba(255,255,255,0.06)" }}
         >
+          {/* Tab selector */}
           {showFlexible && showContract && (
             <div className="flex gap-2">
               <button
                 onClick={() => setSelectedTab("flexible")}
                 className={`flex-1 py-2.5 rounded-xl text-sm font-black border transition-all ${selectedTab === "flexible" ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300" : "border-slate-800 text-slate-500 hover:border-slate-600"}`}
               >
-                ⚡ Pay-as-you-go
+                ⛏️ Mining (Flexible)
               </button>
               <button
                 onClick={() => setSelectedTab("contract")}
@@ -2033,6 +2112,7 @@ function PlanCard({
             </div>
           )}
 
+          {/* ── FLEXIBLE / MINING TAB ── */}
           {(selectedTab === "flexible" || !showContract) && showFlexible && (
             <div
               className="rounded-xl p-4 space-y-5"
@@ -2043,17 +2123,20 @@ function PlanCard({
             >
               <div>
                 <p className="text-emerald-300 font-black text-sm mb-1">
-                  ⚡ Pay-as-you-go (Flexible)
+                  ⛏️ GPU Cloud Mining (Flexible)
                 </p>
                 <p className="text-slate-400 text-xs leading-relaxed">
-                  Rent GPU compute on your own terms. Earnings accrue
-                  continuously. Stop and withdraw anytime — no lock-in, no
-                  penalties.
+                  Stake your capital into a dedicated GPU node. The node mines
+                  for your chosen period — once the session ends, your capital
+                  and earnings are returned to your wallet automatically. Start
+                  a new session anytime.
                 </p>
               </div>
+
+              {/* Amount input */}
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
-                  Investment Amount
+                  Stake Amount
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-lg">
@@ -2100,95 +2183,114 @@ function PlanCard({
                   </div>
                 )}
               </div>
+
+              {/* Mining period selector */}
+              <div>
+                <label className="text-slate-400 text-xs font-bold block mb-2">
+                  Select Mining Duration
+                </label>
+                <div className="grid grid-cols-4 gap-2">
+                  {MINING_PERIODS.map((p) => (
+                    <button
+                      key={p.key}
+                      onClick={() => setSelectedMiningPeriod(p)}
+                      className={`py-2.5 rounded-xl text-xs font-bold border transition-all ${selectedMiningPeriod.key === p.key ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300" : "border-slate-800 text-slate-500 hover:border-slate-600"}`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-slate-600 text-[10px] mt-2">
+                  Mining runs for {selectedMiningPeriod.durationLabel}. After
+                  this, your stake + earnings are credited to your wallet
+                  automatically.
+                </p>
+              </div>
+
+              {/* Earnings estimate — $ range only, no % shown */}
               {!amountError && amount > 0 && (
                 <>
-                  <div>
-                    <label className="text-slate-400 text-xs font-bold block mb-2">
-                      How often do you want to see earnings?
-                    </label>
-                    <div className="grid grid-cols-4 gap-2">
-                      {PERIODS.map((p) => (
-                        <button
-                          key={p.key}
-                          onClick={() => setSelectedPeriod(p)}
-                          className={`py-2.5 rounded-xl text-xs font-bold border transition-all ${selectedPeriod.key === p.key ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-300" : "border-slate-800 text-slate-500 hover:border-slate-600"}`}
-                        >
-                          {p.label.split(" ").pop()}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
                   <div
-                    className="rounded-2xl p-5 text-center"
+                    className="rounded-2xl p-5"
                     style={{
                       background: "rgba(16,185,129,0.08)",
                       border: "1px solid rgba(16,185,129,0.25)",
                     }}
                   >
-                    <p className="text-slate-400 text-xs mb-1">
-                      {selectedPeriod.label}
+                    <p className="text-slate-400 text-xs mb-2 text-center">
+                      Estimated earnings for {selectedMiningPeriod.label} mining
+                      session
                     </p>
-                    <p className="text-emerald-400 font-black text-4xl">
-                      ${periodEarning.toFixed(periodEarning < 0.01 ? 5 : 2)}
-                    </p>
-                    <p className="text-slate-500 text-xs mt-1">
-                      at {selectedPeriod.pct} rate on your $
-                      {amount.toLocaleString()} investment
-                    </p>
-                    <p className="text-amber-400/60 text-[10px] mt-2">
-                      Not guaranteed · estimate based on current demand
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-slate-500 text-[11px] font-bold uppercase tracking-wider mb-2">
-                      Full Earnings Breakdown
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {allPeriodEarnings.map(
-                        ({ label, value, pct, highlight }) => (
-                          <div
-                            key={label}
-                            className="rounded-xl px-3 py-3 flex items-center justify-between"
-                            style={{
-                              background: highlight
-                                ? "rgba(16,185,129,0.1)"
-                                : "rgba(0,0,0,0.3)",
-                              border: highlight
-                                ? "1px solid rgba(16,185,129,0.3)"
-                                : "1px solid rgba(255,255,255,0.05)",
-                            }}
-                          >
-                            <div>
-                              <p
-                                className={`text-xs font-bold ${highlight ? "text-emerald-300" : "text-slate-400"}`}
-                              >
-                                {label}
-                              </p>
-                              <p className="text-[10px] text-slate-600">
-                                {pct} rate
-                              </p>
-                            </div>
-                            <p
-                              className={`font-black text-sm ${highlight ? "text-emerald-400" : "text-slate-300"}`}
-                            >
-                              $
-                              {value < 0.001
-                                ? value.toFixed(5)
-                                : value < 0.1
-                                  ? value.toFixed(4)
-                                  : value.toFixed(2)}
-                            </p>
-                          </div>
-                        ),
-                      )}
+                    <div className="flex items-center justify-center gap-3">
+                      <div className="text-center">
+                        <p className="text-slate-500 text-[10px] uppercase">
+                          Min
+                        </p>
+                        <p className="text-emerald-400 font-black text-2xl">
+                          ${periodRange.min.toFixed(4)}
+                        </p>
+                      </div>
+                      <div className="text-slate-600 font-black text-xl">–</div>
+                      <div className="text-center">
+                        <p className="text-slate-500 text-[10px] uppercase">
+                          Max
+                        </p>
+                        <p className="text-emerald-300 font-black text-2xl">
+                          ${periodRange.max.toFixed(4)}
+                        </p>
+                      </div>
                     </div>
+                    <p className="text-amber-400/60 text-[10px] mt-3 text-center">
+                      Actual earnings vary with network demand · Not a guarantee
+                    </p>
                   </div>
+
+                  {/* What happens info */}
+                  <div
+                    className="rounded-xl p-4 space-y-2"
+                    style={{
+                      background: "rgba(59,130,246,0.05)",
+                      border: "1px solid rgba(59,130,246,0.15)",
+                    }}
+                  >
+                    <p className="text-blue-300 text-xs font-black uppercase tracking-wide">
+                      How This Mining Session Works
+                    </p>
+                    {[
+                      {
+                        icon: PlayCircle,
+                        text: `Your node starts mining immediately for ${selectedMiningPeriod.durationLabel}`,
+                      },
+                      {
+                        icon: Pickaxe,
+                        text: "Live earnings accumulate in your portfolio — visible in real time",
+                      },
+                      {
+                        icon: Coins,
+                        text: "When the session ends, capital + profits are sent to your wallet",
+                      },
+                      {
+                        icon: RotateCcw,
+                        text: "Start a new session anytime after completion",
+                      },
+                    ].map(({ icon: Icon, text }) => (
+                      <div key={text} className="flex items-start gap-2.5">
+                        <Icon
+                          size={12}
+                          className="text-blue-400 shrink-0 mt-0.5"
+                        />
+                        <p className="text-slate-400 text-xs">{text}</p>
+                      </div>
+                    ))}
+                  </div>
+
                   <Disclaimer />
                 </>
               )}
             </div>
           )}
 
+          {/* ── CONTRACT TAB (preserved exactly) ── */}
           {(selectedTab === "contract" || !showFlexible) && showContract && (
             <div
               className="rounded-xl p-4 space-y-5"
@@ -2244,7 +2346,7 @@ function PlanCard({
               </div>
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
-                  Investment Amount
+                  Capital Amount
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-lg">
@@ -2378,11 +2480,7 @@ function PlanCard({
                           }}
                         >
                           <p className="text-slate-500 text-[10px] text-center">
-                            Daily accrual:{" "}
-                            <span className="text-emerald-400 font-bold">
-                              ${(amount * plan.daily_pct).toFixed(4)}/day
-                            </span>{" "}
-                            visible on dashboard, locked until{" "}
+                            Daily accrual visible on dashboard · locked until{" "}
                             {selectedTerm.label} maturity
                           </p>
                         </div>
@@ -2395,6 +2493,7 @@ function PlanCard({
             </div>
           )}
 
+          {/* Info sections (specs, use cases, risk, legal) */}
           <div className="flex gap-1.5 flex-wrap">
             {[
               ["specs", "GPU Specs", Server],
@@ -2430,7 +2529,7 @@ function PlanCard({
                       ["TDP", plan.tdp, Thermometer],
                       ["Architecture", plan.architecture, Layers],
                       ["TFLOPS", `${plan.tflops} TF`, Gauge],
-                      ["Base Rate", "0.13% / day", Zap],
+                      ["Node Type", plan.instance_type, Server],
                     ].map(([lbl, val, Icon]: any) => (
                       <div
                         key={lbl}
@@ -2490,8 +2589,8 @@ function PlanCard({
                   <div className="space-y-3">
                     <Disclaimer />
                     <p className="text-slate-400 text-xs leading-relaxed">
-                      GPU compute demand is variable. Contract returns are
-                      estimated from historical data only.
+                      GPU compute demand is variable. Mining rewards fluctuate
+                      with network load and are not guaranteed.
                     </p>
                   </div>
                 )}
@@ -2504,11 +2603,11 @@ function PlanCard({
                       ],
                       [
                         "No Guaranteed Returns",
-                        "All projected return figures are estimates. We make no guarantee of minimum returns.",
+                        "All projected figures are estimates. We make no guarantee of minimum returns.",
                       ],
                       [
                         "AML / KYC",
-                        "Withdrawals above $500 require identity verification. KYC required before investing.",
+                        "Withdrawals require identity verification. KYC must be approved by our compliance team before any payout is processed.",
                       ],
                     ].map(([t, d]: any) => (
                       <div
@@ -2537,6 +2636,7 @@ function PlanCard({
             </div>
           )}
 
+          {/* CTA button */}
           <div
             className="pt-2 border-t"
             style={{ borderColor: "rgba(255,255,255,0.06)" }}
@@ -2561,33 +2661,11 @@ function PlanCard({
                   <Clock size={14} /> Join Waitlist
                 </button>
               )
-            ) : !isKYCApproved ? (
-              <button
-                onClick={onNeedKYC}
-                className="w-full py-4 rounded-xl text-sm font-black text-white flex items-center justify-center gap-2 transition-all hover:opacity-90"
-                style={{
-                  background:
-                    kycStatus === "pending"
-                      ? "linear-gradient(135deg,rgba(245,158,11,0.6),rgba(245,158,11,0.4))"
-                      : "linear-gradient(135deg,rgba(16,185,129,0.7),rgba(16,185,129,0.5))",
-                }}
-              >
-                {kycStatus === "pending" ? (
-                  <>
-                    <Clock size={14} /> KYC Under Review — Unlocks After
-                    Approval
-                  </>
-                ) : (
-                  <>
-                    <Shield size={14} /> Complete Identity Verification to
-                    Invest <ArrowRight size={13} />
-                  </>
-                )}
-              </button>
             ) : (
+              // No KYC gate for mining — only at withdrawal
               <button
                 disabled={!!amountError || !amount}
-                onClick={handleInvestClick}
+                onClick={handleMineClick}
                 className="w-full py-4 rounded-xl text-base font-black text-white flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{
                   background:
@@ -2598,12 +2676,19 @@ function PlanCard({
                         : `linear-gradient(135deg,${cs.hex},rgba(16,185,129,0.7))`,
                 }}
               >
-                {selectedTab === "contract" ? "📋" : "⚡"} Invest $
-                {amount > 0 ? amount.toLocaleString() : "—"}{" "}
-                {selectedTab === "contract"
-                  ? `· ${selectedTerm.label} Contract`
-                  : ""}{" "}
-                <ArrowRight size={14} />
+                {selectedTab === "contract" ? (
+                  <>
+                    <FileCheck size={15} /> Lock In $
+                    {amount > 0 ? amount.toLocaleString() : "—"} ·{" "}
+                    {selectedTerm.label} Contract <ArrowRight size={14} />
+                  </>
+                ) : (
+                  <>
+                    <Pickaxe size={15} /> Get Coins &amp; Mine · $
+                    {amount > 0 ? amount.toLocaleString() : "—"} for{" "}
+                    {selectedMiningPeriod.label} <ArrowRight size={14} />
+                  </>
+                )}
               </button>
             )}
           </div>
@@ -2613,251 +2698,7 @@ function PlanCard({
   );
 }
 
-// ─── SUPPORT MODAL (original preserved) ──────────────────────
-function SupportModal({
-  userId,
-  onClose,
-}: {
-  userId: string;
-  onClose: () => void;
-}) {
-  const [tickets, setTickets] = useState<any[]>([]);
-  const [activeTicket, setActiveTicket] = useState<any>(null);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [newMsg, setNewMsg] = useState("");
-  const [subject, setSubject] = useState("");
-  const [category, setCategory] = useState("general");
-  const [creating, setCreating] = useState(false);
-  const [sending, setSending] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const loadTickets = useCallback(async () => {
-    const { data } = await supabase
-      .from("support_tickets")
-      .select("*")
-      .eq("user_id", userId)
-      .order("updated_at", { ascending: false });
-    setTickets(data || []);
-  }, [userId]);
-  const loadMessages = useCallback(async (ticketId: string) => {
-    const { data } = await supabase
-      .from("support_messages")
-      .select("*")
-      .eq("ticket_id", ticketId)
-      .order("created_at", { ascending: true });
-    setMessages(data || []);
-    setTimeout(
-      () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-      100,
-    );
-  }, []);
-  useEffect(() => {
-    loadTickets();
-  }, [loadTickets]);
-  useEffect(() => {
-    if (!activeTicket) return;
-    loadMessages(activeTicket.id);
-    const sub = supabase
-      .channel(`ticket:${activeTicket.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "support_messages",
-          filter: `ticket_id=eq.${activeTicket.id}`,
-        },
-        () => loadMessages(activeTicket.id),
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(sub);
-    };
-  }, [activeTicket, loadMessages]);
-  async function createTicket() {
-    if (!subject.trim()) return;
-    setCreating(true);
-    const { data, error } = await supabase
-      .from("support_tickets")
-      .insert({ user_id: userId, subject: subject.trim(), category })
-      .select()
-      .single();
-    if (!error && data) {
-      setActiveTicket(data);
-      loadTickets();
-    }
-    setCreating(false);
-    setSubject("");
-  }
-  async function sendMessage() {
-    if (!newMsg.trim() || !activeTicket) return;
-    setSending(true);
-    await supabase.from("support_messages").insert({
-      ticket_id: activeTicket.id,
-      sender_id: userId,
-      body: newMsg.trim(),
-      is_admin: false,
-    });
-    setNewMsg("");
-    setSending(false);
-  }
-  return (
-    <div
-      className="fixed inset-0 bg-black/80 z-50 flex items-end md:items-center justify-center p-0 md:p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full md:max-w-2xl md:rounded-2xl overflow-hidden flex flex-col"
-        style={{
-          maxHeight: "90vh",
-          background: "rgb(10,16,28)",
-          border: "1px solid rgba(255,255,255,0.08)",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-800">
-          <div className="flex items-center gap-3">
-            {activeTicket && (
-              <button
-                onClick={() => setActiveTicket(null)}
-                className="text-slate-500 hover:text-white"
-              >
-                <ChevronRight size={16} className="rotate-180" />
-              </button>
-            )}
-            <MessageSquare size={16} className="text-emerald-400" />
-            <span className="text-white font-black text-sm">
-              {activeTicket ? activeTicket.subject : "Customer Support"}
-            </span>
-          </div>
-          <button onClick={onClose} className="text-slate-500 hover:text-white">
-            <X size={16} />
-          </button>
-        </div>
-        {!activeTicket ? (
-          <div className="flex-1 overflow-y-auto p-5 space-y-4">
-            <div
-              className="rounded-xl p-4 space-y-3"
-              style={{
-                background: "rgba(15,23,42,0.7)",
-                border: "1px solid rgba(255,255,255,0.07)",
-              }}
-            >
-              <p className="text-white font-bold text-sm">Open a new ticket</p>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none"
-              >
-                <option value="general">General Inquiry</option>
-                <option value="billing">Billing & Payments</option>
-                <option value="technical">Technical Issue</option>
-                <option value="withdrawal">Withdrawal Help</option>
-              </select>
-              <input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="Describe your issue briefly…"
-                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-slate-500"
-              />
-              <button
-                onClick={createTicket}
-                disabled={creating || !subject.trim()}
-                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white font-bold py-2.5 rounded-xl text-sm"
-              >
-                {creating ? "Creating…" : "Submit Ticket"}
-              </button>
-            </div>
-            {tickets.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-slate-500 text-xs uppercase tracking-wider">
-                  Your Tickets
-                </p>
-                {tickets.map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => setActiveTicket(t)}
-                    className="w-full text-left rounded-xl p-3.5 hover:bg-slate-800/40"
-                    style={{
-                      background: "rgba(15,23,42,0.5)",
-                      border: "1px solid rgba(255,255,255,0.06)",
-                    }}
-                  >
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-white text-sm font-bold truncate mr-2">
-                        {t.subject}
-                      </span>
-                      <span className="text-[9px] font-black px-2 py-0.5 rounded-full border text-blue-400 bg-blue-900/20 border-blue-800/30">
-                        {t.status.replace("_", " ").toUpperCase()}
-                      </span>
-                    </div>
-                    <p className="text-slate-600 text-[11px]">
-                      {t.category} ·{" "}
-                      {new Date(t.updated_at).toLocaleDateString()}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {messages.length === 0 && (
-                <div className="text-center py-8 text-slate-600 text-sm">
-                  No messages yet — we'll respond shortly.
-                </div>
-              )}
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`flex ${m.is_admin ? "justify-start" : "justify-end"}`}
-                >
-                  <div
-                    className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm ${m.is_admin ? "bg-slate-800 text-slate-200 rounded-tl-sm" : "bg-emerald-600 text-white rounded-tr-sm"}`}
-                  >
-                    {m.is_admin && (
-                      <p className="text-[10px] text-slate-500 mb-0.5 font-bold">
-                        Support Agent
-                      </p>
-                    )}
-                    <p className="leading-relaxed">{m.body}</p>
-                    <p className="text-[10px] mt-1 opacity-50">
-                      {new Date(m.created_at).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </p>
-                  </div>
-                </div>
-              ))}
-              <div ref={bottomRef} />
-            </div>
-            <div className="border-t border-slate-800 p-3 flex gap-2">
-              <input
-                value={newMsg}
-                onChange={(e) => setNewMsg(e.target.value)}
-                onKeyDown={(e) =>
-                  e.key === "Enter" && !e.shiftKey && sendMessage()
-                }
-                placeholder="Type your message…"
-                className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none"
-              />
-              <button
-                onClick={sendMessage}
-                disabled={sending || !newMsg.trim()}
-                className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white px-4 rounded-xl text-sm font-bold"
-              >
-                Send
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── MAIN PAGE ────────────────────────────────────────────────
+// ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function GPUPlansPage() {
   const router = useRouter();
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -2869,7 +2710,6 @@ export default function GPUPlansPage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [activeNotif, setActiveNotif] = useState<Notification | null>(null);
-  const [supportOpen, setSupportOpen] = useState(false);
   const [showKYCModal, setShowKYCModal] = useState(false);
   const [activeTab, setActiveTab] = useState<"plans" | "portfolio">("plans");
   const networkEarnings = useLiveNetworkEarnings();
@@ -2912,7 +2752,6 @@ export default function GPUPlansPage() {
         .eq("is_active", true)
         .order("sort_order"),
       supabase.from("demand_events").select("*").eq("is_active", true),
-      // Fetch ALL columns including updated_at for accurate live earnings
       supabase
         .from("node_allocations")
         .select("*")
@@ -2943,7 +2782,7 @@ export default function GPUPlansPage() {
     loadAll();
   }, [loadAll]);
 
-  // ── REALTIME: new node_allocations appear instantly when approved ──
+  // Realtime subscription — new allocations appear instantly
   useEffect(() => {
     if (!userId) return;
     const channel = supabase
@@ -2958,7 +2797,7 @@ export default function GPUPlansPage() {
         },
         (payload) => {
           setAllocations((prev) => [payload.new as Allocation, ...prev]);
-          showToast("New GPU node investment activated! 🚀");
+          showToast("⛏️ Mining session activated! Your node is now live.");
           setActiveTab("portfolio");
         },
       )
@@ -2986,119 +2825,131 @@ export default function GPUPlansPage() {
     };
   }, [userId]);
 
-  // ── Sync earnings to DB every 60s ──
+  // Sync earnings to DB every 60s (flexible active allocations)
   useEffect(() => {
     if (!userId || allocations.length === 0 || plans.length === 0) return;
     const iv = setInterval(async () => {
-      for (const alloc of allocations.filter((a) => a.status === "active")) {
+      for (const alloc of allocations.filter(
+        (a) =>
+          a.status === "active" &&
+          a.payment_model === "flexible" &&
+          !a.mining_completed,
+      )) {
         const plan = plans.find((p) => p.id === alloc.plan_id);
-        const dailyPct = plan?.daily_pct || 0.0013;
-        const PER_SECOND = (alloc.amount_invested * (dailyPct / 24)) / 3600;
-        const base = alloc.total_earned || 0;
+        const planDailyMin =
+          (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
+          (plan?.roi_tier_multiplier ?? 1.0);
+        const planDailyMax =
+          (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
+          (plan?.roi_tier_multiplier ?? 1.0);
+        const rateFactor = alloc.rate_factor_used ?? 0.86;
+        const dailyProfit =
+          planDailyMin + rateFactor * (planDailyMax - planDailyMin);
+        const MULTIPLIERS: Record<string, number> = {
+          hourly: 0.8 / 24,
+          daily: 1.0,
+          weekly: 7 * 1.1,
+          monthly: 30 * 1.25,
+        };
+        const period = alloc.mining_period ?? "daily";
+        const totalPeriodProfit = dailyProfit * (MULTIPLIERS[period] ?? 1.0);
+        const periodMs =
+          PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
+        const perSecond = totalPeriodProfit / (periodMs / 1000);
+        const base = alloc.total_earned ?? 0;
         const elapsed =
           (Date.now() -
             new Date(alloc.updated_at || alloc.created_at).getTime()) /
           1000;
-        const newEarned = base + PER_SECOND * elapsed;
+        const newEarned = base + perSecond * elapsed;
+
         await supabase
           .from("node_allocations")
           .update({
-            total_earned: newEarned,
+            total_earned: Math.round(newEarned * 1_000_000) / 1_000_000,
             updated_at: new Date().toISOString(),
           })
           .eq("id", alloc.id);
       }
-      // Update user balance_available
-      const totalEarned = allocations
-        .filter((a) => a.status === "active")
-        .reduce((sum, alloc) => {
-          const plan = plans.find((p) => p.id === alloc.plan_id);
-          const dailyPct = plan?.daily_pct || 0.0013;
-          const PER_SECOND = (alloc.amount_invested * (dailyPct / 24)) / 3600;
-          const base = alloc.total_earned || 0;
-          const elapsed =
-            (Date.now() -
-              new Date(alloc.updated_at || alloc.created_at).getTime()) /
-            1000;
-          return sum + base + PER_SECOND * elapsed;
-        }, 0);
-      const totalWithdrawn = allocations.reduce(
-        (s, a) => s + (a.total_withdrawn || 0),
-        0,
-      );
-      await supabase
-        .from("users")
-        .update({
-          balance_available: Math.max(0, totalEarned - totalWithdrawn),
-          total_earned: totalEarned,
-        })
-        .eq("id", userId);
-    }, 60000);
+    }, 60_000);
     return () => clearInterval(iv);
   }, [userId, allocations, plans]);
 
   async function joinWaitlist(planId: string) {
     if (!userId) return;
-    const { error } = await supabase.from("gpu_waitlist").upsert(
-      {
-        user_id: userId,
-        plan_id: planId,
-        email: userEmail,
-        status: "pending",
-      },
-      { onConflict: "user_id,plan_id" },
-    );
+    const { error } = await supabase
+      .from("gpu_waitlist")
+      .upsert(
+        {
+          user_id: userId,
+          plan_id: planId,
+          email: userEmail,
+          status: "pending",
+        },
+        { onConflict: "user_id,plan_id" },
+      );
     if (!error) {
       showToast("You're on the waitlist!");
       loadAll();
     } else showToast("Could not join waitlist.", false);
   }
 
-  function invest(
+  // Mine function — now passes miningPeriod to checkout
+  function mine(
     planId: string,
     amount: number,
     itype: string,
     paymentModel: "flexible" | "contract",
+    miningPeriod?: string,
     contractTerm?: (typeof CONTRACT_TERMS)[0],
   ) {
-    if (kycStatus !== "approved") {
-      setShowKYCModal(true);
-      return;
-    }
     const plan = plans.find((p) => p.id === planId);
     if (!plan) return;
-    const termKey = contractTerm?.key || "6m";
-    const termReturns = plan.contract_returns?.[
-      termKey as keyof typeof plan.contract_returns
-    ] || { min_pct: 52, max_pct: 93 };
-    const params = new URLSearchParams({
-      node: planId,
-      name: plan.name,
-      price: amount.toString(),
-      daily: (amount * plan.daily_pct).toFixed(6),
-      itype,
-      gpu: plan.gpu_model,
-      vram: plan.vram,
-      paymentModel,
-      ...(paymentModel === "contract" && contractTerm
-        ? {
-            contractMonths: contractTerm.months.toString(),
-            contractLabel: contractTerm.label,
-            contractMinPct: termReturns.min_pct.toString(),
-            contractMaxPct: termReturns.max_pct.toString(),
-            lockInMonths: contractTerm.months.toString(),
-            lockInLabel: contractTerm.label,
-            lockInMultiplier: "1",
-          }
-        : {
-            lockInMonths: "0",
-            lockInLabel: "Flexible",
-            lockInMultiplier: "1",
-          }),
-    });
-    if (typeof window !== "undefined")
-      sessionStorage.setItem("checkout_redirect", "/dashboard/gpu-plans");
-    router.push(`/dashboard/checkout?${params.toString()}`);
+
+    if (paymentModel === "contract") {
+      const termKey = contractTerm?.key || "6m";
+      const termReturns = plan.contract_returns?.[
+        termKey as keyof typeof plan.contract_returns
+      ] || { min_pct: 52, max_pct: 93 };
+      const params = new URLSearchParams({
+        node: planId,
+        name: plan.name,
+        price: amount.toString(),
+        daily: (amount * plan.daily_pct).toFixed(6),
+        itype,
+        gpu: plan.gpu_model,
+        vram: plan.vram,
+        paymentModel: "contract",
+        contractMonths: (contractTerm?.months ?? 6).toString(),
+        contractLabel: contractTerm?.label ?? "6 Months",
+        contractMinPct: termReturns.min_pct.toString(),
+        contractMaxPct: termReturns.max_pct.toString(),
+        lockInMonths: (contractTerm?.months ?? 6).toString(),
+        lockInLabel: contractTerm?.label ?? "6 Months",
+        lockInMultiplier: "1",
+      });
+      if (typeof window !== "undefined")
+        sessionStorage.setItem("checkout_redirect", "/dashboard/gpu-plans");
+      router.push(`/dashboard/checkout?${params.toString()}`);
+    } else {
+      // Flexible / mining
+      const params = new URLSearchParams({
+        node: planId,
+        name: plan.name,
+        price: amount.toString(),
+        itype,
+        gpu: plan.gpu_model,
+        vram: plan.vram,
+        paymentModel: "flexible",
+        miningPeriod: miningPeriod ?? "daily",
+        lockInMonths: "0",
+        lockInLabel: "Flexible",
+        lockInMultiplier: "1",
+      });
+      if (typeof window !== "undefined")
+        sessionStorage.setItem("checkout_redirect", "/dashboard/gpu-plans");
+      router.push(`/dashboard/checkout?${params.toString()}`);
+    }
   }
 
   if (loading)
@@ -3119,7 +2970,7 @@ export default function GPUPlansPage() {
   const activeAllocs = allocations.filter(
     (a) => a.status === "active" || a.status === "matured",
   );
-  const isKYCApproved = kycStatus === "approved";
+  const isKYCVerified = kycStatus === "approved";
 
   return (
     <div
@@ -3128,6 +2979,7 @@ export default function GPUPlansPage() {
     >
       <DashboardNavigation />
 
+      {/* KYC modal — only shown when trying to withdraw without KYC */}
       {showKYCModal && (
         <KYCGateModal
           kycStatus={kycStatus}
@@ -3183,10 +3035,6 @@ export default function GPUPlansPage() {
         </div>
       )}
 
-      {supportOpen && userId && (
-        <SupportModal userId={userId} onClose={() => setSupportOpen(false)} />
-      )}
-
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-5xl mx-auto px-4 md:px-8 pt-6 pb-36 md:pb-16 space-y-10">
           {/* HERO */}
@@ -3200,33 +3048,30 @@ export default function GPUPlansPage() {
                 <span className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-400 bg-slate-800/60 border border-slate-700/40 px-3 py-1 rounded-full">
                   24h: ${networkEarnings}
                 </span>
-                {isKYCApproved ? (
+                {isKYCVerified ? (
                   <span className="text-[9px] font-black uppercase tracking-[0.2em] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full flex items-center gap-1.5">
                     <CheckCircle size={9} /> KYC Verified
                   </span>
                 ) : (
-                  <button
-                    onClick={() => setShowKYCModal(true)}
-                    className="text-[9px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-full flex items-center gap-1.5 transition-all"
+                  <span
+                    className="text-[9px] font-black uppercase tracking-[0.2em] px-3 py-1 rounded-full flex items-center gap-1.5"
                     style={{
-                      color: kycStatus === "pending" ? "#f59e0b" : "#ef4444",
+                      color: kycStatus === "pending" ? "#f59e0b" : "#94a3b8",
                       background:
                         kycStatus === "pending"
                           ? "rgba(245,158,11,0.1)"
-                          : "rgba(239,68,68,0.1)",
+                          : "rgba(100,116,139,0.1)",
                       border:
                         kycStatus === "pending"
                           ? "1px solid rgba(245,158,11,0.3)"
-                          : "1px solid rgba(239,68,68,0.3)",
+                          : "1px solid rgba(100,116,139,0.2)",
                     }}
                   >
                     <Shield size={9} />
                     {kycStatus === "pending"
                       ? "KYC Under Review"
-                      : kycStatus === "rejected"
-                        ? "KYC Rejected — Fix"
-                        : "KYC Required"}
-                  </button>
+                      : "KYC Needed for Withdrawal"}
+                  </span>
                 )}
               </div>
               <h1 className="text-3xl md:text-5xl font-black tracking-tight leading-tight">
@@ -3235,10 +3080,10 @@ export default function GPUPlansPage() {
                 <span className="text-emerald-400">Infrastructure</span>
               </h1>
               <p className="text-slate-400 mt-4 max-w-2xl leading-relaxed text-sm md:text-base">
-                Participate in the global GPU compute economy. Allocate capital
+                Participate in the global GPU compute economy. Stake capital
                 into dedicated GPU nodes inside Tier III/IV data centres — your
                 node processes AI training, inference, and rendering workloads
-                24/7, generating daily compute rental income.
+                24/7, generating daily compute mining income.
               </p>
               <div className="flex flex-wrap gap-3 mt-6">
                 {MARKET_STATS.map(({ label, value, icon: Icon }) => (
@@ -3257,82 +3102,84 @@ export default function GPUPlansPage() {
             </div>
           </div>
 
-          {/* KYC BANNER */}
-          {!isKYCApproved && (
+          {/* KYC INFO BANNER — now just info, not a blocker */}
+          {!isKYCVerified && (
             <div
-              className="rounded-2xl p-6 flex items-start gap-5"
+              className="rounded-2xl p-5 flex items-start gap-4"
               style={{
                 background:
                   kycStatus === "pending"
-                    ? "rgba(245,158,11,0.06)"
-                    : "rgba(16,185,129,0.06)",
+                    ? "rgba(245,158,11,0.05)"
+                    : "rgba(59,130,246,0.05)",
                 border:
                   kycStatus === "pending"
-                    ? "1px solid rgba(245,158,11,0.2)"
-                    : "1px solid rgba(16,185,129,0.2)",
+                    ? "1px solid rgba(245,158,11,0.18)"
+                    : "1px solid rgba(59,130,246,0.18)",
               }}
             >
               <div
-                className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+                className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
                 style={{
                   background:
                     kycStatus === "pending"
                       ? "rgba(245,158,11,0.12)"
-                      : "rgba(16,185,129,0.12)",
+                      : "rgba(59,130,246,0.12)",
                   border:
                     kycStatus === "pending"
                       ? "1px solid rgba(245,158,11,0.3)"
-                      : "1px solid rgba(16,185,129,0.3)",
+                      : "1px solid rgba(59,130,246,0.3)",
                 }}
               >
                 {kycStatus === "pending" ? (
-                  <Clock size={22} className="text-amber-400" />
+                  <Clock size={18} className="text-amber-400" />
                 ) : (
-                  <Shield size={22} className="text-emerald-400" />
+                  <Info size={18} className="text-blue-400" />
                 )}
               </div>
               <div className="flex-1">
                 <p
-                  className={`font-black text-base ${kycStatus === "pending" ? "text-amber-300" : "text-emerald-300"}`}
+                  className={`font-black text-sm ${kycStatus === "pending" ? "text-amber-300" : "text-blue-300"}`}
                 >
                   {kycStatus === "pending"
-                    ? "Identity Verification In Progress"
+                    ? "KYC Under Review — Mining is available while you wait"
                     : kycStatus === "rejected"
-                      ? "Identity Verification Rejected — Resubmit"
-                      : "Identity Verification Required to Invest"}
+                      ? "KYC Rejected — Resubmit to enable withdrawals"
+                      : "Identity Verification Required for Withdrawals Only"}
                 </p>
-                <p
-                  className={`text-sm mt-1.5 leading-relaxed ${kycStatus === "pending" ? "text-amber-400/70" : "text-slate-400"}`}
-                >
+                <p className="text-slate-400 text-xs mt-1 leading-relaxed">
                   {kycStatus === "pending"
-                    ? "Your documents are being reviewed (24–48 hrs). Investment buttons unlock automatically the moment your KYC is approved — no need to refresh."
+                    ? "Your documents are being reviewed. You can start mining right now — withdrawals unlock automatically once approved."
                     : kycStatus === "rejected"
-                      ? "Your KYC submission was rejected. Click below to resubmit with clear, valid government-issued documents."
-                      : "OmniTask Pro requires identity verification before investing in GPU nodes. Takes less than 5 minutes."}
+                      ? "Mining continues normally. Resubmit your documents to enable withdrawals."
+                      : "You can start mining immediately without verification. KYC is only required when you want to withdraw your earnings."}
                 </p>
-                <div className="flex flex-wrap gap-3 mt-4">
+                <div className="flex flex-wrap gap-3 mt-3">
                   {kycStatus !== "pending" && (
                     <button
                       onClick={goToVerification}
-                      className="font-black text-sm text-white px-5 py-2.5 rounded-xl flex items-center gap-2 transition-all hover:opacity-90"
+                      className="font-black text-xs px-4 py-2 rounded-lg flex items-center gap-1.5 transition-all hover:opacity-90"
                       style={{
                         background:
-                          kycStatus === "rejected" ? "#ef4444" : "#10b981",
+                          kycStatus === "rejected"
+                            ? "rgba(239,68,68,0.2)"
+                            : "rgba(59,130,246,0.2)",
+                        color: kycStatus === "rejected" ? "#ef4444" : "#60a5fa",
+                        border:
+                          kycStatus === "rejected"
+                            ? "1px solid rgba(239,68,68,0.3)"
+                            : "1px solid rgba(59,130,246,0.3)",
                       }}
                     >
-                      <FileCheck size={15} />
+                      <FileCheck size={12} />
                       {kycStatus === "rejected"
                         ? "Resubmit Documents"
-                        : "Complete Verification Now"}
-                      <ArrowRight size={13} />
+                        : "Complete Verification"}
                     </button>
                   )}
-                  <div className="flex items-center gap-2 text-[11px] text-slate-600">
-                    <Info size={11} />
-                    <span>
-                      You can browse and preview all plans without verification
-                    </span>
-                  </div>
+                  <p className="text-slate-600 text-[11px] flex items-center gap-1 self-center">
+                    <Pickaxe size={10} /> Mining is available immediately — no
+                    verification needed to start
+                  </p>
                 </div>
               </div>
             </div>
@@ -3344,13 +3191,13 @@ export default function GPUPlansPage() {
               onClick={() => setActiveTab("plans")}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-black transition-all ${activeTab === "plans" ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
             >
-              <Server size={14} /> GPU Node Plans
+              <Server size={14} /> GPU Mining Nodes
             </button>
             <button
               onClick={() => setActiveTab("portfolio")}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-black transition-all ${activeTab === "portfolio" ? "bg-slate-700 text-white" : "text-slate-500 hover:text-slate-300"}`}
             >
-              <BarChart2 size={14} /> My Portfolio
+              <BarChart2 size={14} /> My Mining Portfolio
               {activeAllocs.length > 0 && (
                 <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-400">
                   {activeAllocs.length}
@@ -3367,13 +3214,13 @@ export default function GPUPlansPage() {
                   My Portfolio
                 </span>
                 <h2 className="text-white font-black text-2xl md:text-3xl mt-3">
-                  Active Node Investments
+                  Active Mining Sessions
                 </h2>
                 <p className="text-slate-500 text-sm mt-1.5">
-                  Real-time earnings tracking, live accrual, and withdrawal
-                  management
+                  Real-time earnings, mining progress, and withdrawal management
                 </p>
               </div>
+
               {activeAllocs.length === 0 ? (
                 <div
                   className="rounded-2xl p-10 text-center"
@@ -3382,44 +3229,40 @@ export default function GPUPlansPage() {
                     border: "1px solid rgba(255,255,255,0.06)",
                   }}
                 >
-                  <Package size={32} className="text-slate-700 mx-auto mb-3" />
+                  <Pickaxe size={32} className="text-slate-700 mx-auto mb-3" />
                   <p className="text-slate-500 font-semibold text-sm">
-                    No active investments yet
+                    No active mining sessions yet
                   </p>
                   <p className="text-slate-600 text-xs mt-1">
-                    Select a GPU node plan below to get started
+                    Select a GPU node below to start mining
                   </p>
+                  <button
+                    onClick={() => setActiveTab("plans")}
+                    className="mt-4 px-5 py-2.5 rounded-xl font-black text-sm text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all flex items-center gap-2 mx-auto"
+                  >
+                    <Pickaxe size={13} /> Browse Mining Nodes
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     {[
                       {
-                        label: "Total Invested",
+                        label: "Total Staked",
                         value: `$${activeAllocs.reduce((s, a) => s + a.amount_invested, 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
                         icon: Wallet,
                         color: "text-white",
                       },
                       {
-                        label: "Daily Accrual",
-                        value: `$${activeAllocs
-                          .reduce((s, a) => {
-                            const plan = plans.find((p) => p.id === a.plan_id);
-                            return (
-                              s +
-                              (plan
-                                ? a.amount_invested * plan.daily_pct
-                                : a.amount_invested * 0.0013)
-                            );
-                          }, 0)
-                          .toFixed(4)}`,
-                        icon: Zap,
+                        label: "Active Sessions",
+                        value: `${activeAllocs.filter((a) => !a.mining_completed && a.payment_model === "flexible").length}`,
+                        icon: Pickaxe,
                         color: "text-emerald-400",
                       },
                       {
-                        label: "Active Nodes",
-                        value: `${activeAllocs.length}`,
-                        icon: Server,
+                        label: "Completed",
+                        value: `${activeAllocs.filter((a) => a.mining_completed || (a.status === "matured" && a.payment_model === "flexible")).length}`,
+                        icon: CheckCircle,
                         color: "text-blue-400",
                       },
                       {
@@ -3463,6 +3306,10 @@ export default function GPUPlansPage() {
                         );
                         loadAll();
                       }}
+                      onStartNewMining={() => {
+                        setActiveTab("plans");
+                        showToast("Start a new mining session below.", true);
+                      }}
                     />
                   ))}
                 </div>
@@ -3473,6 +3320,7 @@ export default function GPUPlansPage() {
           {/* ── PLANS TAB ── */}
           {activeTab === "plans" && (
             <>
+              {/* How It Works */}
               <section>
                 <div className="mb-8">
                   <span className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
@@ -3482,8 +3330,8 @@ export default function GPUPlansPage() {
                     Two Ways to Earn
                   </h2>
                   <p className="text-slate-500 text-sm mt-1.5">
-                    Flexible access or fixed-term contracts — both put your
-                    capital to work in real GPU compute infrastructure
+                    Flexible mining sessions or fixed-term contracts — both put
+                    your capital to work in real GPU compute infrastructure
                   </p>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -3495,23 +3343,23 @@ export default function GPUPlansPage() {
                     }}
                   >
                     <div className="w-10 h-10 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center mb-4">
-                      <Zap size={18} className="text-emerald-400" />
+                      <Pickaxe size={18} className="text-emerald-400" />
                     </div>
                     <h3 className="text-white font-black text-base mb-2">
-                      ⚡ Pay-as-you-go
+                      ⛏️ Flexible Mining
                     </h3>
                     <p className="text-slate-400 text-xs leading-relaxed mb-3">
-                      Earn at{" "}
-                      <strong className="text-emerald-300">0.01%/hr</strong> or{" "}
-                      <strong className="text-emerald-300">0.13%/day</strong>.
-                      No lock-in. Stop and withdraw anytime.
+                      Stake capital for a mining period of your choice (1 hour,
+                      1 day, 1 week, or 1 month). When the session ends, your
+                      stake and earnings are automatically returned to your
+                      wallet.
                     </p>
                     <div className="space-y-1.5 text-xs">
                       {[
-                        "Flexible period selector",
-                        "Withdraw earnings anytime (min $10)",
-                        "No penalties, no commitment",
-                        "KYC verification required",
+                        "No KYC required to start mining",
+                        "Capital + profits returned when session ends",
+                        "Start a new session anytime",
+                        "KYC required only to withdraw",
                       ].map((f) => (
                         <div key={f} className="flex items-center gap-2">
                           <CheckCircle
@@ -3537,16 +3385,17 @@ export default function GPUPlansPage() {
                       📋 Fixed-Term Contract
                     </h3>
                     <p className="text-slate-400 text-xs leading-relaxed mb-3">
-                      Commit 6–24 months for higher projected returns.{" "}
+                      Commit 6–24 months for potentially higher returns. Capital
+                      is locked until maturity.{" "}
                       <strong className="text-slate-300">
-                        Returns not guaranteed.
+                        Returns are not guaranteed.
                       </strong>
                     </p>
                     <div className="space-y-1.5 text-xs">
                       {[
                         "6 months: est. 52%–93% return",
                         "12 months: est. 130%–250% return",
-                        "24 months: est. 800%–1200% return",
+                        "24 months: est. 800%–1,200% return",
                         "Capital + earnings released at maturity",
                       ].map((f) => (
                         <div key={f} className="flex items-center gap-2">
@@ -3565,17 +3414,18 @@ export default function GPUPlansPage() {
                 </div>
               </section>
 
+              {/* GPU Node Tiers */}
               <section>
                 <div className="mb-8">
                   <span className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
                     GPU Node Tiers
                   </span>
                   <h2 className="text-white font-black text-2xl md:text-3xl mt-3">
-                    Select Your Node
+                    Select Your Mining Node
                   </h2>
                   <p className="text-slate-500 text-sm mt-1.5">
-                    Browse all GPU tiers — enter your amount and see exactly
-                    what you'd earn
+                    Browse all GPU tiers — stake your amount and start mining
+                    immediately
                   </p>
                 </div>
                 <div className="space-y-3">
@@ -3590,12 +3440,19 @@ export default function GPUPlansPage() {
                       kycStatus={kycStatus}
                       onNeedKYC={() => setShowKYCModal(true)}
                       onWaitlist={() => joinWaitlist(plan.id)}
-                      onInvest={(amount, itype, paymentModel, contractTerm) =>
-                        invest(
+                      onMine={(
+                        amount,
+                        itype,
+                        paymentModel,
+                        miningPeriod,
+                        contractTerm,
+                      ) =>
+                        mine(
                           plan.id,
                           amount,
                           itype,
                           paymentModel,
+                          miningPeriod,
                           contractTerm,
                         )
                       }
@@ -3604,10 +3461,11 @@ export default function GPUPlansPage() {
                 </div>
               </section>
 
+              {/* Testimonials (preserved) */}
               <section>
                 <div className="mb-8">
                   <span className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
-                    Investor Stories
+                    Miner Stories
                   </span>
                   <h2 className="text-white font-black text-2xl md:text-3xl mt-3">
                     Results from the Community
@@ -3655,71 +3513,10 @@ export default function GPUPlansPage() {
                   ))}
                 </div>
               </section>
-
-              <section>
-                <div className="mb-8">
-                  <span className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-full">
-                    Support
-                  </span>
-                  <h2 className="text-white font-black text-2xl mt-3">
-                    We're Here When You Need Us
-                  </h2>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
-                  {[
-                    {
-                      icon: MessageSquare,
-                      title: "Live Chat Support",
-                      desc: "Open a ticket and get a response within 2 hours (09:00–18:00 UTC).",
-                    },
-                    {
-                      icon: Bell,
-                      title: "Real-Time Alerts",
-                      desc: "Surge events, contract milestones, and payouts pushed directly to your dashboard.",
-                    },
-                    {
-                      icon: Award,
-                      title: "Dedicated Account Manager",
-                      desc: "Investors above $5,000 total allocation receive a named account manager.",
-                    },
-                  ].map(({ icon: Icon, title, desc }) => (
-                    <div
-                      key={title}
-                      className="rounded-2xl p-5"
-                      style={{
-                        background: "rgba(15,23,42,0.7)",
-                        border: "1px solid rgba(255,255,255,0.07)",
-                      }}
-                    >
-                      <Icon size={16} className="text-emerald-400 mb-3" />
-                      <p className="text-white font-bold text-sm mb-1">
-                        {title}
-                      </p>
-                      <p className="text-slate-400 text-xs leading-relaxed">
-                        {desc}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setSupportOpen(true)}
-                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-black px-6 py-3 rounded-xl text-sm transition-all"
-                >
-                  <MessageSquare size={14} /> Open Support Chat
-                </button>
-              </section>
             </>
           )}
         </div>
       </main>
-
-      <button
-        onClick={() => setSupportOpen(true)}
-        className="fixed bottom-24 md:bottom-6 left-4 md:left-auto md:right-6 w-12 h-12 bg-emerald-600 hover:bg-emerald-500 rounded-full shadow-lg flex items-center justify-center transition-all z-30"
-        title="Support"
-      >
-        <MessageSquare size={18} />
-      </button>
     </div>
   );
 }
