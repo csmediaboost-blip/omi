@@ -56,6 +56,7 @@ import {
   Coins,
   PlayCircle,
   RotateCcw,
+  Gauge,
 } from "lucide-react";
 import { useKycStatus, KYCStatus } from "@/lib/useKycStatus";
 import {
