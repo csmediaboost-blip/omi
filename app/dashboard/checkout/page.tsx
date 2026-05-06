@@ -2,7 +2,6 @@
 import { useEffect, useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import {
   Lock,
   CheckCircle,
@@ -11,7 +10,7 @@ import {
   Loader2,
   ArrowLeft,
   Clock,
-  Download,
+  ArrowDownToLine,
   Globe,
   Shield,
   Cpu,
@@ -32,24 +31,39 @@ type CheckoutStep =
 type PayMethod = "card" | "bank_transfer" | "crypto_wallet";
 type PurchaseType = "gpu_plan" | "license" | "task";
 
-const KORAPAY_COUNTRIES = new Set(["KE", "GH", "CM", "CI", "EG", "TZ", "NG"]);
+const BANK_TRANSFER_COUNTRIES = new Set([
+  "KE",
+  "GH",
+  "CM",
+  "CI",
+  "EG",
+  "TZ",
+  "NG",
+]);
 
 const getPaymentMethodsForCountry = (
   countryCode: string,
   amount: number,
 ): PayMethod[] => {
   const methods: PayMethod[] = [];
-  
-  // Bank transfer available for supported countries (up to $10k limit)
-  if (KORAPAY_COUNTRIES.has(countryCode) && amount <= 10000) {
+  if (BANK_TRANSFER_COUNTRIES.has(countryCode) && amount <= 10000) {
     methods.push("bank_transfer");
   }
-  
-  // Crypto wallet and card always available
   methods.push("crypto_wallet");
   methods.push("card");
-  
   return methods;
+};
+
+// Currency conversion rates (USD → local)
+const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
+  NG: { currency: "NGN", rate: 766 },
+  KE: { currency: "KES", rate: 130 },
+  GH: { currency: "GHS", rate: 12.5 },
+  ZA: { currency: "ZAR", rate: 18 },
+  CM: { currency: "XAF", rate: 600 },
+  CI: { currency: "XOF", rate: 600 },
+  EG: { currency: "EGP", rate: 30 },
+  TZ: { currency: "TZS", rate: 2500 },
 };
 
 const COUNTRIES = [
@@ -168,23 +182,13 @@ const LICENSE_CONFIGS: Record<
   },
 };
 
-function formatCardNumber(v: string) {
-  return v
-    .replace(/\D/g, "")
-    .slice(0, 16)
-    .replace(/(.{4})/g, "$1 ")
-    .trim();
-}
-function formatExpiry(v: string) {
-  const d = v.replace(/\D/g, "").slice(0, 4);
-  return d.length >= 3 ? d.slice(0, 2) + "/" + d.slice(2) : d;
-}
 function detectCardType(n: string): "visa" | "mc" | "unsupported" {
   const d = n.replace(/\s/g, "");
   if (/^4/.test(d)) return "visa";
   if (/^5[1-5]|^2[2-7]/.test(d)) return "mc";
   return "unsupported";
 }
+
 function validateCardNumber(num: string): boolean {
   const digits = num.replace(/\s/g, "").replace(/\D/g, "");
   if (digits.length < 13 || digits.length > 19) return false;
@@ -209,32 +213,6 @@ const PROCESSING_STEPS = [
   { id: 4, label: "Completing your order", ms: 1600 },
   { id: 5, label: "Activating your access", ms: 1400 },
 ];
-
-function VisaLogo() {
-  return (
-    <svg viewBox="0 0 60 20" className="h-4 w-auto" fill="none">
-      <text
-        x="0"
-        y="16"
-        fontFamily="Arial"
-        fontWeight="900"
-        fontSize="18"
-        fill="#1a1f71"
-      >
-        VISA
-      </text>
-    </svg>
-  );
-}
-function MCLogo() {
-  return (
-    <svg viewBox="0 0 38 24" className="h-5 w-auto">
-      <circle cx="15" cy="12" r="11" fill="#eb001b" />
-      <circle cx="23" cy="12" r="11" fill="#f79e1b" />
-      <path d="M19 4.8a11 11 0 0 1 0 14.4A11 11 0 0 1 19 4.8z" fill="#ff5f00" />
-    </svg>
-  );
-}
 
 function QRCode({ value, size = 160 }: { value: string; size?: number }) {
   return (
@@ -272,6 +250,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+// ─── Receipt ──────────────────────────────────────────────────
 function Receipt({
   data,
   onClose,
@@ -312,6 +291,7 @@ function Receipt({
         : data.contractMonths === 24
           ? "2 years"
           : `${data.contractMonths} months`;
+
   function download() {
     if (!ref.current) return;
     const blob = new Blob([ref.current.innerText], { type: "text/plain" });
@@ -320,6 +300,7 @@ function Receipt({
     a.download = `OmniTask-Receipt-${data.txId}.txt`;
     a.click();
   }
+
   return (
     <div
       className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
@@ -346,7 +327,7 @@ function Receipt({
             </div>
             <h3 className="text-white font-black text-lg">Payment Receipt</h3>
             <p className="text-slate-400 text-xs mt-1">
-              OmniTask Pro ·{" "}
+              OmniTask Pro &middot;{" "}
               {data.purchaseType === "license"
                 ? "Operator License"
                 : "GPU Node Allocation"}
@@ -364,14 +345,14 @@ function Receipt({
                   ["Validity", "4 years from activation"],
                   [
                     "Amount Paid",
-                    `$${data.amount.toFixed(2)}${data.discounted ? " ✨ Crypto discount" : ""}`,
+                    `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount applied)" : ""}`,
                   ],
                   ["Payment Method", data.payMethod],
                   ...(data.walletAddress
-                    ? [["Wallet Address (Sender)", data.walletAddress]]
+                    ? [["Sender Wallet", data.walletAddress]]
                     : []),
                   ["Country", data.country],
-                  ["Status", "✅ License Activated"],
+                  ["Status", "License Activated"],
                 ]
               : [
                   ["Transaction ID", data.txId],
@@ -400,14 +381,14 @@ function Receipt({
                       ]),
                   [
                     "Amount Paid",
-                    `$${data.amount.toFixed(2)}${data.discounted ? " ✨ Crypto discount" : ""}`,
+                    `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount applied)" : ""}`,
                   ],
                   ["Payment Method", data.payMethod],
                   ...(data.walletAddress
-                    ? [["Wallet Address (Sender)", data.walletAddress]]
+                    ? [["Sender Wallet", data.walletAddress]]
                     : []),
                   ["Country", data.country],
-                  ["Status", "✅ Confirmed"],
+                  ["Status", "Confirmed"],
                 ]
             ).map(([l, v]) => (
               <div key={l} className="flex justify-between items-start">
@@ -436,7 +417,7 @@ function Receipt({
             onClick={download}
             className="flex-1 flex items-center justify-center gap-2 border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white font-bold py-2.5 rounded-xl text-sm transition-all"
           >
-            <Download size={13} /> Save Receipt
+            <ArrowDownToLine size={13} /> Save Receipt
           </button>
           <button
             onClick={onClose}
@@ -450,6 +431,7 @@ function Receipt({
   );
 }
 
+// ─── Order Summary ────────────────────────────────────────────
 function OrderSummary({
   purchaseType,
   nodeName,
@@ -501,9 +483,11 @@ function OrderSummary({
   const licConfig =
     LICENSE_CONFIGS[licenseType] || LICENSE_CONFIGS.operator_license;
   const LicIcon = licConfig.icon;
+
   return (
     <div>
       <div className="text-2xl font-black text-white mb-6">Order Summary</div>
+
       {purchaseType === "gpu_plan" && (
         <>
           <div
@@ -520,7 +504,7 @@ function OrderSummary({
                 ["VRAM", vram],
                 [
                   "Payment Model",
-                  isContract ? "📋 Contract-Based" : "⚡ Pay-as-you-go",
+                  isContract ? "Contract-Based" : "Pay-as-you-go",
                 ],
                 ...(isContract
                   ? [
@@ -549,15 +533,15 @@ function OrderSummary({
               ))}
             </div>
             <div className="border-t border-slate-700 my-4" />
-            {payMethod === "trustwallet" && (
+            {payMethod === "crypto_wallet" && (
               <div className="mb-3 p-3 bg-violet-500/10 border border-violet-500/30 rounded-lg">
                 <p className="text-violet-200 text-sm">
-                  ✨ <strong>Crypto Discount:</strong> {cryptoDiscount}% off
+                  <strong>Crypto Discount:</strong> {cryptoDiscount}% off
                 </p>
               </div>
             )}
             <div className="flex justify-between items-center">
-              <span className="text-slate-400 text-sm">Mining Amount</span>
+              <span className="text-slate-400 text-sm">Total Investment</span>
               <span className="text-2xl font-black text-emerald-400">
                 ${effectivePrice.toFixed(2)}
               </span>
@@ -572,7 +556,7 @@ function OrderSummary({
               }}
             >
               <p className="text-amber-400 text-xs font-bold mb-1.5">
-                ⚠ Mining Notice
+                Contract Investment Notice
               </p>
               <p className="text-amber-400/80 text-xs leading-relaxed">
                 Capital of{" "}
@@ -597,7 +581,7 @@ function OrderSummary({
               }}
             >
               <p className="text-emerald-400 text-xs font-bold mb-1.5">
-                ⚡ Pay-as-you-go Terms
+                Pay-as-you-go Terms
               </p>
               <p className="text-emerald-400/70 text-xs">
                 0.13%/day — withdraw anytime. Returns not guaranteed.
@@ -606,6 +590,7 @@ function OrderSummary({
           )}
         </>
       )}
+
       {purchaseType === "license" && (
         <>
           <div
@@ -661,10 +646,10 @@ function OrderSummary({
               ))}
             </div>
             <div className="border-t border-slate-700 my-4" />
-            {payMethod === "trustwallet" && (
+            {payMethod === "crypto_wallet" && (
               <div className="mb-3 p-3 bg-violet-500/10 border border-violet-500/30 rounded-lg">
                 <p className="text-violet-200 text-sm">
-                  ✨ <strong>Crypto Discount:</strong> {cryptoDiscount}% off
+                  <strong>Crypto Discount:</strong> {cryptoDiscount}% off
                 </p>
               </div>
             )}
@@ -683,7 +668,7 @@ function OrderSummary({
             }}
           >
             <p className="text-amber-400 text-xs font-bold mb-1">
-              ⚠ License Terms
+              License Terms
             </p>
             <p className="text-amber-400/70 text-xs leading-relaxed">
               One-time fee of{" "}
@@ -698,7 +683,7 @@ function OrderSummary({
   );
 }
 
-// ─── MAIN INNER COMPONENT (uses useSearchParams) ──────────────
+// ─── Main Inner Component ─────────────────────────────────────
 function CheckoutInner() {
   const router = useRouter();
   const params = useSearchParams();
@@ -716,7 +701,7 @@ function CheckoutInner() {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [countryCode, setCountryCode] = useState("");
   const [countryName, setCountryName] = useState("");
-  const [payMethod, setPayMethod] = useState<PayMethod>("card");
+  const [payMethod, setPayMethod] = useState<PayMethod>("crypto_wallet");
   const [countrySearch, setCountrySearch] = useState("");
   const [card, setCard] = useState({
     number: "",
@@ -726,20 +711,14 @@ function CheckoutInner() {
   });
   const [errors, setErrors] = useState<Partial<typeof card>>({});
   const [saveCard, setSaveCard] = useState(false);
-  const cvvRef = useRef<HTMLInputElement>(null);
-  const cardType = detectCardType(card.number);
   const [cardPhoneNumber, setCardPhoneNumber] = useState("");
-  const [showOtpStep, setShowOtpStep] = useState(false);
-  const [otpSent, setOtpSent] = useState(false);
-  const [otp, setOtp] = useState("");
-  const [otpError, setOtpError] = useState("");
-  const [otpAttempts, setOtpAttempts] = useState(0);
-  const cardPaymentRequiresOtp = payMethod === "card";
   const [kpPhone, setKpPhone] = useState("");
   const [kpLoading, setKpLoading] = useState(false);
+  const [kpError, setKpError] = useState("");
   const [twSenderAddress, setTwSenderAddress] = useState("");
   const [twConfirmed, setTwConfirmed] = useState(false);
 
+  // ── URL params ────────────────────────────────────────────
   const rawPurchaseType = params.get("purchaseType");
   const nodeKey = params.get("node") || "foundation";
   const purchaseType: PurchaseType = rawPurchaseType
@@ -773,15 +752,15 @@ function CheckoutInner() {
     params.get("type") ||
     nodeKey ||
     "operator_license";
-  const licConfig =
-    LICENSE_CONFIGS[licenseType] || LICENSE_CONFIGS.operator_license;
   const DAILY_PCT = 0.0013;
   const dailyEarning = price * DAILY_PCT;
   const hourlyEarning = price * 0.0001;
   const discountedPrice = +(price * (1 - cryptoDiscount / 100)).toFixed(2);
-  const isBankTransferAvailable = KORAPAY_COUNTRIES.has(countryCode);
-  const effectivePrice = payMethod === "crypto_wallet" ? discountedPrice : price;
+  const isBankTransferAvailable = BANK_TRANSFER_COUNTRIES.has(countryCode);
+  const effectivePrice =
+    payMethod === "crypto_wallet" ? discountedPrice : price;
 
+  // ── Effects ───────────────────────────────────────────────
   useEffect(() => {
     const s = params.get("status");
     const r = params.get("reference");
@@ -809,11 +788,9 @@ function CheckoutInner() {
         const qr = get("crypto_qr_image_url");
         if (disc && !isNaN(parseFloat(disc)))
           setCryptoDiscount(parseFloat(disc));
-        if (wallet && wallet !== "EMPTY" && wallet !== "")
-          setCryptoWalletAddress(wallet);
-        if (network && network !== "EMPTY" && network !== "")
-          setCryptoNetwork(network);
-        if (qr && qr !== "EMPTY" && qr !== "") setCryptoQrImageUrl(qr);
+        if (wallet && wallet !== "EMPTY") setCryptoWalletAddress(wallet);
+        if (network && network !== "EMPTY") setCryptoNetwork(network);
+        if (qr && qr !== "EMPTY") setCryptoQrImageUrl(qr);
       }
       setConfigLoaded(true);
     };
@@ -831,7 +808,6 @@ function CheckoutInner() {
   }, [router]);
 
   useEffect(() => {
-    // Retrieve card data from sessionStorage if user came back from card page
     const pendingCardData = sessionStorage.getItem("pendingCardData");
     if (pendingCardData) {
       try {
@@ -852,9 +828,10 @@ function CheckoutInner() {
     }
   }, []);
 
+  // When country changes, set default payment method — do NOT redirect
   useEffect(() => {
     if (!countryCode) return;
-    setPayMethod(isBankTransferAvailable ? "bank_transfer" : "card");
+    setPayMethod(isBankTransferAvailable ? "bank_transfer" : "crypto_wallet");
   }, [countryCode, isBankTransferAvailable]);
 
   function validateCard() {
@@ -870,70 +847,35 @@ function CheckoutInner() {
     return Object.keys(e).length === 0;
   }
 
-  function isValidCard(cardData: typeof card): boolean {
-    if (!cardData.number.replace(/\s/g, "")) return false;
-    if (!validateCardNumber(cardData.number)) return false;
-    if (detectCardType(cardData.number) === "unsupported") return false;
-    if (!cardData.name || cardData.name.length < 3) return false;
-    const [month, year] = cardData.expiry.split("/");
-    const expireDate = new Date(
-      parseInt(year ? "20" + year : "2000"),
-      parseInt(month || "01") - 1,
-    );
-    if (expireDate < new Date()) return false;
-    if (!cardData.cvv || cardData.cvv.length < 3) return false;
-    return true;
-  }
-
-  async function handleKoraPaySubmit() {
+  // ── Bank Transfer submit — NO timeout, NO forced redirect ─
+  async function handleBankTransferSubmit() {
     if (!userId) {
-      alert("User session not loaded. Please refresh the page.");
+      setKpError("Session not ready. Please wait and try again.");
       return;
     }
-    
+    setKpError("");
     setKpLoading(true);
-    
+
     try {
-      // Get exchange rate for currency conversion
-      let convertedPrice = price;
-      let localCurrency = "USD";
-      
-      if (countryCode === "NG") {
-        localCurrency = "NGN";
-        convertedPrice = parseFloat((price * 766).toFixed(2)); // ~766 NGN per USD
-      } else if (countryCode === "KE") {
-        localCurrency = "KES";
-        convertedPrice = parseFloat((price * 130).toFixed(2)); // ~130 KES per USD
-      } else if (countryCode === "ZA") {
-        localCurrency = "ZAR";
-        convertedPrice = parseFloat((price * 18).toFixed(2)); // ~18 ZAR per USD
-      } else if (countryCode === "GH") {
-        localCurrency = "GHS";
-        convertedPrice = parseFloat((price * 12.5).toFixed(2)); // ~12.5 GHS per USD
-      } else if (countryCode === "CM") {
-        localCurrency = "XAF";
-        convertedPrice = parseFloat((price * 600).toFixed(2)); // ~600 XAF per USD
-      } else if (countryCode === "CI") {
-        localCurrency = "XOF";
-        convertedPrice = parseFloat((price * 600).toFixed(2)); // ~600 XOF per USD
-      } else if (countryCode === "EG") {
-        localCurrency = "EGP";
-        convertedPrice = parseFloat((price * 30).toFixed(2)); // ~30 EGP per USD
-      } else if (countryCode === "TZ") {
-        localCurrency = "TZS";
-        convertedPrice = parseFloat((price * 2500).toFixed(2)); // ~2500 TZS per USD
-      }
+      const conversion = CURRENCY_RATES[countryCode];
+      const localCurrency = conversion?.currency ?? "USD";
+      const convertedPrice = conversion
+        ? parseFloat((price * conversion.rate).toFixed(2))
+        : price;
+
+      const safePhone =
+        kpPhone.trim() || userId.replace(/-/g, "").slice(0, 11).padEnd(11, "0");
 
       const res = await fetch("/api/korapay/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
-          phone: kpPhone.trim() || (userId ? userId.slice(0, 16).replace(/-/g, "") : ""), // Use user ID as fallback
+          phone: safePhone,
           nodeKey,
           nodeName,
-          price: convertedPrice, // Send converted price to Korapay
-          originalPrice: price, // Keep original USD price for records
+          price: convertedPrice,
+          originalPrice: price,
           currency: localCurrency,
           daily: dailyEarning,
           itype,
@@ -953,54 +895,57 @@ function CheckoutInner() {
           countryName,
         }),
       });
-      
-      if (!res.ok) {
-        const err = await res.json();
-        console.error("[v0] Payment initiation error:", err);
-        alert(`Payment error: ${err.error || "Failed to initialize payment"}`);
+
+      const data = await res.json();
+
+      if (!res.ok || !data.checkoutUrl) {
+        // Show error on page — do NOT redirect anywhere
+        setKpError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
         setKpLoading(false);
         return;
       }
-      
-      const data = await res.json();
-      console.log("[v0] KoraPay checkout URL received, redirecting...", data.checkoutUrl);
-      
-      // Redirect to KoraPay checkout
-      if (data.checkoutUrl) {
-        window.location.href = data.checkoutUrl;
-      } else {
-        alert("Failed to get checkout URL. Please try again.");
-        setKpLoading(false);
-      }
+
+      // Only redirect when we have a valid checkout URL
+      window.location.href = data.checkoutUrl;
     } catch (err: any) {
-      console.error("[v0] Korapay submit error:", err);
-      alert(`Error: ${err.message || "Failed to connect to payment gateway"}`);
+      console.error("Bank transfer error:", err);
+      setKpError("Connection error. Please check your internet and try again.");
       setKpLoading(false);
     }
   }
 
+  // ── Main form submit ──────────────────────────────────────
   async function handleSubmit(e: React.FormEvent) {
-  e.preventDefault();
-  if (payMethod === "bank_transfer") {
-  // Don't leave the page - keep user on checkout while KoraPay loads
-  // The handleKoraPaySubmit function will handle the payment flow
-  await handleKoraPaySubmit();
-  // After successful KoraPay redirect, user will be taken to payment processor
-  // Don't return early - let the async function handle the flow
-  }
-  if (payMethod === "card" && !validateCard()) return;
+    e.preventDefault();
+
+    if (!userId) {
+      alert("Session not ready. Please wait a moment and try again.");
+      return;
+    }
+
+    if (payMethod === "bank_transfer") {
+      await handleBankTransferSubmit();
+      return;
+    }
+
+    if (payMethod === "card" && !validateCard()) return;
+
     if (payMethod === "crypto_wallet") {
       if (!twConfirmed) {
         alert("Please confirm you will send the payment.");
         return;
       }
       if (!cryptoWalletAddress) {
-        alert("Payment wallet not configured.");
+        alert("Payment wallet not configured. Please contact support.");
         return;
       }
     }
+
     setStep("processing");
     setProcessingStep(0);
+
     if (payMethod === "crypto_wallet") {
       setProcessingStep(1);
       await new Promise((r) => setTimeout(r, 1200));
@@ -1008,57 +953,55 @@ function CheckoutInner() {
       await new Promise((r) => setTimeout(r, 800));
       try {
         const txId = `CRYPTO-${Date.now()}`;
-        if (userId) {
-          await supabase
-            .from("payment_transactions")
-            .insert({
-              user_id: userId,
-              node_key: nodeKey,
-              amount: discountedPrice,
-              currency: "USDT",
-              gateway: "crypto_wallet",
-              status: "pending",
-              gateway_reference: txId,
-              receiving_wallet: cryptoWalletAddress,
-              crypto_wallet: twSenderAddress || null,
-              crypto_network: cryptoNetwork,
-              crypto_currency: "USDT",
-              verified_by_admin: false,
-              metadata: JSON.stringify({
-                purchaseType,
-                licenseType,
-                nodeName,
-                gpu,
-                vram,
-                originalAmount: price,
-                discountPercent: cryptoDiscount,
-                daily: dailyEarning,
-                paymentModel,
-                contractMonths,
-                contractLabel,
-                contractMinPct,
-                contractMaxPct,
-                lockInMonths: isContract ? contractMonths : lockInMonths,
-                lockInLabel: isContract ? contractLabel : lockInLabel,
-                countryCode,
-                countryName,
-              }),
-            });
-        }
+        await supabase.from("payment_transactions").insert({
+          user_id: userId,
+          node_key: nodeKey,
+          amount: discountedPrice,
+          currency: "USDT",
+          gateway: "crypto",
+          status: "pending",
+          gateway_reference: txId,
+          receiving_wallet: cryptoWalletAddress,
+          crypto_wallet: twSenderAddress || null,
+          crypto_network: cryptoNetwork,
+          crypto_currency: "USDT",
+          verified_by_admin: false,
+          metadata: JSON.stringify({
+            purchaseType,
+            licenseType,
+            nodeName,
+            gpu,
+            vram,
+            originalAmount: price,
+            discountPercent: cryptoDiscount,
+            daily: dailyEarning,
+            paymentModel,
+            contractMonths,
+            contractLabel,
+            contractMinPct,
+            contractMaxPct,
+            lockInMonths: isContract ? contractMonths : lockInMonths,
+            lockInLabel: isContract ? contractLabel : lockInLabel,
+            countryCode,
+            countryName,
+          }),
+        });
         setTransactionId(txId);
         setStep("pending_crypto");
       } catch (err: any) {
-        setErrorMsg(err.message || "Failed.");
+        setErrorMsg(err.message || "Failed to submit payment details.");
         setStep("failed");
       }
       return;
     }
+
     let cur = 0;
     for (const ps of PROCESSING_STEPS) {
       setProcessingStep(cur);
       await new Promise((r) => setTimeout(r, ps.ms));
       cur++;
     }
+
     try {
       const res = await fetch("/api/checkout", {
         method: "POST",
@@ -1071,7 +1014,7 @@ function CheckoutInner() {
           itype,
           payMethod,
           countryCode,
-          gateway: "moonpay",
+          gateway: "card",
           purchaseType,
           licenseType,
           paymentModel,
@@ -1082,7 +1025,9 @@ function CheckoutInner() {
           lockInMonths: isContract ? contractMonths : lockInMonths,
           lockInMultiplier,
           lockInLabel: isContract ? contractLabel : lockInLabel,
-          cardLast4: card.number ? card.number.replace(/\s/g, "").slice(-4) : "",
+          cardLast4: card.number
+            ? card.number.replace(/\s/g, "").slice(-4)
+            : "",
           cardType: card.number ? detectCardType(card.number) : "unknown",
           cardName: card.name || "",
         }),
@@ -1113,10 +1058,10 @@ function CheckoutInner() {
     licenseType,
     payMethod:
       payMethod === "bank_transfer"
-        ? "Bank Transfer"
+        ? "Bank / Mobile Transfer"
         : payMethod === "crypto_wallet"
-          ? "Crypto Wallet (USDT)"
-          : "Credit/Debit Card",
+          ? "Crypto Payment (USDT)"
+          : "Credit / Debit Card",
     country: countryName,
     date: new Date().toLocaleString("en-US", {
       dateStyle: "long",
@@ -1126,9 +1071,25 @@ function CheckoutInner() {
     originalAmount: price,
     walletAddress: payMethod === "crypto_wallet" ? twSenderAddress : undefined,
   };
+
   const filteredCountries = COUNTRIES.filter((c) =>
     c.name.toLowerCase().includes(countrySearch.toLowerCase()),
   );
+
+  // Show spinner while userId loads
+  if (!userId) {
+    return (
+      <div
+        className="min-h-screen flex items-center justify-center"
+        style={{ background: "#0d1117" }}
+      >
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-10 h-10 border-2 border-t-emerald-400 border-slate-700 rounded-full animate-spin" />
+          <p className="text-slate-400 text-sm">Loading secure checkout...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen py-8 px-4" style={{ background: "#0d1117" }}>
@@ -1147,7 +1108,7 @@ function CheckoutInner() {
         </button>
       </div>
 
-      {/* PENDING CRYPTO */}
+      {/* ── PENDING CRYPTO ── */}
       {step === "pending_crypto" && (
         <div className="max-w-[560px] mx-auto">
           <div
@@ -1239,7 +1200,7 @@ function CheckoutInner() {
               }}
             >
               <p className="text-amber-400 text-xs leading-relaxed">
-                ⚠ <strong>Important:</strong> Send exactly{" "}
+                <strong>Important:</strong> Send exactly{" "}
                 <strong>{discountedPrice.toFixed(2)} USDT</strong> on the{" "}
                 <strong>{cryptoNetwork}</strong> network only.
               </p>
@@ -1248,13 +1209,13 @@ function CheckoutInner() {
               onClick={() => router.push("/dashboard")}
               className="w-full bg-violet-600 hover:bg-violet-500 text-white font-bold py-3 rounded-xl transition-all"
             >
-              I've Sent the Payment — Return to Dashboard
+              {"I've Sent the Payment — Return to Dashboard"}
             </button>
           </div>
         </div>
       )}
 
-      {/* DECLINED */}
+      {/* ── DECLINED ── */}
       {step === "declined" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -1291,7 +1252,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* COUNTRY SELECTION */}
+      {/* ── COUNTRY SELECTION ── */}
       {step === "country" && (
         <div className="max-w-[960px] mx-auto">
           <div className="text-center mb-8">
@@ -1348,7 +1309,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* PAYMENT DETAILS */}
+      {/* ── PAYMENT DETAILS ── */}
       {step === "details" && (
         <div className="max-w-[960px] mx-auto">
           <div className="grid lg:grid-cols-[1fr_400px] gap-8">
@@ -1371,13 +1332,15 @@ function CheckoutInner() {
               cryptoDiscount={cryptoDiscount}
               payMethod={payMethod}
             />
+
             <div>
               <div className="text-xl font-bold text-white mb-2">
                 Choose Payment Method
               </div>
               <p className="text-slate-400 text-xs mb-4">
-                Crypto offers faster processing & exclusive discounts
+                Crypto offers faster processing &amp; exclusive discounts
               </p>
+
               {(() => {
                 const availableMethods = getPaymentMethodsForCountry(
                   countryCode,
@@ -1385,41 +1348,45 @@ function CheckoutInner() {
                 );
                 return (
                   <div className="space-y-3 mb-6">
+                    {/* Crypto Payment */}
                     <button
                       onClick={() => setPayMethod("crypto_wallet")}
                       className={`w-full p-4 rounded-xl transition-all border-2 relative overflow-hidden ${payMethod === "crypto_wallet" ? "bg-gradient-to-r from-violet-600/40 to-purple-600/40 border-violet-400" : "bg-slate-800/50 border-slate-600 hover:border-violet-400/50"}`}
                     >
                       <div className="absolute top-2 right-2 bg-violet-500 text-white text-[10px] font-black px-2 py-1 rounded">
-                        ✨ RECOMMENDED
+                        RECOMMENDED
                       </div>
                       <div className="flex items-center gap-3">
                         <div className="text-2xl">₿</div>
                         <div className="text-left flex-1">
                           <div className="text-white font-bold text-sm">
-                            Crypto Payment
+                            Crypto Payment (USDT)
                           </div>
                           <div className="text-slate-400 text-xs">
-                            {cryptoDiscount}% discount • Instant • Secure
+                            {cryptoDiscount}% discount &bull; Instant &bull;
+                            Secure
                           </div>
                         </div>
                         <div className="text-emerald-400 font-bold text-sm">
-                          ${(price * (1 - cryptoDiscount / 100)).toFixed(2)}
+                          ${discountedPrice.toFixed(2)}
                         </div>
                       </div>
                     </button>
+
+                    {/* Credit / Debit Card */}
                     {availableMethods.includes("card") && (
                       <button
                         onClick={() => router.push("/dashboard/checkout/card")}
-                        className={`w-full p-4 rounded-xl transition-all border-2 bg-slate-800/30 border-slate-700 hover:border-slate-500`}
+                        className="w-full p-4 rounded-xl transition-all border-2 bg-slate-800/30 border-slate-700 hover:border-slate-500"
                       >
                         <div className="flex items-center gap-3">
                           <div className="text-xl">💳</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">
-                              Credit/Debit Card
+                              Credit / Debit Card
                             </div>
                             <div className="text-slate-500 text-xs">
-                              OTP Required • Verify with your bank
+                              OTP Required &bull; Verified &amp; Secure
                             </div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">
@@ -1428,6 +1395,8 @@ function CheckoutInner() {
                         </div>
                       </button>
                     )}
+
+                    {/* Bank / Mobile Transfer */}
                     {availableMethods.includes("bank_transfer") && (
                       <button
                         onClick={() => setPayMethod("bank_transfer")}
@@ -1437,10 +1406,10 @@ function CheckoutInner() {
                           <div className="text-xl">🏦</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">
-                              Local Transfer
+                              Local Bank Transfer
                             </div>
                             <div className="text-slate-500 text-xs">
-                              Bank • Card • Mobile Money
+                              Bank &bull; Card &bull; Mobile Money
                             </div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">
@@ -1452,32 +1421,58 @@ function CheckoutInner() {
                   </div>
                 );
               })()}
+
               <form onSubmit={handleSubmit}>
+                {/* ── Bank Transfer form ── */}
                 {payMethod === "bank_transfer" && (
                   <div
-                    className="rounded-2xl p-6"
+                    className="rounded-2xl p-6 space-y-4"
                     style={{
                       background: "rgba(22,28,36,0.95)",
                       border: "1px solid rgba(255,255,255,0.08)",
                     }}
                   >
-                    <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                    <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                       <p className="text-blue-200 text-xs">
-                        💬 Proceed to Local Transfer payment
+                        You will be redirected to complete your payment securely
+                        via bank transfer, card, or mobile money.
                       </p>
                     </div>
+                    <div>
+                      <label className="block text-slate-400 text-xs mb-1.5">
+                        Phone Number{" "}
+                        <span className="text-slate-600">(optional)</span>
+                      </label>
+                      <input
+                        type="tel"
+                        placeholder="e.g. 08012345678"
+                        value={kpPhone}
+                        onChange={(e) => setKpPhone(e.target.value)}
+                        className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    {/* Error shown inline — no redirect on failure */}
+                    {kpError && (
+                      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                        <p className="text-red-300 text-xs">{kpError}</p>
+                      </div>
+                    )}
                     <button
                       type="submit"
                       disabled={kpLoading}
-                      className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2"
+                      className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
                     >
                       {kpLoading && (
                         <Loader2 size={16} className="animate-spin" />
                       )}
-                      {kpLoading ? "Redirecting..." : "Proceed to Payment"}
+                      {kpLoading
+                        ? "Connecting to payment gateway..."
+                        : "Proceed to Secure Payment"}
                     </button>
                   </div>
                 )}
+
+                {/* ── Crypto Wallet form ── */}
                 {payMethod === "crypto_wallet" && (
                   <div
                     className="rounded-2xl p-6 space-y-5"
@@ -1488,11 +1483,11 @@ function CheckoutInner() {
                   >
                     <div>
                       <p className="text-violet-300 font-black text-sm mb-1">
-                        ₿ Pay with USDT
+                        Pay with USDT
                       </p>
                       <p className="text-slate-500 text-xs">
-                        Open your wallet → scan QR or copy address → send exact
-                        amount
+                        Open your crypto wallet, scan the QR code or copy the
+                        address, then send the exact amount.
                       </p>
                     </div>
                     {!configLoaded ? (
@@ -1511,10 +1506,10 @@ function CheckoutInner() {
                         }}
                       >
                         <p className="text-rose-400 text-xs font-bold">
-                          ⚠ Crypto payment not configured
+                          Crypto payment not currently available
                         </p>
                         <p className="text-rose-400/70 text-xs mt-1">
-                          Please use card payment or contact support.
+                          Please use card or bank transfer, or contact support.
                         </p>
                       </div>
                     ) : (
@@ -1538,7 +1533,7 @@ function CheckoutInner() {
                           )}
                         </div>
                         <p className="text-center text-slate-400 text-xs">
-                          Scan with TrustWallet
+                          Scan with your crypto wallet app
                         </p>
                         <div>
                           <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1.5 font-bold">
@@ -1585,7 +1580,7 @@ function CheckoutInner() {
                     )}
                     <div>
                       <label className="block text-white text-sm font-bold mb-1.5">
-                        Your TrustWallet Address{" "}
+                        Your Wallet Address{" "}
                         <span className="text-slate-500 font-normal text-xs">
                           (optional)
                         </span>
@@ -1628,44 +1623,52 @@ function CheckoutInner() {
                             : undefined,
                       }}
                     >
-                      I've Reviewed — Submit Payment Details
+                      Submit Payment Details
                     </button>
                   </div>
                 )}
+
+                {/* ── Card (pre-filled) ── */}
                 {payMethod === "card" && card.number && (
                   <div className="rounded-2xl p-6 bg-slate-900/80 border border-white/8 space-y-4">
                     <div className="space-y-3">
-                      <div className="flex justify-between items-center py-2 border-b border-slate-700">
-                        <span className="text-slate-400 text-sm">Card Number</span>
-                        <span className="text-white font-mono text-sm">
-                          •••• {card.number.replace(/\s/g, "").slice(-4)}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center py-2 border-b border-slate-700">
-                        <span className="text-slate-400 text-sm">Cardholder</span>
-                        <span className="text-white text-sm">{card.name}</span>
-                      </div>
-                      <div className="flex justify-between items-center py-2">
-                        <span className="text-slate-400 text-sm">Expiry</span>
-                        <span className="text-white text-sm">{card.expiry}</span>
-                      </div>
+                      {[
+                        [
+                          "Card Number",
+                          `•••• ${card.number.replace(/\s/g, "").slice(-4)}`,
+                        ],
+                        ["Cardholder", card.name],
+                        ["Expiry", card.expiry],
+                      ].map(([l, v]) => (
+                        <div
+                          key={l}
+                          className="flex justify-between items-center py-2 border-b border-slate-700 last:border-0"
+                        >
+                          <span className="text-slate-400 text-sm">{l}</span>
+                          <span className="text-white font-mono text-sm">
+                            {v}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                     <div className="rounded-lg p-4 bg-emerald-500/10 border border-emerald-500/30">
                       <p className="text-emerald-300 text-xs flex gap-2 items-start">
                         <Lock size={14} className="shrink-0 mt-0.5" />
                         <span>
-                          Your card details are encrypted. You'll receive an OTP
-                          for secure verification.
+                          Your card details are encrypted. You will receive an
+                          OTP for final verification.
                         </span>
                       </p>
                     </div>
                     <button
                       type="submit"
-                      disabled={!card.number || !card.name || !card.expiry || !card.cvv}
+                      disabled={
+                        !card.number || !card.name || !card.expiry || !card.cvv
+                      }
                       className="w-full py-3 rounded-xl font-bold flex items-center justify-center gap-2 transition-all bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <Lock size={16} />
-                      Complete Payment
+                      Complete Payment — ${price.toFixed(2)}
                     </button>
                   </div>
                 )}
@@ -1675,7 +1678,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* PROCESSING */}
+      {/* ── PROCESSING ── */}
       {step === "processing" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -1716,7 +1719,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* SUCCESS */}
+      {/* ── SUCCESS ── */}
       {step === "success" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -1762,7 +1765,7 @@ function CheckoutInner() {
             <div className="flex gap-3">
               <button
                 onClick={() => setShowReceipt(true)}
-                className="flex-1 border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white font-bold py-3 rounded-lg"
+                className="flex-1 border border-slate-700 hover:border-slate-500 text-slate-300 hover:text-white font-bold py-3 rounded-lg transition-all"
               >
                 View Receipt
               </button>
@@ -1774,7 +1777,7 @@ function CheckoutInner() {
                       : "/dashboard/gpu-plans",
                   )
                 }
-                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg"
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg transition-all"
               >
                 {purchaseType === "license" ? "Go to Tasks" : "View Portfolio"}
               </button>
@@ -1783,7 +1786,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* FAILED */}
+      {/* ── FAILED ── */}
       {step === "failed" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -1800,18 +1803,18 @@ function CheckoutInner() {
               Payment Failed
             </h2>
             <p className="text-slate-400 text-sm text-center mb-4">
-              {errorMsg}
+              {errorMsg || "Something went wrong. Please try again."}
             </p>
             <div className="flex gap-3">
               <button
                 onClick={() => setStep("details")}
-                className="flex-1 border border-slate-700 text-slate-300 font-bold py-3 rounded-lg"
+                className="flex-1 border border-slate-700 hover:border-slate-500 text-slate-300 font-bold py-3 rounded-lg transition-all"
               >
                 Try Again
               </button>
               <button
                 onClick={() => router.back()}
-                className="flex-1 bg-slate-700 text-white font-bold py-3 rounded-lg"
+                className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-lg transition-all"
               >
                 Back
               </button>
@@ -1823,7 +1826,7 @@ function CheckoutInner() {
   );
 }
 
-// ─── EXPORT: wraps CheckoutInner in Suspense for Next.js static build ──────���──
+// ─── Export ───────────────────────────────────────────────────
 export default function CheckoutPage() {
   return (
     <Suspense
@@ -1832,7 +1835,7 @@ export default function CheckoutPage() {
           className="min-h-screen flex items-center justify-center"
           style={{ background: "#0d1117" }}
         >
-          <div className="w-10 h-10 border-2 border-t-emerald-400 rounded-full animate-spin" />
+          <div className="w-10 h-10 border-2 border-t-emerald-400 border-slate-700 rounded-full animate-spin" />
         </div>
       }
     >
