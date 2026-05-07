@@ -1,508 +1,115 @@
-// app/api/checkout/route.ts
-// FIXED: uses correct column name has_operator_license (not has_opertor_license)
-// FIXED: passes all metadata correctly for license vs gpu_plan purchases
-// FIXED: activateNode now handles both license and gpu_plan purchase types
-
-import { NextRequest, NextResponse } from "next/server";
+// app/api/korapay/webhook/route.ts
 import { createClient } from "@supabase/supabase-js";
+import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function getSupabaseAdmin() {
+function getSupabaseClient() {
   return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
+    process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+    process.env.SUPABASE_SERVICE_ROLE_KEY || "",
   );
-}
-
-async function getGatewayConfig() {
-  const supabaseAdmin = getSupabaseAdmin();
-  const { data } = await supabaseAdmin
-    .from("payment_config")
-    .select("key,value");
-  const cfg: Record<string, string> = {};
-  (data || []).forEach((r: any) => {
-    cfg[r.key] = r.value;
-  });
-  return cfg;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const supabaseAdmin = getSupabaseAdmin();
+    const supabase = getSupabaseClient();
     const body = await req.json();
-    const {
-      userId,
-      nodeKey,
-      amount,
-      currency = "USD",
-      itype = "on_demand",
-      payMethod = "card",
-      countryCode,
-      cardLast4,
-      cardType,
-      cardName,
-      phone,
-      walletAddress,
-      gateway = "moonpay",
-      // Purchase type
-      purchaseType = "gpu_plan",
-      licenseType,
-      // Contract/lock-in data
-      paymentModel = "flexible",
-      contractMonths,
-      contractLabel,
-      contractMinPct,
-      contractMaxPct,
-      lockInMonths = 0,
-      lockInMultiplier = 1,
-      lockInLabel = "Flexible",
-    } = body;
+    console.log("[v0] KoraPay webhook received:", body);
 
-    if (!userId || !nodeKey || !amount) {
+    const { data, event } = body;
+    const reference = data?.reference;
+
+    if (!reference) {
       return NextResponse.json(
-        { error: "Missing required fields" },
+        { error: "Missing reference" },
         { status: 400 },
       );
     }
 
-    const { data: user, error: userErr } = await supabaseAdmin
-      .from("users")
-      .select("email, full_name, kyc_verified, kyc_status")
-      .eq("id", userId)
-      .single();
+    // Verify webhook signature if KoraPay provides one
+    // (Add signature verification based on KoraPay's documentation)
 
-    if (userErr || !user) {
-      return NextResponse.json({ error: "User not found" }, { status: 404 });
-    }
-
-    // Check KYC verification before allowing purchase
-    // Users can start mining immediately, but KYC is required for withdrawal
-    // Note: This is informational. Frontend enforces the primary check.
-    const isKYCApproved = user.kyc_verified === true || user.kyc_status === "approved";
-    if (!isKYCApproved) {
-      console.log(`[v0] KYC not approved for user ${userId} - mining can start, but withdrawal will be blocked`);
-    }
-
-    const cfg = await getGatewayConfig();
-    const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-    const isDev =
-      process.env.NODE_ENV === "development" ||
-      !cfg.moonpay_api_key ||
-      cfg.moonpay_api_key === "EMPTY";
-
-    const sharedMetadata = {
-      purchaseType,
-      licenseType: purchaseType === "license" ? licenseType || nodeKey : null,
-      paymentModel,
-      contractMonths: contractMonths || null,
-      contractLabel: contractLabel || null,
-      contractMinPct: contractMinPct || null,
-      contractMaxPct: contractMaxPct || null,
-      lockInMonths,
-      lockInMultiplier,
-      lockInLabel,
-      itype,
-      countryCode,
-      externalId,
-    };
-
-    // ── Crypto Wallet: save as PENDING — admin approves manually ──
-    if (payMethod === "crypto_wallet" || gateway === "crypto_wallet") {
-      const { data: txn, error: txnErr } = await supabaseAdmin
+    if (event === "charge.success") {
+      // Payment successful
+      const { data: txData } = await supabase
         .from("payment_transactions")
-        .insert({
-          user_id: userId,
-          node_key: nodeKey,
-          amount,
-          currency: "USDT",
-          gateway: "crypto_wallet",
-          gateway_reference: externalId,
-          status: "pending",
-          crypto_currency: "USDT",
-          crypto_network: "TRC20",
-          crypto_wallet: walletAddress || null,
-          verified_by_admin: false,
-          metadata: JSON.stringify(sharedMetadata),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .select()
+        .select("*")
+        .eq("transaction_id", reference)
         .single();
 
-      if (txnErr) {
-        console.error("Payment transaction insert error:", txnErr);
-        return NextResponse.json({ error: txnErr.message }, { status: 500 });
-      }
-
-      return NextResponse.json({
-        success: true,
-        transactionId: txn.id,
-        externalId,
-        status: "pending",
-        requiresAdminApproval: true,
-      });
-    }
-
-    // ── Bank Transfer (Local Transfer) ──
-    if (payMethod === "bank_transfer") {
-      const korapayKey = cfg.korapay_secret_key || cfg.korapay_api_key;
-      if (!korapayKey || korapayKey === "EMPTY") {
+      if (!txData) {
+        console.error("[v0] Transaction not found for webhook:", reference);
         return NextResponse.json(
-          { error: "Bank transfer not configured" },
-          { status: 500 },
+          { error: "Transaction not found" },
+          { status: 404 },
         );
       }
 
-      const { data: txn, error: txnErr } = await supabaseAdmin
+      // Parse metadata
+      const metadata = txData.metadata ? JSON.parse(txData.metadata) : {};
+
+      // Update transaction
+      await supabase
         .from("payment_transactions")
-        .insert({
-          user_id: userId,
-          node_key: nodeKey,
-          amount,
-          currency,
-          gateway: "bank_transfer",
-          gateway_reference: externalId,
-          status: "pending",
-          metadata: JSON.stringify(sharedMetadata),
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
+        .update({ status: "completed" })
+        .eq("transaction_id", reference);
 
-      if (txnErr) {
-        return NextResponse.json({ error: txnErr.message }, { status: 500 });
-      }
-
-      try {
-        const koraRes = await fetch(
-          "https://api.korapay.com/merchant/api/v1/charges/initialize",
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${korapayKey}`,
-            },
-            body: JSON.stringify({
-              reference: externalId,
-              amount: amount,
-              currency: countryCode === "NG" ? "NGN" : "USD",
-              customer: {
-                email: user.email,
-                name: user.full_name || "OmniTask User",
-                phone: phone || "",
-              },
-              notification_url: `${process.env.NEXT_PUBLIC_APP_URL}/api/korapay/webhook`,
-              redirect_url: `${process.env.NEXT_PUBLIC_APP_URL}/api/korapay/callback?reference=${externalId}&userId=${userId}`,
-              metadata: { userId, nodeKey, ...sharedMetadata },
-            }),
-          },
-        );
-
-        const koraData = await koraRes.json();
-        if (!koraRes.ok) {
-          await supabaseAdmin
-            .from("payment_transactions")
-            .update({
-              status: "failed",
-              failure_reason: koraData.message || "KoraPay init failed",
-            })
-            .eq("id", txn.id);
-          return NextResponse.json(
-            { error: koraData.message || "Failed to initialize KoraPay" },
-            { status: 502 },
-          );
-        }
-
-        return NextResponse.json({
-          success: true,
-          transactionId: txn.id,
-          checkoutUrl: koraData.data?.checkout_url,
-          status: "pending",
-        });
-      } catch (err: any) {
-        return NextResponse.json(
-          { error: "Failed to connect to KoraPay" },
-          { status: 502 },
-        );
-      }
-    }
-
-    // ── Card payment ──
-    const { data: txn, error: txnErr } = await supabaseAdmin
-      .from("payment_transactions")
-      .insert({
-        user_id: userId,
-        node_key: nodeKey,
-        amount,
-        currency,
-        gateway,
-        gateway_reference: externalId,
-        status: "pending",
-        card_last4: cardLast4 || null,
-        card_type: cardType || null,
-        card_name: cardName || null,
-        metadata: JSON.stringify(sharedMetadata),
+      // Create node allocation
+      await supabase.from("node_allocations").insert({
+        user_id: txData.user_id,
+        plan_id: txData.plan_id,
+        amount_paid: txData.amount,
+        payment_status: "completed",
+        payment_gateway: "korapay",
+        transaction_id: reference,
+        instance_type: txData.instance_type,
+        country_code: txData.country_code,
+        lock_in_months: metadata.lockInMonths || 6,
+        lock_in_multiplier: metadata.lockInMultiplier || 1,
         created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (txnErr) {
-      return NextResponse.json({ error: txnErr.message }, { status: 500 });
-    }
-
-    // Dev mode: instant approval
-    if (isDev) {
-      await activatePurchase({
-        userId,
-        nodeKey,
-        transactionId: txn.id,
-        amount,
-        purchaseType,
-        licenseType: licenseType || nodeKey,
-        paymentModel,
-        contractMonths,
-        contractLabel,
-        contractMinPct,
-        contractMaxPct,
-        lockInMonths,
-        lockInMultiplier,
-        lockInLabel,
-        itype,
       });
 
-      return NextResponse.json({
-        success: true,
-        transactionId: externalId,
-        externalId,
-        status: "confirmed",
-      });
-    }
+      // Credit user balance
+      const { data: existingBalance } = await supabase
+        .from("user_balances")
+        .select("balance")
+        .eq("user_id", txData.user_id)
+        .single();
 
-    // Production MoonPay
-    if (cfg.moonpay_api_key && cfg.moonpay_api_key !== "EMPTY") {
-      const receivingWallet = cfg.crypto_wallet_usdt_trc20 || "";
-      const moonRes = await fetch("https://api.moonpay.com/v1/transactions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Api-Key": cfg.moonpay_api_key,
-        },
-        body: JSON.stringify({
-          baseCurrencyAmount: amount,
-          baseCurrencyCode: currency.toLowerCase(),
-          currencyCode: "usdt_trc20",
-          walletAddress: receivingWallet,
-          externalTransactionId: externalId,
-          email: user.email,
-          returnUrl: `${process.env.NEXT_PUBLIC_APP_URL}/dashboard/checkout/complete`,
-          webhookUrl: `${process.env.NEXT_PUBLIC_APP_URL}/api/checkout/webhook`,
-          paymentMethod: "credit_debit_card",
-          theme: "dark",
-        }),
-      });
-
-      if (!moonRes.ok) {
-        const errText = await moonRes.text();
-        throw new Error(`MoonPay error: ${errText}`);
+      if (existingBalance) {
+        await supabase
+          .from("user_balances")
+          .update({
+            balance: existingBalance.balance + txData.amount,
+          })
+          .eq("user_id", txData.user_id);
+      } else {
+        await supabase.from("user_balances").insert({
+          user_id: txData.user_id,
+          balance: txData.amount,
+        });
       }
 
-      const moonData = await moonRes.json();
-      return NextResponse.json({
-        success: true,
-        transactionId: externalId,
-        gatewayUrl: moonData.url,
-        status: "pending",
-        requiresRedirect: true,
-      });
+      return NextResponse.json({ success: true });
+    } else if (event === "charge.failed" || event === "charge.declined") {
+      // Payment failed
+      await supabase
+        .from("payment_transactions")
+        .update({ status: "declined" })
+        .eq("transaction_id", reference);
+
+      return NextResponse.json({ success: true });
     }
 
-    // Fallback: activate directly
-    await activatePurchase({
-      userId,
-      nodeKey,
-      transactionId: txn.id,
-      amount,
-      purchaseType,
-      licenseType: licenseType || nodeKey,
-      paymentModel,
-      contractMonths,
-      contractLabel,
-      contractMinPct,
-      contractMaxPct,
-      lockInMonths,
-      lockInMultiplier,
-      lockInLabel,
-      itype,
-    });
-
-    return NextResponse.json({
-      success: true,
-      transactionId: externalId,
-      status: "confirmed",
-    });
+    return NextResponse.json({ success: true });
   } catch (err: any) {
-    console.error("Checkout error:", err);
+    console.error("[v0] KoraPay webhook error:", err);
     return NextResponse.json(
-      { error: err.message || "Payment failed" },
+      { error: err.message || "Internal server error" },
       { status: 500 },
     );
   }
 }
-
-// ── Activate purchase after confirmed payment ─────────────────────────────────
-async function activatePurchase({
-  userId,
-  nodeKey,
-  transactionId,
-  amount,
-  purchaseType,
-  licenseType,
-  paymentModel,
-  contractMonths,
-  contractLabel,
-  contractMinPct,
-  contractMaxPct,
-  lockInMonths,
-  lockInMultiplier,
-  lockInLabel,
-  itype,
-}: {
-  userId: string;
-  nodeKey: string;
-  transactionId: number;
-  amount: number;
-  purchaseType: string;
-  licenseType: string;
-  paymentModel: string;
-  contractMonths?: number;
-  contractLabel?: string;
-  contractMinPct?: number;
-  contractMaxPct?: number;
-  lockInMonths: number;
-  lockInMultiplier: number;
-  lockInLabel: string;
-  itype: string;
-}) {
-  const now = new Date().toISOString();
-  const fourYears = new Date(
-    Date.now() + 4 * 365 * 24 * 3600 * 1000,
-  ).toISOString();
-
-  // Confirm payment transaction
-  await supabaseAdmin
-    .from("payment_transactions")
-    .update({
-      status: "confirmed",
-      verified_by_admin: true,
-      confirmed_at: now,
-      updated_at: now,
-    })
-    .eq("id", transactionId);
-
-  if (purchaseType === "license") {
-    // ── ACTIVATE LICENSE ──
-    const resolvedLicenseType =
-      licenseType === "operator_license" ? "all" : licenseType;
-
-    // Write to operator_licenses — trigger will sync to users table
-   await supabaseAdmin.from("operator_licenses").upsert(
-     {
-       user_id: userId,
-       license_type: resolvedLicenseType,
-       status: "active",
-       expires_at: fourYears,
-       purchased_at: now,
-       amount_paid: amount,
-       transaction_ref: String(transactionId),
-     },
-     { onConflict: "user_id,license_type" },
-   );
-    // Also directly update users (belt and suspenders)
-    await supabaseAdmin
-      .from("users")
-      .update({
-        has_operator_license: true, // correct column name
-        license_expires_at: fourYears,
-        node_activated_at: now,
-      })
-      .eq("id", userId);
-  } else {
-    // ── ACTIVATE GPU NODE ──
-    const isContract = paymentModel === "contract";
-    const maturityDate =
-      isContract && contractMonths
-        ? new Date(
-            Date.now() + contractMonths * 30 * 24 * 3600 * 1000,
-          ).toISOString()
-        : null;
-
-    await supabaseAdmin.from("node_allocations").insert({
-      user_id: userId,
-      plan_id: nodeKey,
-      amount_invested: amount,
-      currency: "USD",
-      instance_type: itype,
-      payment_model: paymentModel,
-      contract_months: contractMonths || null,
-      contract_label: contractLabel || null,
-      contract_min_pct: contractMinPct || null,
-      contract_max_pct: contractMaxPct || null,
-      maturity_date: maturityDate,
-      lock_in_months: lockInMonths,
-      lock_in_multiplier: lockInMultiplier,
-      lock_in_label: lockInLabel,
-      status: "active",
-      total_earned: 0,
-      total_withdrawn: 0,
-      created_at: now,
-      updated_at: now,
-    });
-
-    // Update user balance_locked
-    const { data: u } = await supabaseAdmin
-      .from("users")
-      .select("balance_locked")
-      .eq("id", userId)
-      .single();
-    await supabaseAdmin
-      .from("users")
-      .update({
-        balance_locked: (u?.balance_locked || 0) + amount,
-      })
-      .eq("id", userId);
-  }
-
-  // Write to transaction_ledger
-  try {
-    await supabaseAdmin.from("transaction_ledger").insert({
-      user_id: userId,
-      type: purchaseType === "license" ? "license_purchase" : "investment",
-      amount,
-      description:
-        purchaseType === "license"
-          ? `Operator License activated: ${licenseType}`
-          : `GPU Node investment: ${nodeKey} (${lockInLabel})`,
-      reference_id: String(transactionId),
-      metadata: {
-        nodeKey,
-        purchaseType,
-        licenseType,
-        paymentModel,
-        lockInMonths,
-        lockInLabel,
-      },
-      created_at: now,
-    });
-  } catch (e) {
-    /* ledger optional */
-  }
-}
-
-export {};

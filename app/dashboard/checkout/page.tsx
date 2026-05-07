@@ -54,15 +54,14 @@ const getPaymentMethodsForCountry = (
   return methods;
 };
 
-// Currency conversion rates (USD → local)
 const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
-  NG: { currency: "NGN", rate: 766 },
+  NG: { currency: "NGN", rate: 1600 },
   KE: { currency: "KES", rate: 130 },
-  GH: { currency: "GHS", rate: 12.5 },
+  GH: { currency: "GHS", rate: 15 },
   ZA: { currency: "ZAR", rate: 18 },
   CM: { currency: "XAF", rate: 600 },
   CI: { currency: "XOF", rate: 600 },
-  EG: { currency: "EGP", rate: 30 },
+  EG: { currency: "EGP", rate: 48 },
   TZ: { currency: "TZS", rate: 2500 },
 };
 
@@ -101,7 +100,7 @@ const COUNTRIES = [
   { code: "MA", name: "Morocco" },
   { code: "NL", name: "Netherlands" },
   { code: "NZ", name: "New Zealand" },
-  { code: "NG", name: "Nigeria" },
+  { code: "NG", name: "Nigeria (NGN)" },
   { code: "NO", name: "Norway" },
   { code: "PK", name: "Pakistan" },
   { code: "PH", name: "Philippines" },
@@ -187,23 +186,6 @@ function detectCardType(n: string): "visa" | "mc" | "unsupported" {
   if (/^4/.test(d)) return "visa";
   if (/^5[1-5]|^2[2-7]/.test(d)) return "mc";
   return "unsupported";
-}
-
-function validateCardNumber(num: string): boolean {
-  const digits = num.replace(/\s/g, "").replace(/\D/g, "");
-  if (digits.length < 13 || digits.length > 19) return false;
-  let sum = 0,
-    isEven = false;
-  for (let i = digits.length - 1; i >= 0; i--) {
-    let digit = parseInt(digits.charAt(i), 10);
-    if (isEven) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    isEven = !isEven;
-  }
-  return sum % 10 === 0;
 }
 
 const PROCESSING_STEPS = [
@@ -709,14 +691,16 @@ function CheckoutInner() {
     expiry: "",
     cvv: "",
   });
-  const [errors, setErrors] = useState<Partial<typeof card>>({});
   const [saveCard, setSaveCard] = useState(false);
   const [cardPhoneNumber, setCardPhoneNumber] = useState("");
+  // Bank transfer state
   const [kpPhone, setKpPhone] = useState("");
   const [kpLoading, setKpLoading] = useState(false);
   const [kpError, setKpError] = useState("");
+  // Crypto state
   const [twSenderAddress, setTwSenderAddress] = useState("");
   const [twConfirmed, setTwConfirmed] = useState(false);
+  const [cryptoError, setCryptoError] = useState("");
 
   // ── URL params ────────────────────────────────────────────
   const rawPurchaseType = params.get("purchaseType");
@@ -781,7 +765,8 @@ function CheckoutInner() {
         .from("payment_config")
         .select("key,value");
       if (data) {
-        const get = (k: string) => data.find((d) => d.key === k)?.value || "";
+        const get = (k: string) =>
+          data.find((d: any) => d.key === k)?.value || "";
         const disc = get("crypto_discount_percent");
         const wallet = get("crypto_wallet_usdt_trc20");
         const network = get("crypto_network_label");
@@ -798,7 +783,7 @@ function CheckoutInner() {
   }, []);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
+    supabase.auth.getUser().then(({ data: { user } }: any) => {
       if (!user) {
         router.push("/auth/signin");
         return;
@@ -828,26 +813,12 @@ function CheckoutInner() {
     }
   }, []);
 
-  // When country changes, set default payment method — do NOT redirect
   useEffect(() => {
     if (!countryCode) return;
     setPayMethod(isBankTransferAvailable ? "bank_transfer" : "crypto_wallet");
   }, [countryCode, isBankTransferAvailable]);
 
-  function validateCard() {
-    const e: Partial<typeof card> = {};
-    if (card.number.replace(/\s/g, "").length < 15)
-      e.number = "Invalid card number";
-    if (!card.name.trim()) e.name = "Name required";
-    const [mm, yy] = card.expiry.split("/");
-    if (!mm || !yy || parseInt(mm) > 12 || parseInt(yy) < 25)
-      e.expiry = "Invalid expiry";
-    if (card.cvv.length < 3) e.cvv = "Invalid CVV";
-    setErrors(e);
-    return Object.keys(e).length === 0;
-  }
-
-  // ── Bank Transfer submit — NO timeout, NO forced redirect ─
+  // ── Bank Transfer submit ──────────────────────────────────
   async function handleBankTransferSubmit() {
     if (!userId) {
       setKpError("Session not ready. Please wait and try again.");
@@ -858,20 +829,17 @@ function CheckoutInner() {
 
     try {
       const conversion = CURRENCY_RATES[countryCode];
-      const localCurrency = conversion?.currency ?? "USD";
+      const localCurrency = conversion?.currency ?? "NGN";
       const convertedPrice = conversion
         ? parseFloat((price * conversion.rate).toFixed(2))
         : price;
-
-      const safePhone =
-        kpPhone.trim() || userId.replace(/-/g, "").slice(0, 11).padEnd(11, "0");
 
       const res = await fetch("/api/korapay/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
-          phone: safePhone,
+          phone: kpPhone.trim() || "",
           nodeKey,
           nodeName,
           price: convertedPrice,
@@ -899,7 +867,6 @@ function CheckoutInner() {
       const data = await res.json();
 
       if (!res.ok || !data.checkoutUrl) {
-        // Show error on page — do NOT redirect anywhere
         setKpError(
           data.error || "Payment initiation failed. Please try again.",
         );
@@ -907,7 +874,7 @@ function CheckoutInner() {
         return;
       }
 
-      // Only redirect when we have a valid checkout URL
+      // Redirect to KoraPay checkout
       window.location.href = data.checkoutUrl;
     } catch (err: any) {
       console.error("Bank transfer error:", err);
@@ -921,7 +888,7 @@ function CheckoutInner() {
     e.preventDefault();
 
     if (!userId) {
-      alert("Session not ready. Please wait a moment and try again.");
+      setErrorMsg("Session not ready. Please wait a moment and try again.");
       return;
     }
 
@@ -930,15 +897,16 @@ function CheckoutInner() {
       return;
     }
 
-    if (payMethod === "card" && !validateCard()) return;
-
     if (payMethod === "crypto_wallet") {
+      setCryptoError("");
       if (!twConfirmed) {
-        alert("Please confirm you will send the payment.");
+        setCryptoError("Please confirm you will send the payment.");
         return;
       }
       if (!cryptoWalletAddress) {
-        alert("Payment wallet not configured. Please contact support.");
+        setCryptoError(
+          "Payment wallet not configured. Please contact support.",
+        );
         return;
       }
     }
@@ -953,39 +921,43 @@ function CheckoutInner() {
       await new Promise((r) => setTimeout(r, 800));
       try {
         const txId = `CRYPTO-${Date.now()}`;
-        await supabase.from("payment_transactions").insert({
-          user_id: userId,
-          node_key: nodeKey,
-          amount: discountedPrice,
-          currency: "USDT",
-          gateway: "crypto",
-          status: "pending",
-          gateway_reference: txId,
-          receiving_wallet: cryptoWalletAddress,
-          crypto_wallet: twSenderAddress || null,
-          crypto_network: cryptoNetwork,
-          crypto_currency: "USDT",
-          verified_by_admin: false,
-          metadata: JSON.stringify({
-            purchaseType,
-            licenseType,
-            nodeName,
-            gpu,
-            vram,
-            originalAmount: price,
-            discountPercent: cryptoDiscount,
-            daily: dailyEarning,
-            paymentModel,
-            contractMonths,
-            contractLabel,
-            contractMinPct,
-            contractMaxPct,
-            lockInMonths: isContract ? contractMonths : lockInMonths,
-            lockInLabel: isContract ? contractLabel : lockInLabel,
-            countryCode,
-            countryName,
-          }),
-        });
+        const { error: insertErr } = await supabase
+          .from("payment_transactions")
+          .insert({
+            user_id: userId,
+            node_key: nodeKey,
+            amount: discountedPrice,
+            currency: "USDT",
+            gateway: "crypto",
+            status: "pending",
+            gateway_reference: txId,
+            receiving_wallet: cryptoWalletAddress,
+            crypto_wallet: twSenderAddress || null,
+            crypto_network: cryptoNetwork,
+            crypto_currency: "USDT",
+            verified_by_admin: false,
+            metadata: JSON.stringify({
+              purchaseType,
+              licenseType,
+              nodeName,
+              gpu,
+              vram,
+              originalAmount: price,
+              discountPercent: cryptoDiscount,
+              daily: dailyEarning,
+              paymentModel,
+              contractMonths,
+              contractLabel,
+              contractMinPct,
+              contractMaxPct,
+              lockInMonths: isContract ? contractMonths : lockInMonths,
+              lockInLabel: isContract ? contractLabel : lockInLabel,
+              countryCode,
+              countryName,
+            }),
+          });
+
+        if (insertErr) throw insertErr;
         setTransactionId(txId);
         setStep("pending_crypto");
       } catch (err: any) {
@@ -995,6 +967,7 @@ function CheckoutInner() {
       return;
     }
 
+    // Card payment
     let cur = 0;
     for (const ps of PROCESSING_STEPS) {
       setProcessingStep(cur);
@@ -1076,7 +1049,6 @@ function CheckoutInner() {
     c.name.toLowerCase().includes(countrySearch.toLowerCase()),
   );
 
-  // Show spinner while userId loads
   if (!userId) {
     return (
       <div
@@ -1232,7 +1204,8 @@ function CheckoutInner() {
               Payment Declined
             </h2>
             <p className="text-slate-400 text-sm text-center mb-5">
-              Your payment was declined or cancelled. Please try again.
+              Your payment was declined or cancelled. Please try again with a
+              different method.
             </p>
             <div className="flex gap-3">
               <button
@@ -1350,6 +1323,7 @@ function CheckoutInner() {
                   <div className="space-y-3 mb-6">
                     {/* Crypto Payment */}
                     <button
+                      type="button"
                       onClick={() => setPayMethod("crypto_wallet")}
                       className={`w-full p-4 rounded-xl transition-all border-2 relative overflow-hidden ${payMethod === "crypto_wallet" ? "bg-gradient-to-r from-violet-600/40 to-purple-600/40 border-violet-400" : "bg-slate-800/50 border-slate-600 hover:border-violet-400/50"}`}
                     >
@@ -1376,6 +1350,7 @@ function CheckoutInner() {
                     {/* Credit / Debit Card */}
                     {availableMethods.includes("card") && (
                       <button
+                        type="button"
                         onClick={() => router.push("/dashboard/checkout/card")}
                         className="w-full p-4 rounded-xl transition-all border-2 bg-slate-800/30 border-slate-700 hover:border-slate-500"
                       >
@@ -1386,7 +1361,7 @@ function CheckoutInner() {
                               Credit / Debit Card
                             </div>
                             <div className="text-slate-500 text-xs">
-                              OTP Required &bull; Verified &amp; Secure
+                              OTP Required &bull; Verify with your bank
                             </div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">
@@ -1399,6 +1374,7 @@ function CheckoutInner() {
                     {/* Bank / Mobile Transfer */}
                     {availableMethods.includes("bank_transfer") && (
                       <button
+                        type="button"
                         onClick={() => setPayMethod("bank_transfer")}
                         className={`w-full p-4 rounded-xl transition-all border-2 ${payMethod === "bank_transfer" ? "bg-blue-700/20 border-blue-400" : "bg-slate-800/30 border-slate-700 hover:border-blue-500/50"}`}
                       >
@@ -1406,7 +1382,7 @@ function CheckoutInner() {
                           <div className="text-xl">🏦</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">
-                              Local Bank Transfer
+                              Local Transfer
                             </div>
                             <div className="text-slate-500 text-xs">
                               Bank &bull; Card &bull; Mobile Money
@@ -1429,15 +1405,31 @@ function CheckoutInner() {
                     className="rounded-2xl p-6 space-y-4"
                     style={{
                       background: "rgba(22,28,36,0.95)",
-                      border: "1px solid rgba(255,255,255,0.08)",
+                      border: "1px solid rgba(59,130,246,0.25)",
                     }}
                   >
                     <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
-                      <p className="text-blue-200 text-xs">
+                      <p className="text-blue-200 text-xs leading-relaxed">
                         You will be redirected to complete your payment securely
                         via bank transfer, card, or mobile money.
                       </p>
                     </div>
+
+                    {/* Conversion preview */}
+                    {CURRENCY_RATES[countryCode] && (
+                      <div className="p-3 bg-emerald-500/8 border border-emerald-500/20 rounded-lg">
+                        <p className="text-emerald-300 text-xs">
+                          Approx. amount:{" "}
+                          <strong>
+                            {CURRENCY_RATES[countryCode].currency}{" "}
+                            {(
+                              price * CURRENCY_RATES[countryCode].rate
+                            ).toLocaleString()}
+                          </strong>
+                        </p>
+                      </div>
+                    )}
+
                     <div>
                       <label className="block text-slate-400 text-xs mb-1.5">
                         Phone Number{" "}
@@ -1451,23 +1443,34 @@ function CheckoutInner() {
                         className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500"
                       />
                     </div>
-                    {/* Error shown inline — no redirect on failure */}
+
+                    {/* Error shown inline — NO alert() */}
                     {kpError && (
-                      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
                         <p className="text-red-300 text-xs">{kpError}</p>
                       </div>
                     )}
+
                     <button
                       type="submit"
                       disabled={kpLoading}
                       className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all"
                     >
-                      {kpLoading && (
-                        <Loader2 size={16} className="animate-spin" />
+                      {kpLoading ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          Connecting to payment gateway...
+                        </>
+                      ) : (
+                        <>
+                          <Lock size={14} />
+                          Proceed to Secure Payment
+                        </>
                       )}
-                      {kpLoading
-                        ? "Connecting to payment gateway..."
-                        : "Proceed to Secure Payment"}
                     </button>
                   </div>
                 )}
@@ -1612,6 +1615,16 @@ function CheckoutInner() {
                         network to the address above.
                       </p>
                     </label>
+                    {/* Crypto inline error — NO alert() */}
+                    {cryptoError && (
+                      <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
+                        <p className="text-red-300 text-xs">{cryptoError}</p>
+                      </div>
+                    )}
                     <button
                       type="submit"
                       disabled={!twConfirmed || !cryptoWalletAddress}
@@ -1620,7 +1633,7 @@ function CheckoutInner() {
                         background:
                           twConfirmed && cryptoWalletAddress
                             ? "linear-gradient(135deg,#8b5cf6,#6d28d9)"
-                            : undefined,
+                            : "rgba(139,92,246,0.3)",
                       }}
                     >
                       Submit Payment Details
@@ -1807,7 +1820,10 @@ function CheckoutInner() {
             </p>
             <div className="flex gap-3">
               <button
-                onClick={() => setStep("details")}
+                onClick={() => {
+                  setErrorMsg("");
+                  setStep("details");
+                }}
                 className="flex-1 border border-slate-700 hover:border-slate-500 text-slate-300 font-bold py-3 rounded-lg transition-all"
               >
                 Try Again
@@ -1826,7 +1842,6 @@ function CheckoutInner() {
   );
 }
 
-// ─── Export ───────────────────────────────────────────────────
 export default function CheckoutPage() {
   return (
     <Suspense

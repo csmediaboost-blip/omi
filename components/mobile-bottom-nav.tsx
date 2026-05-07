@@ -19,7 +19,7 @@ import {
   FileText,
   HelpCircle,
   Receipt,
-  Download,
+  ArrowDownToLine,
 } from "lucide-react";
 import { useState } from "react";
 import { usePWAInstall } from "@/hooks/usePWAInstall";
@@ -49,7 +49,11 @@ const MORE_SECTIONS = [
     items: [
       { label: "Tax Report", href: "/dashboard/tax", icon: Receipt },
       { label: "License", href: "/dashboard/license", icon: FileText },
-      { label: "Company Disclosure", href: "/dashboard/company-disclosure", icon: BookOpen },
+      {
+        label: "Company Disclosure",
+        href: "/dashboard/company-disclosure",
+        icon: BookOpen,
+      },
     ],
   },
   {
@@ -58,7 +62,12 @@ const MORE_SECTIONS = [
       { label: "Network", href: "/dashboard/network", icon: Users },
       { label: "Support", href: "/dashboard/support", icon: HelpCircle },
       { label: "Settings", href: "/dashboard/settings", icon: Settings },
-      { label: "Install App", href: "#install-app", icon: Download, isInstall: true },
+      {
+        label: "Install App",
+        href: "#install-app",
+        icon: ArrowDownToLine,
+        isInstall: true,
+      },
     ],
   },
 ];
@@ -70,7 +79,10 @@ const HIDDEN_ON = ["/dashboard/checkout", "/auth"];
 export default function MobileBottomNav() {
   const pathname = usePathname();
   const [moreOpen, setMoreOpen] = useState(false);
-  const { canInstall, isInstalling, handleInstall } = usePWAInstall();
+
+  // ── Pull all install state from the hook ──────────────────
+  const { canInstall, isInstalling, isStandalone, handleInstall } =
+    usePWAInstall();
 
   const shouldHide =
     !pathname.startsWith("/dashboard") ||
@@ -80,9 +92,16 @@ export default function MobileBottomNav() {
 
   const isMoreActive = ALL_MORE_HREFS.some((href) => pathname.startsWith(href));
 
+  // ── Install button label ──────────────────────────────────
+  const installLabel = isStandalone
+    ? "Installed"
+    : isInstalling
+      ? "Installing..."
+      : "Install App";
+
   return (
     <>
-      {/* Backdrop — sits below the drawer but above page content */}
+      {/* Backdrop */}
       {moreOpen && (
         <div
           className="fixed inset-0 z-40 md:hidden bg-black/65"
@@ -90,17 +109,14 @@ export default function MobileBottomNav() {
         />
       )}
 
-      {/* More drawer — NO backdrop-blur on the container itself */}
+      {/* More drawer */}
       {moreOpen && (
         <div
           className="fixed left-2 right-2 z-50 md:hidden rounded-2xl overflow-hidden bg-slate-900 border border-white/10 shadow-2xl"
-          style={{
-            bottom: "calc(64px + env(safe-area-inset-bottom))",
-          }}
+          style={{ bottom: "calc(64px + env(safe-area-inset-bottom))" }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/7">
-
             <span className="text-slate-400 text-xs font-semibold uppercase tracking-wider">
               More
             </span>
@@ -112,8 +128,11 @@ export default function MobileBottomNav() {
             </button>
           </div>
 
-          {/* Sections — overflow-y-auto here, NOT on the parent */}
-          <div className="p-3 space-y-4 overflow-y-auto" style={{ maxHeight: "65vh" }}>
+          {/* Sections */}
+          <div
+            className="p-3 space-y-4 overflow-y-auto"
+            style={{ maxHeight: "65vh" }}
+          >
             {MORE_SECTIONS.map(({ title, items }) => (
               <div key={title}>
                 <p className="text-[9px] font-bold uppercase tracking-widest px-1 mb-2 text-slate-500">
@@ -122,37 +141,53 @@ export default function MobileBottomNav() {
                 <div className="grid grid-cols-3 gap-2">
                   {items.map(({ label, href, icon: Icon, isInstall }: any) => {
                     const active = !isInstall && pathname.startsWith(href);
-                    
+
                     if (isInstall) {
                       return (
                         <button
                           key={label}
-                          onClick={handleInstall}
-                          disabled={isInstalling}
+                          onClick={async () => {
+                            if (!isStandalone) {
+                              await handleInstall();
+                            }
+                          }}
+                          disabled={isInstalling || isStandalone}
                           className={`flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl transition-all ${
-                            isInstalling
-                              ? "opacity-50 cursor-not-allowed bg-slate-800/30 border border-slate-700/50"
-                              : "bg-slate-800/50 border border-transparent hover:bg-slate-800/70 active:bg-slate-700"
+                            isStandalone
+                              ? "opacity-40 cursor-not-allowed bg-slate-800/30 border border-slate-700/50"
+                              : isInstalling
+                                ? "opacity-50 cursor-not-allowed bg-slate-800/30 border border-slate-700/50"
+                                : "bg-slate-800/50 border border-transparent hover:bg-slate-800/70 active:bg-slate-700"
                           }`}
-                          title="Add OmniTask Pro to your home screen"
+                          title={
+                            isStandalone
+                              ? "App is already installed"
+                              : "Add OmniTask Pro to your home screen"
+                          }
                         >
-                          {/* Company logo for install button */}
-                          <div className="w-9 h-9 rounded-xl flex items-center justify-center">
+                          {/* Show logo image for install button */}
+                          <div className="w-9 h-9 rounded-xl flex items-center justify-center overflow-hidden">
                             <Image
                               src="/logo-main.png"
                               alt="Install App"
-                              width={32}
-                              height={32}
+                              width={36}
+                              height={36}
                               className="w-full h-full rounded-xl object-contain"
                             />
                           </div>
-                          <span className={`text-[10px] font-medium text-center leading-tight ${isInstalling ? "text-slate-500" : "text-slate-300"}`}>
-                            {isInstalling ? "Installing..." : label}
+                          <span
+                            className={`text-[10px] font-medium text-center leading-tight ${
+                              isInstalling || isStandalone
+                                ? "text-slate-500"
+                                : "text-slate-300"
+                            }`}
+                          >
+                            {installLabel}
                           </span>
                         </button>
                       );
                     }
-                    
+
                     return (
                       <Link
                         key={href}
@@ -166,9 +201,7 @@ export default function MobileBottomNav() {
                       >
                         <div
                           className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                            active
-                              ? "bg-emerald-500/15"
-                              : "bg-slate-700/60"
+                            active ? "bg-emerald-500/15" : "bg-slate-700/60"
                           }`}
                         >
                           <Icon
@@ -196,8 +229,10 @@ export default function MobileBottomNav() {
       )}
 
       {/* Bottom bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-slate-950 border-t border-white/8" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
-
+      <nav
+        className="fixed bottom-0 left-0 right-0 z-40 md:hidden bg-slate-950 border-t border-white/8"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
         <div className="flex items-center justify-around h-16">
           {PRIMARY_NAV.map(({ label, href, icon: Icon }) => {
             const active =

@@ -1,12 +1,11 @@
 "use client";
 // hooks/usePWAInstall.tsx
-// Global PWA install state management
-// Used by both PWAInstallBanner and mobile-bottom-nav components
 
 import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   ReactNode,
 } from "react";
@@ -21,6 +20,8 @@ interface PWAContextType {
   isInstalling: boolean;
   canInstall: boolean;
   isIOS: boolean;
+  isAndroid: boolean;
+  isStandalone: boolean;
   handleInstall: () => Promise<void>;
 }
 
@@ -29,174 +30,226 @@ const PWAContext = createContext<PWAContextType>({
   isInstalling: false,
   canInstall: false,
   isIOS: false,
+  isAndroid: false,
+  isStandalone: false,
   handleInstall: async () => {},
 });
 
+// ── Capture beforeinstallprompt at module level — BEFORE React mounts ──────
+// This is the critical fix. The browser fires this event very early during
+// page load. If we only listen inside useEffect it's always too late.
+let _globalDeferredPrompt: BeforeInstallPromptEvent | null = null;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeinstallprompt", (e) => {
+    console.log("[PWA] beforeinstallprompt captured at module level");
+    e.preventDefault();
+    _globalDeferredPrompt = e as BeforeInstallPromptEvent;
+  });
+}
+
+// ── Provider ─────────────────────────────────────────────────────────────
 export function PWAProvider({ children }: { children: ReactNode }) {
-  const [deferredPrompt, setDeferredPrompt] =
-    useState<BeforeInstallPromptEvent | null>(null);
+  const promptRef = useRef<BeforeInstallPromptEvent | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
   const [canInstall, setCanInstall] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
+  const [isAndroid, setIsAndroid] = useState(false);
+  const [isStandalone, setIsStandalone] = useState(false);
 
-  // Capture beforeinstallprompt event globally
   useEffect(() => {
-    // Detect iOS
-    const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    setIsIOS(isIOSDevice);
+    const ua = navigator.userAgent;
+    const ios = /iPad|iPhone|iPod/.test(ua) && !(window as any).MSStream;
+    const android = /Android/.test(ua);
+    const standalone =
+      window.matchMedia("(display-mode: standalone)").matches ||
+      (window.navigator as any).standalone === true;
 
-    const handleBeforeInstallPrompt = (e: Event) => {
-      console.log("[PWA] beforeinstallprompt event fired globally");
+    setIsIOS(ios);
+    setIsAndroid(android);
+    setIsStandalone(standalone);
+
+    // Already installed — nothing to do
+    if (standalone) {
+      setCanInstall(false);
+      return;
+    }
+
+    // Pick up the prompt captured before React mounted
+    if (_globalDeferredPrompt) {
+      console.log("[PWA] Using module-level deferred prompt in effect");
+      promptRef.current = _globalDeferredPrompt;
+      setCanInstall(true);
+    }
+
+    // Also listen for future firings (e.g. after dismissal + revisit)
+    const onPrompt = (e: Event) => {
+      console.log("[PWA] beforeinstallprompt received in useEffect");
       e.preventDefault();
-      setDeferredPrompt(e as BeforeInstallPromptEvent);
+      _globalDeferredPrompt = e as BeforeInstallPromptEvent;
+      promptRef.current = e as BeforeInstallPromptEvent;
       setCanInstall(true);
     };
 
-    const handleAppInstalled = () => {
-      console.log("[PWA] App installed successfully");
-      setDeferredPrompt(null);
+    const onInstalled = () => {
+      console.log("[PWA] appinstalled fired");
+      _globalDeferredPrompt = null;
+      promptRef.current = null;
       setCanInstall(false);
+      setIsInstalling(false);
     };
 
-    // Add listeners at the earliest possible moment
-    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
-    window.addEventListener("appinstalled", handleAppInstalled);
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    window.addEventListener("appinstalled", onInstalled);
 
-    // Check if app is already installed
-    if (window.matchMedia("(display-mode: standalone)").matches) {
-      console.log("[PWA] App is running in standalone mode");
-      setCanInstall(false);
-      setDeferredPrompt(null);
+    // iOS and Android browsers that never fire beforeinstallprompt
+    // still need to show the Install button with manual instructions
+    if (ios || android) {
+      setCanInstall(true);
     }
-
-    // On desktop or if no beforeinstallprompt in 3 seconds, allow install via other means
-    const timer = setTimeout(() => {
-      if (
-        !deferredPrompt &&
-        !window.matchMedia("(display-mode: standalone)").matches
-      ) {
-        // Even without beforeinstallprompt, user can install PWA
-        console.log("[PWA] No  detected, enabling fallback install");
-        setCanInstall(true);
-      }
-    }, 3000);
 
     // Register service worker
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
         .register("/sw.js", { scope: "/" })
-        .then((reg) => {
-          console.log("[PWA] Service Worker registered:", reg.scope);
-        })
-        .catch((err) => {
-          console.warn("[PWA] Service Worker registration failed:", err);
-        });
+        .then((reg) => console.log("[PWA] SW registered:", reg.scope))
+        .catch((err) => console.warn("[PWA] SW registration failed:", err));
     }
 
     return () => {
-      clearTimeout(timer);
-      window.removeEventListener(
-        "beforeinstallprompt",
-        handleBeforeInstallPrompt,
-      );
-      window.removeEventListener("appinstalled", handleAppInstalled);
+      window.removeEventListener("beforeinstallprompt", onPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
     };
   }, []);
 
   const handleInstall = async () => {
+    const prompt = promptRef.current ?? _globalDeferredPrompt;
     console.log(
-      "[PWA] Install handler called, has deferred prompt:",
-      !!deferredPrompt,
+      "[PWA] handleInstall called — prompt:",
+      !!prompt,
+      "iOS:",
+      isIOS,
+      "Android:",
+      isAndroid,
     );
 
+    if (isStandalone) {
+      alert("OmniTask Pro is already installed on your device.");
+      return;
+    }
+
+    setIsInstalling(true);
+
     try {
-      setIsInstalling(true);
-
-      // Android/Chrome: Auto-trigger beforeinstallprompt
-      if (deferredPrompt) {
-        console.log("[PWA] Auto-triggering beforeinstallprompt for Android");
-        await deferredPrompt.prompt();
-        const { outcome } = await deferredPrompt.userChoice;
-
-        console.log("[PWA] Install prompt outcome:", outcome);
+      // ── Path 1: Native browser install prompt ─────────────────────────
+      // Works on Android Chrome, Edge, and desktop Chrome/Edge
+      if (prompt) {
+        console.log("[PWA] Triggering native install prompt");
+        await prompt.prompt();
+        const { outcome } = await prompt.userChoice;
+        console.log("[PWA] User choice:", outcome);
 
         if (outcome === "accepted") {
-          console.log("[PWA] User accepted installation");
-          setDeferredPrompt(null);
+          _globalDeferredPrompt = null;
+          promptRef.current = null;
           setCanInstall(false);
-          // Keep the installing state briefly to show success
-          setTimeout(() => {
-            setIsInstalling(false);
-          }, 1500);
+          setTimeout(() => setIsInstalling(false), 1500);
         } else {
           setIsInstalling(false);
         }
+        return;
       }
-      // iOS: Open App Store or direct safari install
-      else if (isIOS) {
-        console.log("[PWA] iOS detected, initiating home screen add");
-        const userAgent = navigator.userAgent.toLowerCase();
-        const isSafari =
-          /safari/.test(userAgent) && !/chrome|crios|firefox/.test(userAgent);
 
-        if (isSafari) {
-          // For Safari on iOS, trigger the share sheet
+      // ── Path 2: iOS Safari — open share sheet ─────────────────────────
+      if (isIOS) {
+        setIsInstalling(false);
+        const isSafari =
+          /Safari/.test(navigator.userAgent) &&
+          !/CriOS|FxiOS|OPiOS|mercury/.test(navigator.userAgent);
+
+        if (isSafari && navigator.share) {
           try {
-            if (navigator.share) {
-              setIsInstalling(false);
-              await navigator.share({
-                title: "OmniTask Pro",
-                text: "Install OmniTask Pro",
-                url: window.location.href,
-              });
-              // After share, assume user will add to home screen
-              setTimeout(() => setCanInstall(false), 1500);
-            } else {
-              // Fallback: show direct instructions
-              alert(
-                "To install OmniTask Pro on iOS:\n\n1. Tap Share (box with arrow)\n2. Tap 'Add to Home Screen'\n3. Tap 'Add'",
-              );
-              setIsInstalling(false);
-            }
-          } catch (err) {
-            console.log("[PWA] Share failed or cancelled");
-            setIsInstalling(false);
+            await navigator.share({
+              title: "OmniTask Pro",
+              text: "Add OmniTask Pro to your Home Screen",
+              url: window.location.origin,
+            });
+          } catch {
+            // User cancelled — that's fine
           }
         } else {
-          // Chrome/Firefox on iOS - show native instructions
           alert(
-            "To install OmniTask Pro on iOS:\n\n1. Tap the browser menu (⋮)\n2. Select 'Add to Home Screen'\n3. Tap 'Add'",
+            "To install OmniTask Pro on your iPhone:\n\n" +
+              "1. Open this page in Safari\n" +
+              "2. Tap the Share button (box with arrow ↑)\n" +
+              '3. Tap "Add to Home Screen"\n' +
+              '4. Tap "Add"',
           );
-          setIsInstalling(false);
         }
+        return;
       }
-      // Desktop: Trigger browser's native install UI
-      else {
-        console.log("[PWA] Desktop mode detected - attempting native install");
-        // On desktop Chrome/Edge, wait for beforeinstallprompt
-        // If no prompt within 3 seconds, user can look for manual install icon
-        const desktopTimeout = setTimeout(() => {
+
+      // ── Path 3: Android — no native prompt available ───────────────────
+      // (Samsung Internet, Firefox for Android, older Chrome)
+      if (isAndroid) {
+        setIsInstalling(false);
+        const ua = navigator.userAgent;
+        const isSamsungBrowser = /SamsungBrowser/.test(ua);
+        const isFirefox = /Firefox/.test(ua);
+
+        if (isSamsungBrowser) {
           alert(
             "To install OmniTask Pro:\n\n" +
-              "Chrome/Edge: Click the install icon in the address bar\n" +
-              "Firefox: Click the install icon in the address bar\n" +
-              "Safari: File → Add to Dock",
+              "1. Tap the menu icon (☰) at the bottom\n" +
+              '2. Tap "Add page to"\n' +
+              '3. Tap "Home screen"\n' +
+              '4. Tap "Add"',
           );
-          setIsInstalling(false);
-        }, 2500);
-
-        // Clean up timeout if prompt comes through
-        return () => clearTimeout(desktopTimeout);
+        } else if (isFirefox) {
+          alert(
+            "To install OmniTask Pro:\n\n" +
+              "1. Tap the menu icon (⋮) at the top right\n" +
+              '2. Tap "Install"\n' +
+              '3. Tap "Add to Home screen"',
+          );
+        } else {
+          // Generic Android Chrome fallback
+          alert(
+            "To install OmniTask Pro:\n\n" +
+              "1. Tap the menu icon (⋮) at the top right\n" +
+              '2. Tap "Add to Home screen"\n' +
+              '3. Tap "Add"\n\n' +
+              "Tip: Make sure you are using Chrome for automatic install.",
+          );
+        }
+        return;
       }
+
+      // ── Path 4: Desktop — no native prompt ────────────────────────────
+      setIsInstalling(false);
+      alert(
+        "To install OmniTask Pro on desktop:\n\n" +
+          "Chrome / Edge: Click the install icon (⊕) in the address bar\n" +
+          "Firefox: Click the install icon in the address bar\n" +
+          "Safari (Mac): File → Add to Dock",
+      );
     } catch (error) {
-      console.error("[PWA] Installation error:", error);
+      console.error("[PWA] Install error:", error);
       setIsInstalling(false);
     }
   };
 
   return (
     <PWAContext.Provider
-      value={{ deferredPrompt, isInstalling, canInstall, isIOS, handleInstall }}
+      value={{
+        deferredPrompt: promptRef.current,
+        isInstalling,
+        canInstall,
+        isIOS,
+        isAndroid,
+        isStandalone,
+        handleInstall,
+      }}
     >
       {children}
     </PWAContext.Provider>
