@@ -1,7 +1,7 @@
 {
   "name": "OmniTask Pro — GPU Computing Investment Platform",
   "short_name": "OmniTask Pro",
-  "description": "Earn daily returns from enterprise AI GPU workloads. Distributed GPU computing investment platform with 12,400+ active nodes worldwide.",
+  "description": "Earn daily returns from enterprise AI GPU workloads. Distributed GPU computing investment platform.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",
@@ -9,13 +9,15 @@
   "background_color": "#030712",
   "theme_color": "#10b981",
   "lang": "en",
+  "id": "/dashboard",
   "categories": ["finance", "business", "productivity"],
+  "prefer_related_applications": false,
   "shortcuts": [
     {
       "name": "Dashboard",
       "short_name": "Dashboard",
       "description": "View your GPU node dashboard",
-      "url": "/dashboard?mode=dashboard",
+      "url": "/dashboard",
       "icons": [
         {
           "src": "/logo-main.png",
@@ -40,13 +42,49 @@
   ],
   "icons": [
     {
-      "src": "/favicon-rounded.png",
+      "src": "/logo-main.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
+      "sizes": "144x144",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
+      "sizes": "152x152",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/favicon-rounded.png",
+      "src": "/logo-main.png",
+      "sizes": "384x384",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo-main.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
