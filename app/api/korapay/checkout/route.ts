@@ -1,6 +1,5 @@
 // app/api/korapay/checkout/route.ts
-// FIXED: amount sent in WHOLE units (not minor), correct key lookup,
-// phone only added when valid, full error surfacing to client
+// FINAL: correct channel names, amount in major units, full debug logging
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
@@ -17,13 +16,24 @@ function getSupabaseAdmin() {
   );
 }
 
-// ── KoraPay accepts WHOLE numbers for all supported currencies ─
-// NGN: send 5000 for ₦5,000 — do NOT multiply by 100
-// Same for KES, GHS, XAF, XOF, EGP, TZS, ZAR
-// Always round to the nearest whole number
+// KoraPay uses MAJOR units — send 5000 for ₦5,000 (NOT 500000)
 function toKorapayAmount(amount: number): number {
   return Math.round(amount);
 }
+
+// Channels supported per currency by KoraPay
+// "bank_transfer" is only valid for NGN
+// "mobile_money" for KES, GHS, XAF, XOF, TZS
+const CURRENCY_CHANNELS: Record<string, string[]> = {
+  NGN: ["card", "bank_transfer", "mobile_money"],
+  KES: ["card", "mobile_money"],
+  GHS: ["card", "mobile_money"],
+  ZAR: ["card"],
+  XAF: ["card", "mobile_money"],
+  XOF: ["card", "mobile_money"],
+  EGP: ["card"],
+  TZS: ["card", "mobile_money"],
+};
 
 function currencyForCountry(countryCode: string): string {
   const map: Record<string, string> = {
@@ -49,7 +59,7 @@ export async function POST(req: NextRequest) {
       phone,
       nodeKey,
       nodeName,
-      price, // already-converted local currency amount (e.g. 320000 NGN)
+      price, // converted local-currency amount (e.g. 3000 GHS)
       originalPrice, // USD amount
       currency: rawCurrency,
       daily,
@@ -70,96 +80,97 @@ export async function POST(req: NextRequest) {
       countryName,
     } = body;
 
-    console.log("[korapay/checkout] Incoming:", {
+    const currency: string =
+      rawCurrency && rawCurrency !== "" && rawCurrency !== "USD"
+        ? rawCurrency
+        : currencyForCountry(countryCode);
+
+    const korapayAmount = toKorapayAmount(Number(price));
+
+    console.log("[korapay/checkout] ▶ Request:", {
       userId: userId?.slice(0, 8),
-      price,
-      rawCurrency,
-      countryCode,
       originalPrice,
+      localPrice: price,
+      korapayAmount,
+      currency,
+      countryCode,
     });
 
-    if (!userId) {
+    if (!userId)
       return NextResponse.json({ error: "Missing userId" }, { status: 400 });
-    }
-
-    if (!price || isNaN(Number(price)) || Number(price) <= 0) {
+    if (!price || isNaN(Number(price)) || Number(price) <= 0)
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
-    }
-
-    if (originalPrice > 10000) {
+    if (originalPrice > 10000)
       return NextResponse.json(
         {
           error: "Payment limit is $10,000 USD. Please use a different method.",
         },
         { status: 400 },
       );
-    }
 
-    // ── Resolve currency ──────────────────────────────────────
-    const currency: string =
-      rawCurrency && rawCurrency !== "" && rawCurrency !== "USD"
-        ? rawCurrency
-        : currencyForCountry(countryCode);
-
-    // ── Load config (all keys at once) ────────────────────────
+    // Load ALL config rows at once
     const { data: configData, error: configErr } = await supabaseAdmin
       .from("payment_config")
       .select("key, value");
 
-    if (configErr) {
-      console.error("[korapay/checkout] Config load error:", configErr);
-    }
+    if (configErr) console.error("[korapay/checkout] Config error:", configErr);
 
     const cfg: Record<string, string> = {};
     (configData || []).forEach((r: any) => {
-      cfg[r.key] = r.value;
+      if (r.key && r.value) cfg[r.key] = r.value;
     });
 
-    // Try multiple possible key names in order
+    console.log("[korapay/checkout] Config keys:", Object.keys(cfg).join(", "));
+
     const korapayKey =
       cfg["korapay_secret_key"] ||
       cfg["korapay_api_key"] ||
       cfg["KORAPAY_SECRET_KEY"] ||
+      cfg["korapay_key"] ||
       process.env.KORAPAY_SECRET_KEY ||
       "";
 
     console.log(
-      "[korapay/checkout] Key found:",
-      korapayKey ? "YES (len=" + korapayKey.length + ")" : "NO",
+      "[korapay/checkout] Key:",
+      korapayKey
+        ? `found len=${korapayKey.length} prefix=${korapayKey.slice(0, 8)}...`
+        : "NOT FOUND",
     );
 
-    if (!korapayKey || korapayKey === "EMPTY" || korapayKey === "") {
-      console.error(
-        "[korapay/checkout] No API key found in payment_config or env",
-      );
+    if (!korapayKey || korapayKey === "EMPTY" || korapayKey.length < 10) {
       return NextResponse.json(
-        { error: "Payment gateway not configured. Please contact support." },
+        {
+          error:
+            "Payment gateway not configured. Use Crypto payment or contact support.",
+        },
         { status: 500 },
       );
     }
 
-    // ── Load user ─────────────────────────────────────────────
+    // Load user — must have email
     const { data: user } = await supabaseAdmin
       .from("users")
       .select("email, full_name")
       .eq("id", userId)
       .single();
 
-    const customerEmail =
-      user?.email || `user-${userId.slice(0, 8)}@omnitaskpro.online`;
-    const customerName = user?.full_name || "OmniTask User";
+    if (!user?.email) {
+      return NextResponse.json(
+        { error: "User account error — no email found" },
+        { status: 400 },
+      );
+    }
 
-    // ── Build reference ───────────────────────────────────────
     const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 
-    // ── Insert pending transaction BEFORE calling KoraPay ────
+    // Insert pending tx before calling KoraPay
     const { data: txn, error: txnErr } = await supabaseAdmin
       .from("payment_transactions")
       .insert({
         user_id: userId,
         node_key: nodeKey,
-        amount: originalPrice, // USD amount
-        converted_amount: price, // local currency amount
+        amount: originalPrice,
+        converted_amount: price,
         currency,
         gateway: "korapay",
         gateway_reference: externalId,
@@ -193,57 +204,43 @@ export async function POST(req: NextRequest) {
       .select()
       .single();
 
-    if (txnErr) {
-      console.error("[korapay/checkout] Transaction insert error:", txnErr);
-      return NextResponse.json({ error: txnErr.message }, { status: 500 });
+    if (txnErr || !txn) {
+      console.error("[korapay/checkout] Tx insert error:", txnErr);
+      return NextResponse.json(
+        { error: "Failed to create payment record" },
+        { status: 500 },
+      );
     }
 
-    // ── Build KoraPay customer — phone is OPTIONAL ───────────
+    // Customer object — phone only if valid length
     const customerObj: Record<string, string> = {
-      name: customerName,
-      email: customerEmail,
+      name: user.full_name || "OmniTask User",
+      email: user.email,
     };
     const cleanPhone = (phone || "").replace(/[^0-9+]/g, "");
-    if (cleanPhone.length >= 7) {
+    if (cleanPhone.length >= 7 && cleanPhone.length <= 15) {
       customerObj.phone = cleanPhone;
     }
 
-    // ── Amount: KoraPay accepts WHOLE numbers (no kobo/cent) ─
-    const korapayAmount = toKorapayAmount(Number(price));
-
-    const appUrl =
-      process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online";
+    const channels = CURRENCY_CHANNELS[currency] || ["card"];
+    const appUrl = (
+      process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online"
+    ).replace(/\/$/, "");
 
     const korapayPayload = {
       reference: externalId,
       amount: korapayAmount,
       currency,
       customer: customerObj,
-      notification_url: `${appUrl}/api/korapay/webhook`,
       redirect_url: `${appUrl}/api/korapay/callback?reference=${externalId}&userId=${userId}`,
-      channels: ["card", "bank_transfer", "mobile_money"],
-      metadata: {
-        userId,
-        nodeKey,
-        nodeName,
-        originalPrice,
-        convertedPrice: price,
-        currency,
-        purchaseType,
-        licenseType,
-        paymentModel,
-        lockInMonths: lockInMonths || contractMonths || 6,
-        lockInMultiplier: lockInMultiplier || 1.0,
-        lockInLabel: lockInLabel || contractLabel || "6 months",
-      },
+      notification_url: `${appUrl}/api/korapay/webhook`,
+      channels,
     };
 
-    console.log("[korapay/checkout] Sending to KoraPay:", {
-      reference: externalId,
-      amount: korapayAmount,
-      currency,
-      email: customerEmail,
-    });
+    console.log(
+      "[korapay/checkout] ▶ Payload:",
+      JSON.stringify(korapayPayload),
+    );
 
     const koraRes = await fetch(
       "https://api.korapay.com/merchant/api/v1/charges/initialize",
@@ -257,24 +254,29 @@ export async function POST(req: NextRequest) {
       },
     );
 
-    let koraData: any;
-    const rawText = await koraRes.text();
-    try {
-      koraData = JSON.parse(rawText);
-    } catch {
-      koraData = { message: rawText };
-    }
-
-    console.log("[korapay/checkout] KoraPay response status:", koraRes.status);
+    const rawResponse = await koraRes.text();
     console.log(
-      "[korapay/checkout] KoraPay response:",
-      JSON.stringify(koraData).slice(0, 500),
+      "[korapay/checkout] ◀ Status:",
+      koraRes.status,
+      "Body:",
+      rawResponse,
     );
+
+    let koraData: any = {};
+    try {
+      koraData = JSON.parse(rawResponse);
+    } catch {
+      koraData = { message: rawResponse };
+    }
 
     if (!koraRes.ok || !koraData?.data?.checkout_url) {
       const errorMsg =
-        koraData?.message || koraData?.error || `HTTP ${koraRes.status}`;
-      console.error("[korapay/checkout] KoraPay failed:", errorMsg);
+        koraData?.message ||
+        koraData?.error ||
+        koraData?.data?.message ||
+        `HTTP ${koraRes.status}`;
+
+      console.error("[korapay/checkout] ✗ Failed:", errorMsg);
 
       await supabaseAdmin
         .from("payment_transactions")
@@ -291,23 +293,25 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Save checkout URL for reference
+    const checkoutUrl = koraData.data.checkout_url;
+    console.log("[korapay/checkout] ✓ URL:", checkoutUrl);
+
     await supabaseAdmin
       .from("payment_transactions")
       .update({
-        gateway_url: koraData.data.checkout_url,
+        gateway_url: checkoutUrl,
         updated_at: new Date().toISOString(),
       })
       .eq("id", txn.id);
 
     return NextResponse.json({
       success: true,
-      checkoutUrl: koraData.data.checkout_url,
+      checkoutUrl,
       referenceId: externalId,
       transactionId: txn.id,
     });
   } catch (err: any) {
-    console.error("[korapay/checkout] Unhandled error:", err);
+    console.error("[korapay/checkout] ✗ Unhandled:", err);
     return NextResponse.json(
       { error: err.message || "Internal server error" },
       { status: 500 },
