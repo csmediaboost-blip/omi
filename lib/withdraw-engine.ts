@@ -12,7 +12,8 @@ export async function requestWithdrawal(user: any, amount: number) {
   }
 
   if (amount > 500) {
-    throw new Error("Maximum weekly withdrawal $500");
+    throw new Error(
+      "Weekly withdrawal limit reached. Continue transacting to increase your withdrawal limit and help us maintain a secure platform");
   }
 
   if (amount > user.earnings) {
