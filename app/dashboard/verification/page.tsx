@@ -3,7 +3,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import DashboardNavigation from "@/components/dashboard-navigation";
 import {
   CheckCircle,
@@ -22,9 +21,9 @@ import {
 import { Card } from "@/components/ui/card";
 
 // ── EXACT DB column names (including typos) ────────────────────
-// kyc_full_name  — 3 L's
-// withdwals_fronzen — typo
-// has_opertor_license — typo
+// kyc_full_name  — exact DB column
+// withdwals_fronzen — typo preserved in DB
+// has_opertor_license — typo preserved in DB
 
 type Profile = {
   id: string;
@@ -34,7 +33,7 @@ type Profile = {
   phone_verified: boolean;
   kyc_verified: boolean;
   kyc_status: string | null;
-  kyc_full_name: string | null; // 3 L's — exact DB column
+  kyc_full_name: string | null;
   payout_registered: boolean;
   cla_signed: boolean;
   terms_signed: boolean;
@@ -177,7 +176,6 @@ export default function VerificationPage() {
         return;
       }
 
-      // ── Try to load profile ───────────────────────────────────
       const { data, error } = await supabase
         .from("users")
         .select(
@@ -187,9 +185,8 @@ export default function VerificationPage() {
         .single();
 
       if (error) {
-        // PGRST116 = no rows returned — user row doesn't exist yet
         if (error.code === "PGRST116" || error.message?.includes("no rows")) {
-          // Create the missing user row
+          // Create missing user row
           const { data: created, error: createErr } = await supabase
             .from("users")
             .insert({
@@ -208,14 +205,11 @@ export default function VerificationPage() {
             .single();
 
           if (createErr) {
-            // Row may already exist (race condition) — try upsert
+            // Race condition — try upsert
             const { data: upserted, error: upsertErr } = await supabase
               .from("users")
               .upsert(
-                {
-                  id: user.id,
-                  email: user.email || "",
-                },
+                { id: user.id, email: user.email || "" },
                 { onConflict: "id" },
               )
               .select(
@@ -229,7 +223,6 @@ export default function VerificationPage() {
               setLoading(false);
               return;
             }
-
             if (upserted) {
               setProfile(upserted);
               setActiveStep("identity");
@@ -239,7 +232,6 @@ export default function VerificationPage() {
             setActiveStep("identity");
           }
         } else {
-          // Some other error
           console.error("Profile load error:", error);
           showToast(`Failed to load profile: ${error.message}`, false);
           setLoading(false);
@@ -253,7 +245,7 @@ export default function VerificationPage() {
         else if (data.full_name) setIdFullName(data.full_name);
         if (data.phone) setIdPhone(data.phone);
 
-        // ── Auto-redirect after KYC approval ──────────────────────────────
+        // Auto-redirect after KYC approval
         if (data.kyc_verified && typeof window !== "undefined") {
           const redirect = sessionStorage.getItem("kyc_redirect");
           if (redirect) {
@@ -285,7 +277,6 @@ export default function VerificationPage() {
 
   // ── Upload file to storage ──────────────────────────────────
   async function uploadFile(file: File, path: string): Promise<string | null> {
-    // Try kyc-documents bucket first
     for (const bucket of ["kyc-documents", "documents"]) {
       try {
         const { error } = await supabase.storage
@@ -299,7 +290,7 @@ export default function VerificationPage() {
         /* try next bucket */
       }
     }
-    return null; // Upload failed — continue without file
+    return null;
   }
 
   // ── Submit KYC ──────────────────────────────────────────────
@@ -343,7 +334,6 @@ export default function VerificationPage() {
       const ts = Date.now();
       let frontUrl = "";
 
-      // Upload ID document
       if (idFrontFile) {
         setUploadProgress("Uploading ID document...");
         const ext = idFrontFile.name.split(".").pop();
@@ -352,7 +342,6 @@ export default function VerificationPage() {
           "";
       }
 
-      // Upload selfie
       if (selfieFile) {
         setUploadProgress("Uploading selfie...");
         const ext = selfieFile.name.split(".").pop();
@@ -361,7 +350,7 @@ export default function VerificationPage() {
 
       setUploadProgress("Saving...");
 
-      // ── Insert into kyc_documents so admin sees it ────────────
+      // Insert into kyc_documents so admin sees it
       const { error: docErr } = await supabase.from("kyc_documents").insert({
         user_id: uid,
         document_type: idType,
@@ -370,11 +359,15 @@ export default function VerificationPage() {
         full_name: idFullName.trim(),
         country: idCountry,
         phone: idPhone.trim(),
+        address: idAddress.trim(),
+        city: idCity.trim(),
+        gender: idGender,
+        date_of_birth: idDob,
         status: "pending",
       });
 
       if (docErr) {
-        // If kyc_documents table doesn't exist, just update users table
+        // If table doesn't exist, just continue
         if (
           !docErr.message?.includes("does not exist") &&
           docErr.code !== "42P01"
@@ -383,12 +376,12 @@ export default function VerificationPage() {
         }
       }
 
-      // ── Update users table with EXACT column names ────────────
+      // Update users table with EXACT column names
       const { error: updErr } = await supabase
         .from("users")
         .update({
           full_name: idFullName.trim(),
-          kyc_full_name: idFullName.trim(), // 3 L's — EXACT DB column
+          kyc_full_name: idFullName.trim(),
           kyc_status: "pending",
           phone: idPhone.trim(),
           phone_verified: true,
@@ -430,7 +423,6 @@ export default function VerificationPage() {
     setSaving(false);
   }
 
-  // ── Loading state ───────────────────────────────────────────
   if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -477,7 +469,11 @@ export default function VerificationPage() {
       <div className="flex-1 overflow-y-auto">
         {toast && (
           <div
-            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm ${toast.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
+            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm ${
+              toast.ok
+                ? "bg-emerald-500 text-slate-950"
+                : "bg-red-500 text-white"
+            }`}
           >
             {toast.msg}
           </div>
@@ -509,7 +505,9 @@ export default function VerificationPage() {
                 Verification Progress
               </p>
               <p
-                className={`text-sm font-black ${allDone ? "text-emerald-400" : "text-slate-400"}`}
+                className={`text-sm font-black ${
+                  allDone ? "text-emerald-400" : "text-slate-400"
+                }`}
               >
                 {donePct}%
               </p>
@@ -527,10 +525,20 @@ export default function VerificationPage() {
                   <button
                     key={key}
                     onClick={() => setActiveStep(key)}
-                    className={`flex flex-col items-center gap-1.5 p-3 rounded-xl transition-all ${activeStep === key ? "bg-emerald-500/10 border border-emerald-500/30" : "hover:bg-slate-800/60"}`}
+                    className={`flex flex-col items-center gap-1.5 p-3 rounded-xl transition-all ${
+                      activeStep === key
+                        ? "bg-emerald-500/10 border border-emerald-500/30"
+                        : "hover:bg-slate-800/60"
+                    }`}
                   >
                     <div
-                      className={`w-9 h-9 rounded-full flex items-center justify-center ${done ? "bg-emerald-500/20 border border-emerald-500/40" : isPending ? "bg-amber-500/10 border border-amber-500/30" : "bg-slate-800 border border-slate-700"}`}
+                      className={`w-9 h-9 rounded-full flex items-center justify-center ${
+                        done
+                          ? "bg-emerald-500/20 border border-emerald-500/40"
+                          : isPending
+                            ? "bg-amber-500/10 border border-amber-500/30"
+                            : "bg-slate-800 border border-slate-700"
+                      }`}
                     >
                       {done ? (
                         <Check size={15} className="text-emerald-400" />
@@ -541,7 +549,15 @@ export default function VerificationPage() {
                       )}
                     </div>
                     <p
-                      className={`text-[10px] font-semibold ${done ? "text-emerald-400" : isPending ? "text-amber-400" : activeStep === key ? "text-white" : "text-slate-600"}`}
+                      className={`text-[10px] font-semibold ${
+                        done
+                          ? "text-emerald-400"
+                          : isPending
+                            ? "text-amber-400"
+                            : activeStep === key
+                              ? "text-white"
+                              : "text-slate-600"
+                      }`}
                     >
                       {label}
                     </p>
@@ -556,7 +572,13 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-5">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.kyc_verified ? "bg-emerald-500/20" : kycPending ? "bg-amber-500/10" : "bg-slate-800"}`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    profile?.kyc_verified
+                      ? "bg-emerald-500/20"
+                      : kycPending
+                        ? "bg-amber-500/10"
+                        : "bg-slate-800"
+                  }`}
                 >
                   {profile?.kyc_verified ? (
                     <CheckCircle size={16} className="text-emerald-400" />
@@ -580,7 +602,6 @@ export default function VerificationPage() {
                 </div>
               </div>
 
-              {/* Verified */}
               {profile?.kyc_verified && (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -593,7 +614,6 @@ export default function VerificationPage() {
                 </div>
               )}
 
-              {/* Pending review */}
               {kycPending && (
                 <div className="flex items-start gap-2 bg-amber-900/20 border border-amber-800/40 p-4 rounded-xl">
                   <Clock size={14} className="text-amber-400 shrink-0 mt-0.5" />
@@ -621,7 +641,6 @@ export default function VerificationPage() {
                 </div>
               )}
 
-              {/* Form */}
               {!profile?.kyc_verified && !kycPending && (
                 <div className="space-y-4">
                   <div className="flex items-start gap-2 bg-blue-500/5 border border-blue-500/15 p-3 rounded-xl">
@@ -675,6 +694,7 @@ export default function VerificationPage() {
                           <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                             Gender <span className="text-red-400">*</span>
                           </label>
+                          {/* ── FIX: removed stray </option> closing tag ── */}
                           <select
                             value={idGender}
                             onChange={(e) => setIdGender(e.target.value)}
@@ -683,6 +703,8 @@ export default function VerificationPage() {
                             <option value="">Select gender</option>
                             <option value="male">Male</option>
                             <option value="female">Female</option>
+                            <option value="other">
+                              Other / Prefer not to say
                             </option>
                           </select>
                         </div>
@@ -811,7 +833,11 @@ export default function VerificationPage() {
                             {label}
                           </label>
                           <label
-                            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${file ? "border-emerald-500/40 bg-emerald-500/5" : "border-dashed border-slate-700 hover:border-slate-500"}`}
+                            className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition-all ${
+                              file
+                                ? "border-emerald-500/40 bg-emerald-500/5"
+                                : "border-dashed border-slate-700 hover:border-slate-500"
+                            }`}
                           >
                             <Upload
                               size={15}
@@ -839,7 +865,6 @@ export default function VerificationPage() {
                     </div>
                   </div>
 
-                  {/* Upload progress */}
                   {uploadProgress && (
                     <div className="flex items-center gap-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <Loader2
@@ -874,7 +899,11 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.cla_signed && profile?.terms_signed ? "bg-emerald-500/20" : "bg-slate-800"}`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    profile?.cla_signed && profile?.terms_signed
+                      ? "bg-emerald-500/20"
+                      : "bg-slate-800"
+                  }`}
                 >
                   {profile?.cla_signed && profile?.terms_signed ? (
                     <CheckCircle size={16} className="text-emerald-400" />
@@ -965,7 +994,11 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.payout_registered ? "bg-emerald-500/20" : "bg-slate-800"}`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                    profile?.payout_registered
+                      ? "bg-emerald-500/20"
+                      : "bg-slate-800"
+                  }`}
                 >
                   {profile?.payout_registered ? (
                     <CheckCircle size={16} className="text-emerald-400" />
