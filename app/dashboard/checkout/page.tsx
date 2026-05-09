@@ -2,6 +2,7 @@
 import { useEffect, useState, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+
 import {
   Lock, CheckCircle, ChevronRight, AlertCircle, Loader2,
   ArrowLeft, Clock, ArrowDownToLine, Globe, Shield, Cpu, Brain,
@@ -793,7 +794,7 @@ function CheckoutInner() {
                         Phone Number <span className="text-slate-600">(optional)</span>
                       </label>
                       <input
-                        type="tel" placeholder="e.g. 08012345678" value={kpPhone}
+                        type="tel" placeholder="e.g. " value={kpPhone}
                         onChange={(e) => setKpPhone(e.target.value)}
                         className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500"
                       />

@@ -347,9 +347,9 @@ function SignatureUpload({ onSignatureUpload }: { onSignatureUpload: (hasFile: b
       <div className="border border-gray-200 rounded-lg p-4 bg-gray-50 space-y-2">
         <p className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Template — write this on your paper:</p>
         <p className="text-sm text-gray-700 leading-relaxed italic">
-          &ldquo;I, [Full Legal Name], agree to the OmniTask Pro Certified AI Operator License Terms & Conditions
+          &ldquo;I, agree to the OmniTask Pro Certified AI Operator License Terms & Conditions
           as presented to me on this date. I understand that earnings are not guaranteed and that a $5.00/month
-          infrastructure charge will be deducted from my balance. Date: [DD/MM/YYYY].&rdquo;
+          infrastructure charge will be deducted from my balance. &rdquo;
         </p>
         <p className="text-xs text-gray-400">Sign your name beneath this paragraph.</p>
       </div>

@@ -1154,7 +1154,7 @@ export default function APIAccessPage() {
                           {label}
                         </span>
                       </div>
-                      <pre className="px-4 py-2.5 text-[11px] text-slate-400 font-mono bg-[#080d18] overflow-x-auto">
+                      <pre className="px-4 py-2.5 text-[11px] text-slate-400 font-mono bg-[#d18] overflow-x-auto">
                         {example}
                       </pre>
                     </div>

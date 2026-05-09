@@ -33,23 +33,23 @@ function saveLocalDelivery(data: DeliveryAddress) {
 
 // ── 60% prize winners, 40% referral activity ──────────────────
 const LIVE_PRIZE = [
-  "🏆 Emeka O. (Lagos) just won a Luxury Car — delivered!",
-  "📱 Fatima A. (Abuja) won iPhone 16 Pro + Samsung S25 Ultra!",
+  "🏆 Emeka O. (Lagos) just won a Luxury Car!",
+  "📱 Fatima A. (Abuja) won iPhone 17 Pro + Samsung S25 Ultra!",
   "❄️ Chen W. (Accra) won a Samsung Bespoke Fridge — shipped!",
-  "🏆 Daniel K. (Nairobi) claimed his Luxury Car prize today!",
+  "🏆" Daniel K. (Nairobi) claimed his Luxury Car prize today!",
   "📱 Aisha B. (Cairo) won the dual flagship phone bundle!",
-  "❄️ Maria T. (Kampala) received her Bespoke Fridge delivery!",
+  "❄️ Maria T. (Kampala) received her Bespoke Fridge!",
   "🏆 James O. (Dar es Salaam) won a Luxury Car this month!",
-  "📱 Sarah M. (Lagos) just won iPhone 16 Pro + S25 Ultra!",
+  "📱 Sarah M. (Lagos) just won iPhone 17 Pro + S25 Ultra!",
   "❄️ Kwame B. (Kumasi) claimed Samsung Fridge prize!",
   "🏆 Linda C. (Nairobi) — Luxury Car winner, keys handed over!",
   "📱 Yusuf A. (Kano) won the dual phone bundle — confirmed!",
   "❄️ Ngozi E. (Port Harcourt) won Bespoke Fridge this month!",
 ];
 const LIVE_ACTIVITY = [
-  "Alex K. joined via referral · earned $12.40",
+  Alex K. joined via referral · earned $12.40",
   "Maria T. activated Node · referrer got $24.80",
-  "James O. completed 47 tasks today",
+  "James O. completed 7 tasks today",
   "Sarah M. just joined · GPU plan active",
   "Chen W. upgraded plan · $31.50 bonus paid",
   "Aisha B. referred 3 users this week",
@@ -211,11 +211,11 @@ function DeliveryModal({ initialData, onClose, onSaved, allowClose }: {
 
   const fields: { key: keyof DeliveryAddress; label: string; placeholder: string; icon: any; required?: boolean; type?: string }[] = [
     { key: "fullName", label: "Full Name", placeholder: "John Doe", icon: User, required: true },
-    { key: "phone", label: "Phone Number", placeholder: "+234 800 000 0000", icon: Phone, required: true, type: "tel" },
+    { key: "phone", label: "Phone Number", placeholder: "+444 000 0000", icon: Phone, required: true, type: "tel" },
     { key: "email", label: "Email Address", placeholder: "you@email.com", icon: Mail, type: "email" },
     { key: "address", label: "Delivery Address", placeholder: "12 Main Street, Flat 3", icon: MapPin, required: true },
-    { key: "city", label: "City", placeholder: "Lagos", icon: MapPin },
-    { key: "country", label: "Country", placeholder: "Nigeria", icon: Globe, required: true },
+    { key: "city", label: "City", placeholder: "London", icon: MapPin },
+    { key: "country", label: "Country", placeholder: "United Kingdom", icon: Globe, required: true },
   ];
 
   const canSubmit = !!(form.fullName && form.phone && form.address && form.country);
@@ -526,7 +526,7 @@ export default function NetworkPage() {
 
             {[
               { img: "/prizes/car.jpg", title: "Luxury Car", sub: "Premium sedan, fully loaded — with red ribbon 🎀", target: 120, color: "#f59e0b", gradient: "linear-gradient(90deg,#f59e0b,#fbbf24)" },
-              { img: "/prizes/phones.jpg", title: "iPhone 16 Pro + Samsung S25 Ultra", sub: "Dual flagship bundle — both phones, both boxes", target: 50, color: "#a78bfa", gradient: "linear-gradient(90deg,#8b5cf6,#a78bfa)" },
+              { img: "/prizes/phones.jpg", title: "iPhone 17 Pro + Samsung S25 Ultra", sub: "Dual flagship bundle — both phones, both boxes", target: 50, color: "#a78bfa", gradient: "linear-gradient(90deg,#8b5cf6,#a78bfa)" },
               { img: "/prizes/fridge.jpg", title: "Samsung Bespoke Fridge", sub: "Premium French Door refrigerator, custom panel", target: 30, color: "#60a5fa", gradient: "linear-gradient(90deg,#3b82f6,#60a5fa)" },
             ].map(({ img, title, sub, target, color, gradient }) => (
               <div key={title} className="relative rounded-xl overflow-hidden" style={{ border: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)" }}>

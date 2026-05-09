@@ -1,14 +1,20 @@
 "use client";
-// app/dashboard/financials/page.tsx — v2 FIXES:
-// OPTIMIZED: Uses caching for instant loads, lazy loading for non-critical data
-// 1. KYC check: checks kyc_status === "approved" OR kyc_verified === true (not both required)
-// 2. WithdrawModal is scrollable (overflow-y-auto on content, max-h on container)
-// 3. GPU plans WithdrawModal: removed gateway column, uses payout account from DB
+// app/dashboard/financials/page.tsx — FINAL FIXED VERSION
+// ─────────────────────────────────────────────────────────────────────────────
+// BUG #3 FIX: GPU mining deposits now visible in Finance — queries node_allocations
+//             AND payment_transactions, merged into a unified deposits view
+// BUG #4 FIX: Profile query now fetches ALL payout fields — WithdrawModal
+//             no longer shows "No payout account" incorrectly
+// BUG #5 FIX: Mining Portfolio tab joins gpu_plans to show plan names not UUIDs
+// BUG #6 FIX: payment_transactions with gateway="gpu_mining" shown as confirmed
+// BUG #9 FIX: Per-second display hidden for amounts < $1 minimum (shows $0.00/s
+//             label instead of confusing micro-amounts)
+// BUG #10 FIX: Withdraw button and alerts use clearer language
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import { getBusinessDayMessage, isBusinessDay } from "@/lib/business-days";
 import DashboardNavigation from "@/components/dashboard-navigation";
 import {
@@ -19,7 +25,6 @@ import {
   logWithdrawalEvent,
   recordWithdrawalLedger,
   type UserSecurityProfile,
-  type WithdrawalFraudCheck,
 } from "@/lib/withdrawal-security";
 import {
   Receipt,
@@ -43,8 +48,11 @@ import {
   Activity,
   Send,
   X,
+  Pickaxe,
+  Cpu,
 } from "lucide-react";
 
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type UserProfile = {
   id: string;
   email: string;
@@ -64,6 +72,7 @@ type UserProfile = {
   last_withhrawal_at: string | null;
   kyc_verified: boolean;
   kyc_status: string;
+  // FIX #4: These payout fields were missing from the query before
   payout_registered: boolean;
   payout_account_name: string | null;
   payout_bank_name: string | null;
@@ -72,20 +81,44 @@ type UserProfile = {
   payout_currency: string | null;
   payout_kyc_match: boolean;
   payout_locked: boolean;
-  has_opertor_license: boolean;
-  license_expires_at: string | null;
+  account_flagged: boolean;
+  withdwals_fronzen: boolean;
+  earnings_locked_until: string | null;
+  referral_earnings: number;
   total_task_completed: number;
   approved_count: number;
   rejected_countb: number;
   qaulity_score: number;
   streak_count: number;
-  consecutive_inactive_days: number;
-  account_flagged: boolean;
-  withdwals_fronzen: boolean;
-  earnings_locked_until: string | null;
-  referral_earnings: number;
   last_active_at: string | null;
   created_at: string;
+};
+
+// FIX #5: Extended with plan name from join
+type NodeAllocation = {
+  id: string;
+  user_id: string;
+  plan_id: string;
+  amount_invested: number;
+  currency: string;
+  payment_model: string;
+  contract_months: number | null;
+  contract_label: string | null;
+  contract_min_pct: number | null;
+  contract_max_pct: number | null;
+  maturity_date: string | null;
+  lock_in_label: string;
+  status: string;
+  total_earned: number;
+  total_withdrawn: number;
+  mining_period: string | null;
+  mining_ends_at: string | null;
+  mining_completed: boolean;
+  final_profit: number | null;
+  created_at: string;
+  // Joined from gpu_plans
+  plan_name?: string;
+  gpu_model?: string;
 };
 
 type PaymentTx = {
@@ -103,25 +136,6 @@ type PaymentTx = {
   created_at: string;
   confirmed_at: string | null;
   verified_by_admin: boolean | null;
-};
-
-type NodeAllocation = {
-  id: string;
-  user_id: string;
-  plan_id: string;
-  amount_invested: number;
-  currency: string;
-  payment_model: string;
-  contract_months: number | null;
-  contract_label: string | null;
-  contract_min_pct: number | null;
-  contract_max_pct: number | null;
-  maturity_date: string | null;
-  lock_in_label: string;
-  status: string;
-  total_earned: number;
-  total_withdrawn: number;
-  created_at: string;
 };
 
 type OperatorLicense = {
@@ -159,7 +173,22 @@ type Withdrawal = {
   payout_method?: string | null;
 };
 
-// ─── Helpers ──────────────────────────────────────────────────
+// FIX #3: Unified deposit entry type — merges payment_transactions + node_allocations
+type DepositEntry = {
+  id: string;
+  type: "payment" | "gpu_mining" | "gpu_contract";
+  label: string;
+  amount: number;
+  status: "confirmed" | "pending" | "failed";
+  gateway: string;
+  planName?: string;
+  gpuModel?: string;
+  miningPeriod?: string;
+  reference?: string;
+  created_at: string;
+};
+
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     confirmed: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
@@ -173,17 +202,30 @@ function StatusBadge({ status }: { status: string }) {
     rejected: "bg-red-900/30 border-red-700/40 text-red-400",
     expired: "bg-slate-800 border-slate-700 text-slate-400",
     flagged: "bg-orange-900/30 border-orange-700/40 text-orange-400",
+    matured: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
   };
   return (
     <span
-      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${map[status] || "bg-slate-800 border-slate-700 text-slate-400"}`}
+      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${map[status] ?? "bg-slate-800 border-slate-700 text-slate-400"}`}
     >
       {status}
     </span>
   );
 }
 
-function StatBox({ label, value, color, icon: Icon, sub }: any) {
+function StatBox({
+  label,
+  value,
+  color,
+  icon: Icon,
+  sub,
+}: {
+  label: string;
+  value: string | number;
+  color: string;
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  sub?: string;
+}) {
   return (
     <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-4">
       <div
@@ -210,7 +252,13 @@ function GatewayBadge({ gateway }: { gateway: string }) {
   if (gateway === "bank_transfer")
     return (
       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-900/30 border border-blue-700/40 text-blue-400">
-        🏦 Local Transfer
+        🏦 Bank Transfer
+      </span>
+    );
+  if (gateway === "gpu_mining")
+    return (
+      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-900/30 border border-emerald-700/40 text-emerald-400">
+        ⛏️ GPU Mining
       </span>
     );
   return (
@@ -228,99 +276,16 @@ const LICENSE_LABELS: Record<string, string> = {
   all: "Full Operator License",
 };
 
-// ─── USE SECURITY MODULE — All fraud/KYC checks centralized ──────────────────
-// The security module contains: KYC, account flags, payout, balance, rate limits, etc.
+const PERIOD_LABELS: Record<string, string> = {
+  hourly: "1 Hour",
+  daily: "1 Day",
+  weekly: "1 Week",
+  monthly: "1 Month",
+  contract: "Contract",
+};
 
-// ─── FRAUD CHECKS — Fixed KYC logic ──────────────────────────
-async function runWithdrawalFraudChecks(
-  userId: string,
-  amt: number,
-  profile: UserProfile,
-): Promise<{ pass: boolean; reason: string }> {
-  if (profile.account_flagged)
-    return { pass: false, reason: "Account is flagged. Contact support." };
-  if (profile.withdwals_fronzen)
-    return { pass: false, reason: "Withdrawals are frozen on your account." };
-
-  // ── FIXED: kyc_verified OR kyc_status === "approved" — either one is enough ──
-  if (!isKYCApproved(profile)) {
-    return {
-      pass: false,
-      reason: "KYC verification required before withdrawing.",
-    };
-  }
-
-  if (!profile.payout_registered)
-    return {
-      pass: false,
-      reason:
-        "No payout account registered. Go to Verification → Payout Setup.",
-    };
-  if (profile.payout_locked)
-    return {
-      pass: false,
-      reason: "Your payout account is locked. Contact support.",
-    };
-  if (
-    profile.earnings_locked_until &&
-    new Date(profile.earnings_locked_until) > new Date()
-  ) {
-    return {
-      pass: false,
-      reason: `Earnings locked until ${new Date(profile.earnings_locked_until).toLocaleDateString()}.`,
-    };
-  }
-  if (amt < 10) return { pass: false, reason: "Minimum withdrawal is $10." };
-
-  // Re-verify balance from DB
-  const { data: fresh } = await supabase
-    .from("users")
-    .select("balance_available, wallet_balance")
-    .eq("id", userId)
-    .single();
-  const freshBalance =
-    (fresh as any)?.balance_available ?? (fresh as any)?.wallet_balance ?? 0;
-  if (amt > freshBalance)
-    return {
-      pass: false,
-      reason: `Insufficient balance. Available: $${freshBalance.toFixed(2)}`,
-    };
-
-  // 24h rate limit
-  const oneDayAgo = new Date(Date.now() - 86400000).toISOString();
-  const { data: recentWDs } = await supabase
-    .from("withdrawals")
-    .select("amount")
-    .eq("user_id", userId)
-    .in("status", ["queued", "processing", "paid"])
-    .gte("created_at", oneDayAgo);
-  const last24hTotal = (recentWDs || []).reduce(
-    (s: number, w: any) => s + (w.amount || 0),
-    0,
-  );
-  if (last24hTotal + amt > 50000)
-    return {
-      pass: false,
-      reason: "24-hour withdrawal limit exceeded ($50,000).",
-    };
-
-  // Max 3 pending
-  const { data: pendingWDs } = await supabase
-    .from("withdrawals")
-    .select("id")
-    .eq("user_id", userId)
-    .in("status", ["queued", "processing"]);
-  if ((pendingWDs || []).length >= 3)
-    return {
-      pass: false,
-      reason:
-        "You have too many pending withdrawals. Wait for them to process.",
-    };
-
-  return { pass: true, reason: "" };
-}
-
-// ─── WITHDRAW MODAL — Fixed: scrollable + KYC fix + no gateway column ─────────
+// ─── WITHDRAW MODAL (FIXED) ───────────────────────────────────────────────────
+// FIX #4: Now correctly receives full profile with payout fields
 function WithdrawModal({
   userId,
   availableBalance,
@@ -344,50 +309,43 @@ function WithdrawModal({
   const MIN = 10;
   const amt = parseFloat(amount) || 0;
   const available = Math.max(0, availableBalance);
-  const expectedDays = amt < 500 ? 1 : amt < 5000 ? 2 : amt < 50000 ? 5 : 7;
-  const expectedDate = new Date(Date.now() + expectedDays * 86400000);
-  const businessDayMessage = getBusinessDayMessage();
-  const isBusinessDayNow = isBusinessDay();
+  const expDays = amt < 500 ? 1 : amt < 5000 ? 2 : amt < 50000 ? 5 : 7;
+  const expDate = new Date(Date.now() + expDays * 86400000);
+  const bizMsg = getBusinessDayMessage();
+  const isBizDay = isBusinessDay();
 
-  const payoutGateway = profile.payout_gateway || "unknown";
-  const payoutName = profile.payout_account_name || "—";
-  const payoutBank = profile.payout_bank_name || "";
-  const payoutAccount = profile.payout_account_number || "—";
-  const hasPayoutAccount =
-    profile.payout_registered && !!profile.payout_account_number;
-
-  // KYC check uses fixed helper
+  // FIX #4: These now have correct values because profile query was fixed
+  const payoutGateway = profile.payout_gateway ?? "unknown";
+  const payoutName = profile.payout_account_name ?? "—";
+  const payoutBank = profile.payout_bank_name ?? "";
+  const payoutAcct = profile.payout_account_number ?? "—";
+  const hasPayout = !!(
+    profile.payout_registered && profile.payout_account_number
+  );
   const kycOk = isKYCApproved(profile);
 
   async function handleSubmit() {
     setError("");
-
-    // ─── PIN VERIFICATION ─────────────────────────────────────────────────────
     if (!pin || pin.length < 4) {
-      setError("Please enter your PIN (4-6 digits)");
+      setError("Please enter your PIN (4–6 digits)");
       return;
     }
 
-    // Hash PIN for verification
-    async function hashPin(pinValue: string): Promise<string> {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(pinValue + userId);
-      const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-      return Array.from(new Uint8Array(hashBuffer))
+    // PIN verification
+    async function hashPin(v: string): Promise<string> {
+      const enc = new TextEncoder();
+      const buf = await crypto.subtle.digest("SHA-256", enc.encode(v + userId));
+      return Array.from(new Uint8Array(buf))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
     }
-
-    const providedPinHash = await hashPin(pin);
-    
-    // Get user's stored PIN hash
-    const { data: userData } = await supabase
+    const pinHash = await hashPin(pin);
+    const { data: ud } = await supabase
       .from("users")
       .select("pin_hash")
       .eq("id", userId)
       .single();
-
-    if (!userData?.pin_hash || providedPinHash !== userData.pin_hash) {
+    if (!ud?.pin_hash || pinHash !== ud.pin_hash) {
       setError("Invalid PIN. Withdrawal cannot be processed.");
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
         reason: "Invalid PIN",
@@ -396,111 +354,85 @@ function WithdrawModal({
       return;
     }
 
-    // ─── COMPREHENSIVE FRAUD & KYC CHECK ───────────────────────────────────
-    const securityCheck = await runWithdrawalSecurityChecks(
+    // Security checks
+    const check = await runWithdrawalSecurityChecks(
       supabase,
       userId,
       amt,
       profile as UserSecurityProfile,
     );
-
-    if (!securityCheck.pass) {
-      setError(securityCheck.reason);
-      // Attempt to log but don't fail (async, fire-and-forget)
+    if (!check.pass) {
+      setError(check.reason);
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: securityCheck.reason,
+        reason: check.reason,
         amount: amt,
-      }).catch(() => {
-        // Log failed silently
-      });
+      }).catch(() => {});
       return;
     }
 
     setLoading(true);
     try {
-      // ─── ATOMIC BALANCE DEDUCTION ─────────────────────────────────────────
-      const deductResult = await atomicDeductBalance(supabase, userId, amt);
-
-      if (!deductResult.success) {
-        setError(deductResult.error || "Balance deduction failed");
-        // Attempt to log but don't fail (async, fire-and-forget)
+      // Atomic balance deduction
+      const deduct = await atomicDeductBalance(supabase, userId, amt);
+      if (!deduct.success) {
+        setError(deduct.error ?? "Balance deduction failed");
         logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
           reason: "Balance deduction failed",
           amount: amt,
-          error: deductResult.error,
-        }).catch(() => {
-          // Log failed silently
-        });
+        }).catch(() => {});
+        setLoading(false);
         return;
       }
 
-      // ─── INSERT WITHDRAWAL RECORD ─────────────────────────────────────────
       const { error: wErr } = await supabase.from("withdrawals").insert({
         user_id: userId,
         amount: amt,
-        wallet_address: payoutAccount,
+        wallet_address: payoutAcct,
         payout_method: payoutGateway,
         payout_account_name: payoutName,
         payout_bank_name: payoutBank || null,
         status: "queued",
         tracking_status: "queued",
-        expected_date: expectedDate.toISOString(),
+        expected_date: expDate.toISOString(),
         created_at: new Date().toISOString(),
       });
 
       if (wErr) {
-        // Refund balance if insertion fails
-        console.error(
-          "[WITHDRAWAL] Insert failed, refunding balance:",
-          wErr.message,
-        );
+        console.error("[withdrawal] Insert failed, refunding:", wErr.message);
         await refundBalance(supabase, userId, amt);
-        // Attempt to log but don't fail (async, fire-and-forget)
         logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-          reason: "Withdrawal record creation failed",
+          reason: wErr.message,
           amount: amt,
-          error: wErr.message,
-        }).catch(() => {
-          // Log failed silently
-        });
+        }).catch(() => {});
         throw wErr;
       }
 
-      // ─── RECORD IN TRANSACTION LEDGER ─────────────────────────────────────
       await recordWithdrawalLedger(
         supabase,
         userId,
         amt,
-        payoutAccount,
+        payoutAcct,
         payoutGateway,
       );
-
-      // ─── LOG SUCCESS FOR AUDIT TRAIL (async, fire-and-forget) ──────────────
       logWithdrawalEvent(supabase, userId, "withdrawal_requested", {
         amount: amt,
         payout_method: payoutGateway,
-        payout_account: payoutAccount.slice(0, 12) + "...",
-        expected_date: expectedDate.toISOString(),
-      }).catch(() => {
-        // Log failed silently
-      });
+        payout_account: payoutAcct.slice(0, 12) + "...",
+        expected_date: expDate.toISOString(),
+      }).catch(() => {});
 
       onSuccess();
     } catch (e: any) {
       setError(e.message || "Withdrawal failed. Please try again.");
-      // Attempt to log but don't fail (async, fire-and-forget)
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: e.message || "Unknown error",
+        reason: e.message ?? "Unknown",
         amount: amt,
-      }).catch(() => {
-        // Log failed silently
-      });
+      }).catch(() => {});
     }
     setLoading(false);
   }
 
   return (
-    // ── FIXED: scrollable overlay — overflowY on inner container ──
     <div
       className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
       onClick={onClose}
@@ -510,40 +442,36 @@ function WithdrawModal({
         style={{
           background: "rgb(10,16,28)",
           border: "1px solid rgba(16,185,129,0.3)",
-          maxHeight: "90vh", // ← prevents overflow off screen
+          maxHeight: "90vh",
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header — fixed, doesn't scroll */}
         <div
-          className="px-6 py-5 flex items-center justify-between flex-shrink-0"
+          className="px-5 py-4 flex items-center justify-between flex-shrink-0"
           style={{
             background: "rgba(16,185,129,0.08)",
             borderBottom: "1px solid rgba(16,185,129,0.2)",
           }}
         >
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
-              <ArrowUpRight size={18} className="text-emerald-400" />
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
+              <ArrowUpRight size={16} className="text-emerald-400" />
             </div>
             <div>
-              <p className="text-white font-black">Request Withdrawal</p>
+              <p className="text-white font-black text-sm">
+                Request Withdrawal
+              </p>
               <p className="text-slate-500 text-xs">
-                Admin will process and pay to your registered account
+                Admin processes to your registered account
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="text-slate-500 hover:text-white flex-shrink-0"
-          >
+          <button onClick={onClose} className="text-slate-500 hover:text-white">
             <X size={16} />
           </button>
         </div>
 
-        {/* ── SCROLLABLE BODY ── */}
-        <div className="overflow-y-auto flex-1 p-6 space-y-5">
-          {/* KYC warning — only show if actually not verified */}
+        <div className="overflow-y-auto flex-1 p-5 space-y-4">
           {!kycOk && (
             <div
               className="rounded-xl p-3"
@@ -553,15 +481,16 @@ function WithdrawModal({
               }}
             >
               <p className="text-red-400 text-sm font-bold flex items-center gap-2">
-                <AlertTriangle size={14} /> KYC verification required
+                <AlertTriangle size={13} /> KYC verification required
               </p>
               <p className="text-red-400/70 text-xs mt-1">
                 Complete identity verification in the Verification section.
+                Mining continues unaffected.
               </p>
             </div>
           )}
 
-          {/* Payout account (read-only from verification) */}
+          {/* Payout account — FIX #4: now shows real data */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -570,23 +499,21 @@ function WithdrawModal({
             }}
           >
             <p className="text-slate-400 text-[10px] uppercase tracking-wide mb-2 flex items-center gap-1.5">
-              <Shield size={10} className="text-blue-400" /> Registered Payout
+              <Shield size={9} className="text-blue-400" /> Registered Payout
               Account
             </p>
-            {hasPayoutAccount ? (
-              <div className="space-y-1">
+            {hasPayout ? (
+              <div className="space-y-0.5">
                 <p className="text-white font-bold text-sm">{payoutName}</p>
                 {payoutBank && (
                   <p className="text-slate-400 text-xs">{payoutBank}</p>
                 )}
-                <p className="text-slate-500 text-xs font-mono">
-                  {payoutAccount}
-                </p>
+                <p className="text-slate-500 text-xs font-mono">{payoutAcct}</p>
                 <p className="text-blue-400 text-[10px] capitalize">
                   via {payoutGateway}
                 </p>
                 {kycOk && (
-                  <p className="text-emerald-400 text-[10px] flex items-center gap-1 mt-1">
+                  <p className="text-emerald-400 text-[10px] flex items-center gap-1">
                     <CheckCircle size={9} /> KYC verified
                   </p>
                 )}
@@ -603,7 +530,7 @@ function WithdrawModal({
             )}
           </div>
 
-          {!hasPayoutAccount && (
+          {!hasPayout && (
             <div
               className="rounded-xl p-3"
               style={{
@@ -612,13 +539,12 @@ function WithdrawModal({
               }}
             >
               <p className="text-red-400 text-sm font-bold flex items-center gap-2">
-                <Lock size={14} /> Cannot withdraw without a registered payout
+                <Lock size={13} /> Cannot withdraw without a registered payout
                 account
               </p>
             </div>
           )}
 
-          {/* Available balance */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -637,7 +563,6 @@ function WithdrawModal({
             </p>
           </div>
 
-          {/* Amount input */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Amount (USD)
@@ -653,44 +578,46 @@ function WithdrawModal({
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 placeholder="0.00"
-                className="w-full pl-9 pr-4 py-4 rounded-xl text-xl font-black text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors"
+                className="w-full pl-9 pr-4 py-3.5 rounded-xl text-xl font-black text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
             <div className="flex gap-2 mt-2">
-              {[25, 50, 75, 100].map((pct) => (
+              {[25, 50, 75, 100].map((p) => (
                 <button
-                  key={pct}
-                  onClick={() =>
-                    setAmount(((available * pct) / 100).toFixed(2))
-                  }
+                  key={p}
+                  onClick={() => setAmount(((available * p) / 100).toFixed(2))}
                   className="flex-1 text-[11px] font-bold py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:border-emerald-500/50 hover:text-emerald-400 transition-all"
                 >
-                  {pct}%
+                  {p}%
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Business Day Message */}
           <div
-            className="rounded-xl p-4"
+            className="rounded-xl p-3"
             style={{
-              background: isBusinessDayNow ? "rgba(16,185,129,0.08)" : "rgba(239,68,68,0.08)",
-              border: isBusinessDayNow ? "1px solid rgba(16,185,129,0.2)" : "1px solid rgba(239,68,68,0.25)",
+              background: isBizDay
+                ? "rgba(16,185,129,0.08)"
+                : "rgba(239,68,68,0.08)",
+              border: isBizDay
+                ? "1px solid rgba(16,185,129,0.2)"
+                : "1px solid rgba(239,68,68,0.25)",
             }}
           >
-            <p className={`text-sm font-bold flex items-center gap-2 ${isBusinessDayNow ? "text-emerald-400" : "text-yellow-400"}`}>
-              <Clock size={14} />
-              {businessDayMessage}
+            <p
+              className={`text-sm font-bold flex items-center gap-2 ${isBizDay ? "text-emerald-400" : "text-amber-400"}`}
+            >
+              <Clock size={13} />
+              {bizMsg}
             </p>
-            {!isBusinessDayNow && (
-              <p className="text-yellow-400/70 text-xs mt-1">
-                Withdrawals are only processed on business days (Monday to Friday).
+            {!isBizDay && (
+              <p className="text-amber-400/70 text-xs mt-1">
+                Withdrawals only processed on business days (Mon–Fri).
               </p>
             )}
           </div>
 
-          {/* PIN Input - Required for withdrawal */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Security PIN <span className="text-red-400">*</span>
@@ -700,79 +627,64 @@ function WithdrawModal({
               maxLength={6}
               value={pin}
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-              placeholder="Enter your 4-6 digit PIN"
+              placeholder="Enter your 4–6 digit PIN"
               className="w-full px-4 py-3 rounded-xl text-lg font-bold text-center tracking-widest text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors"
             />
-            <p className="text-slate-500 text-xs mt-1">
-              Your PIN is required to complete the withdrawal for security.
-            </p>
           </div>
 
-          {/* Settlement timeline */}
           {amt >= MIN && amt <= available && (
             <div
-              className="rounded-xl p-4 space-y-3"
+              className="rounded-xl p-4 space-y-2"
               style={{
                 background: "rgba(59,130,246,0.06)",
                 border: "1px solid rgba(59,130,246,0.2)",
               }}
             >
-              <p className="text-blue-300 text-xs font-black uppercase tracking-wider">
+              <p className="text-blue-300 text-xs font-black uppercase tracking-wide">
                 Settlement Timeline
               </p>
-              <div className="space-y-2">
-                {[
-                  {
-                    label: "Queued",
-                    desc: "Request received by admin",
-                    done: true,
-                    active: false,
-                  },
-                  {
-                    label: "Processing",
-                    desc: "Admin verifying and processing",
-                    done: false,
-                    active: true,
-                  },
-                  {
-                    label: "In Transit",
-                    desc: amt < 500 ? "Same day dispatch" : "Batch processed",
-                    done: false,
-                    active: false,
-                  },
-                  {
-                    label: "Paid",
-                    desc: `Expected ${expectedDate.toLocaleDateString()}`,
-                    done: false,
-                    active: false,
-                  },
-                ].map((step) => (
-                  <div key={step.label} className="flex items-start gap-3">
-                    <div
-                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${step.done ? "bg-emerald-500 border-emerald-500" : step.active ? "border-blue-400 animate-pulse" : "border-slate-700"}`}
-                    >
-                      {step.done && (
-                        <CheckCircle size={10} className="text-white" />
-                      )}
-                    </div>
-                    <div>
-                      <p
-                        className={`text-xs font-bold ${step.done ? "text-emerald-400" : step.active ? "text-blue-300" : "text-slate-600"}`}
-                      >
-                        {step.label}
-                      </p>
-                      <p className="text-slate-600 text-[10px]">{step.desc}</p>
-                    </div>
+              {[
+                {
+                  label: "Queued",
+                  desc: "Request received",
+                  done: true,
+                  active: false,
+                },
+                {
+                  label: "Processing",
+                  desc: "Admin verifying",
+                  done: false,
+                  active: true,
+                },
+                {
+                  label: "In Transit",
+                  desc: amt < 500 ? "Same day" : "Batch",
+                  done: false,
+                  active: false,
+                },
+                {
+                  label: "Paid",
+                  desc: `Expected ${expDate.toLocaleDateString()}`,
+                  done: false,
+                  active: false,
+                },
+              ].map((s) => (
+                <div key={s.label} className="flex items-start gap-3">
+                  <div
+                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${s.done ? "bg-emerald-500 border-emerald-500" : s.active ? "border-blue-400 animate-pulse" : "border-slate-700"}`}
+                  >
+                    {s.done && <CheckCircle size={9} className="text-white" />}
                   </div>
-                ))}
-              </div>
-              <p className="text-slate-500 text-[10px]">
-                {amt < 500
-                  ? "Small withdrawals settle within 24 hours"
-                  : amt < 5000
-                    ? "Medium withdrawals settle in 24–48 hours"
-                    : "Large withdrawals: 3–7 business days"}
-              </p>
+                  <div>
+                    <p
+                      className={`text-xs font-bold ${s.done ? "text-emerald-400" : s.active ? "text-blue-300" : "text-slate-600"}`}
+                    >
+                      {s.label}
+                    </p>
+                    <p className="text-slate-600 text-[10px]">{s.desc}</p>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
@@ -784,7 +696,7 @@ function WithdrawModal({
                 border: "1px solid rgba(239,68,68,0.25)",
               }}
             >
-              <AlertTriangle size={14} className="text-red-400 shrink-0" />
+              <AlertTriangle size={13} className="text-red-400 shrink-0" />
               <p className="text-red-400 text-sm">{error}</p>
             </div>
           )}
@@ -792,28 +704,37 @@ function WithdrawModal({
           <button
             onClick={handleSubmit}
             disabled={
-              loading || isFrozen || !amount || !hasPayoutAccount || !kycOk || !pin || pin.length < 4 || !isBusinessDayNow
+              loading ||
+              isFrozen ||
+              !amount ||
+              !hasPayout ||
+              !kycOk ||
+              pin.length < 4 ||
+              !isBizDay
             }
             className="w-full py-4 rounded-xl font-black text-white flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
-            title={!isBusinessDayNow ? "Withdrawals only available on business days (Mon-Fri)" : !pin || pin.length < 4 ? "Enter valid PIN" : ""}
           >
             {loading ? (
-              <RefreshCw size={16} className="animate-spin" />
+              <>
+                <RefreshCw size={15} className="animate-spin" /> Submitting…
+              </>
+            ) : !isBizDay ? (
+              <>
+                <Clock size={15} /> Available Mon–Fri only
+              </>
+            ) : pin.length < 4 ? (
+              <>
+                <Lock size={15} /> Enter PIN to continue
+              </>
             ) : (
-              <Send size={16} />
+              <>
+                <Send size={15} /> Request Withdrawal of ${amount || "0.00"}
+              </>
             )}
-            {loading
-              ? "Submitting..."
-              : !isBusinessDayNow
-                ? "Only available on business days"
-                : !pin || pin.length < 4
-                  ? "Enter PIN to continue"
-                  : `Request Withdrawal of $${amount || "0.00"}`}
           </button>
-
-          <p className="text-slate-600 text-[11px] text-center pb-2">
-            Funds will be sent to your registered payout account.
+          <p className="text-slate-600 text-[11px] text-center pb-1">
+            Funds sent to your registered payout account.
           </p>
         </div>
       </div>
@@ -821,7 +742,7 @@ function WithdrawModal({
   );
 }
 
-// ─── Main ─────────────────────────────────────────────────────
+// ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function FinancialsPage() {
   const router = useRouter();
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -830,10 +751,13 @@ export default function FinancialsPage() {
   const [licenses, setLicenses] = useState<OperatorLicense[]>([]);
   const [ledgerTxs, setLedgerTxs] = useState<LedgerTx[]>([]);
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [gpuPlans, setGpuPlans] = useState<
+    Record<string, { name: string; gpu_model: string }>
+  >({});
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<
     | "overview"
-    | "payments"
+    | "deposits"
     | "investments"
     | "licenses"
     | "ledger"
@@ -862,58 +786,102 @@ export default function FinancialsPage() {
     }
     setUserId(user.id);
 
-    const [profRes, payRes, nodeRes, licRes, ledgerRes, wRes] =
+    const [profRes, payRes, nodeRes, licRes, ledgerRes, wRes, plansRes] =
       await Promise.allSettled([
+        // FIX #4: Now selects ALL payout and security fields that were missing
         supabase
           .from("users")
           .select(
-            "id, balance_available, balance_pending, balance_locked, wallet_balance, pending_balance, total_earned, total_withrawn, earnings, earning_withrawn, withdwals_fronzen, payout_registered, kyc_status, kyc_verified"
+            "id, email, full_name, tier, role, " +
+              "balance_available, balance_pending, balance_locked, wallet_balance, " +
+              "pending_balance, total_earned, earnings, earning_withrawn, total_withrawn, " +
+              "weekly_withdrawn, last_withhrawal_at, " +
+              "kyc_verified, kyc_status, " +
+              "payout_registered, payout_account_name, payout_bank_name, " +
+              "payout_account_number, payout_gateway, payout_currency, " +
+              "payout_kyc_match, payout_locked, " +
+              "account_flagged, withdwals_fronzen, earnings_locked_until, " +
+              "referral_earnings, total_task_completed, approved_count, " +
+              "rejected_countb, qaulity_score, streak_count, last_active_at, created_at",
           )
           .eq("id", user.id)
           .single(),
+
+        // Payments — include gpu_mining type
         supabase
           .from("payment_transactions")
-          .select("id, user_id, amount, status, created_at")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(50),
-        supabase
-          .from("node_allocations")
-          .select("id, user_id, status, amount_invested, total_earned, created_at")
-          .eq("user_id", user.id)
-          .order("created_at", { ascending: false })
-          .limit(50),
-        supabase
-          .from("operator_licenses")
-          .select("id, user_id, status, purchased_at")
-          .eq("user_id", user.id)
-          .order("purchased_at", { ascending: false })
-          .limit(10),
-        supabase
-          .from("transaction_ledger")
-          .select("id, user_id, type, amount, created_at")
+          .select(
+            "id, user_id, node_key, amount, currency, gateway, " +
+              "gateway_reference, status, metadata, created_at, confirmed_at, verified_by_admin",
+          )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(100),
+
+        // FIX #5: Get all allocation fields including mining_period, mining_ends_at
+        supabase
+          .from("node_allocations")
+          .select(
+            "id, user_id, plan_id, amount_invested, currency, payment_model, " +
+              "contract_months, contract_label, contract_min_pct, contract_max_pct, " +
+              "maturity_date, lock_in_label, status, total_earned, total_withdrawn, " +
+              "mining_period, mining_ends_at, mining_completed, final_profit, created_at",
+          )
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(100),
+
+        supabase
+          .from("operator_licenses")
+          .select(
+            "id, user_id, license_type, status, expires_at, purchased_at, payment_id",
+          )
+          .eq("user_id", user.id)
+          .order("purchased_at", { ascending: false })
+          .limit(20),
+
+        supabase
+          .from("transaction_ledger")
+          .select(
+            "id, type, amount, balance_after, description, reference_id, created_at",
+          )
+          .eq("user_id", user.id)
+          .order("created_at", { ascending: false })
+          .limit(100),
+
         supabase
           .from("withdrawals")
           .select(
-            "id, user_id, amount, wallet_address, payout_method, payout_account_name, payout_bank_name, status, tracking_status, expected_date, created_at, paid_at, failure_reason"
+            "id, user_id, amount, wallet_address, payout_method, payout_account_name, " +
+              "payout_bank_name, status, tracking_status, expected_date, " +
+              "created_at, paid_at, failure_reason",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(50),
+
+        // FIX #5: Fetch gpu_plans to get human-readable names
+        supabase.from("gpu_plans").select("id, name, gpu_model"),
       ]);
 
     if (profRes.status === "fulfilled" && profRes.value.data)
-      setProfile(profRes.value.data);
-    if (payRes.status === "fulfilled") setPaymentTxs(payRes.value.data || []);
+      setProfile(profRes.value.data as UserProfile);
+    if (payRes.status === "fulfilled") setPaymentTxs(payRes.value.data ?? []);
     if (nodeRes.status === "fulfilled")
-      setNodeAllocations(nodeRes.value.data || []);
-    if (licRes.status === "fulfilled") setLicenses(licRes.value.data || []);
+      setNodeAllocations(nodeRes.value.data ?? []);
+    if (licRes.status === "fulfilled") setLicenses(licRes.value.data ?? []);
     if (ledgerRes.status === "fulfilled")
-      setLedgerTxs(ledgerRes.value.data || []);
-    if (wRes.status === "fulfilled") setWithdrawals(wRes.value.data || []);
+      setLedgerTxs(ledgerRes.value.data ?? []);
+    if (wRes.status === "fulfilled") setWithdrawals(wRes.value.data ?? []);
+
+    // FIX #5: Build a lookup map for plan names
+    if (plansRes.status === "fulfilled" && plansRes.value.data) {
+      const map: Record<string, { name: string; gpu_model: string }> = {};
+      for (const p of plansRes.value.data)
+        map[p.id] = { name: p.name, gpu_model: p.gpu_model };
+      setGpuPlans(map);
+    }
+
     setLoading(false);
   }, [router]);
 
@@ -935,43 +903,120 @@ export default function FinancialsPage() {
   const pending = profile?.balance_pending ?? profile?.pending_balance ?? 0;
   const locked = profile?.balance_locked ?? 0;
   const totalEarned = profile?.total_earned ?? profile?.earnings ?? 0;
-  const totalWithdrawn =
-    profile?.total_withrawn ?? profile?.earning_withrawn ?? 0;
+  const totalWd = profile?.total_withrawn ?? profile?.earning_withrawn ?? 0;
   const isFrozen = profile?.withdwals_fronzen ?? false;
+  const kycOk = profile ? isKYCApproved(profile) : false;
 
-  // ── FIXED: use helper for KYC check everywhere ──
-  const userKycOk = profile ? isKYCApproved(profile) : false;
-
+  // Computed stats
   const activeLicenses = licenses.filter((l) => l.status === "active");
-  const activeNodes = nodeAllocations.filter((n) => n.status === "active");
+  const activeNodes = nodeAllocations.filter(
+    (n) => n.status === "active" && !n.mining_completed,
+  );
   const totalInvested = nodeAllocations.reduce(
-    (s, n) => s + (n.amount_invested || 0),
+    (s, n) => s + (n.amount_invested ?? 0),
     0,
   );
   const totalNodeEarned = nodeAllocations.reduce(
-    (s, n) => s + (n.total_earned || 0),
+    (s, n) => s + (n.total_earned ?? 0),
     0,
   );
-  const confirmedPayments = paymentTxs.filter(
-    (p) => p.status === "confirmed" || p.status === "confmrmed",
-  );
-  const pendingPayments = paymentTxs.filter((p) => p.status === "pending");
-  const totalPaid = confirmedPayments.reduce((s, p) => s + (p.amount || 0), 0);
-  const pendingWithdrawals = withdrawals.filter(
+  const pendingWDs = withdrawals.filter(
     (w) => w.status === "queued" || w.status === "processing",
   );
 
-  // ── FIXED canWithdraw: uses correct KYC check ──
-  const canWithdraw =
-    !isFrozen && avail >= 10 && !!profile?.payout_registered && userKycOk;
+  // FIX #3: Build unified deposit list from both payment_transactions and node_allocations
+  const depositEntries: DepositEntry[] = [];
 
-  const TABS = [
-    { id: "overview" as const, label: "Overview", icon: BarChart3 },
-    { id: "payments" as const, label: "Payments", icon: CreditCard },
-    { id: "investments" as const, label: "Mining Portfolio", icon: Server },
-    { id: "licenses" as const, label: "Licenses", icon: Shield },
-    { id: "ledger" as const, label: "Ledger", icon: Receipt },
-    { id: "withdrawals" as const, label: "Withdrawals", icon: ArrowUpRight },
+  // Add payment_transactions (non-gpu_mining ones and confirmed gpu_mining)
+  for (const pt of paymentTxs) {
+    const meta = (() => {
+      try {
+        return pt.metadata ? JSON.parse(pt.metadata) : {};
+      } catch {
+        return {};
+      }
+    })();
+    const isGpuPayment =
+      pt.gateway === "gpu_mining" || meta.purchaseType?.includes("gpu");
+
+    depositEntries.push({
+      id: `pt-${pt.id}`,
+      type: isGpuPayment
+        ? meta.purchaseType === "gpu_contract"
+          ? "gpu_contract"
+          : "gpu_mining"
+        : "payment",
+      label: isGpuPayment
+        ? `GPU Mining Deposit${meta.planName ? ` — ${meta.planName}` : ""}`
+        : meta.purchaseType === "license"
+          ? "Operator License"
+          : "Payment",
+      amount: pt.amount,
+      // FIX #6: gpu_mining gateway payments are treated as confirmed
+      status:
+        isGpuPayment && pt.status !== "failed"
+          ? "confirmed"
+          : pt.status === "confirmed" || pt.status === "confmrmed"
+            ? "confirmed"
+            : pt.status === "failed"
+              ? "failed"
+              : "pending",
+      gateway: pt.gateway,
+      planName: meta.planName,
+      miningPeriod: meta.miningPeriod,
+      reference: pt.gateway_reference ?? String(pt.id),
+      created_at: pt.created_at,
+    });
+  }
+
+  // FIX #3: Add node_allocations that have no matching payment_transaction
+  // This ensures mining investments are always visible in Finance deposits
+  const ptReferences = new Set(
+    paymentTxs.map((pt) => pt.gateway_reference).filter(Boolean),
+  );
+  for (const alloc of nodeAllocations) {
+    if (ptReferences.has(alloc.id)) continue; // Already in list via payment_transaction
+
+    const plan = gpuPlans[alloc.plan_id];
+    depositEntries.push({
+      id: `alloc-${alloc.id}`,
+      type: alloc.payment_model === "contract" ? "gpu_contract" : "gpu_mining",
+      label: `GPU Mining Deposit${plan ? ` — ${plan.name}` : ""}`,
+      amount: alloc.amount_invested,
+      status: "confirmed", // Allocation exists = payment went through
+      gateway: "gpu_mining",
+      planName: plan?.name,
+      gpuModel: plan?.gpu_model,
+      miningPeriod: alloc.mining_period ?? "daily",
+      reference: alloc.id,
+      created_at: alloc.created_at,
+    });
+  }
+
+  // Sort unified deposits by date
+  depositEntries.sort(
+    (a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+
+  const confirmedDeposits = depositEntries.filter(
+    (d) => d.status === "confirmed",
+  );
+  const totalDeposited = confirmedDeposits.reduce((s, d) => s + d.amount, 0);
+  const canWithdraw =
+    !isFrozen && avail >= 10 && !!profile?.payout_registered && kycOk;
+
+  const TABS: Array<{
+    id: typeof tab;
+    label: string;
+    icon: React.ComponentType<{ size?: number; className?: string }>;
+  }> = [
+    { id: "overview", label: "Overview", icon: BarChart3 },
+    { id: "deposits", label: "All Deposits", icon: CreditCard }, // FIX #3: renamed from "Payments"
+    { id: "investments", label: "Mining Portfolio", icon: Server },
+    { id: "licenses", label: "Licenses", icon: Shield },
+    { id: "ledger", label: "Ledger", icon: Receipt },
+    { id: "withdrawals", label: "Withdrawals", icon: ArrowUpRight },
   ];
 
   return (
@@ -1006,7 +1051,7 @@ export default function FinancialsPage() {
       )}
 
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-5xl mx-auto p-4 md:p-6 pb-24 md:pb-6 space-y-6">
+        <div className="max-w-5xl mx-auto p-4 md:p-6 pb-24 md:pb-6 space-y-5">
           {/* Header */}
           <div className="flex items-center justify-between flex-wrap gap-3">
             <div>
@@ -1027,7 +1072,7 @@ export default function FinancialsPage() {
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-black text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-black text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{
                   background: "linear-gradient(135deg,#10b981,#059669)",
                 }}
@@ -1037,7 +1082,7 @@ export default function FinancialsPage() {
                   ? "Frozen"
                   : !profile?.payout_registered
                     ? "Setup Payout First"
-                    : !userKycOk
+                    : !kycOk
                       ? "KYC Required"
                       : avail < 10
                         ? "Need $10 min"
@@ -1047,21 +1092,23 @@ export default function FinancialsPage() {
           </div>
 
           {/* Alerts */}
-          {!userKycOk && (
+          {/* FIX #10: Clearer language — mining not blocked by KYC, only withdrawal */}
+          {!kycOk && (
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <AlertTriangle size={14} className="text-amber-400 shrink-0" />
               <p className="text-amber-300 text-sm">
-                KYC verification required.{" "}
+                KYC verification required for withdrawals. Mining continues
+                normally.{" "}
                 <button
                   onClick={() => router.push("/dashboard/verification")}
-                  className="underline"
+                  className="underline font-bold"
                 >
                   Complete verification →
                 </button>
               </p>
             </div>
           )}
-          {userKycOk && !profile?.payout_registered && (
+          {kycOk && !profile?.payout_registered && (
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <AlertTriangle size={14} className="text-amber-400 shrink-0" />
               <p className="text-amber-300 text-sm">
@@ -1070,7 +1117,7 @@ export default function FinancialsPage() {
                   onClick={() => router.push("/dashboard/verification")}
                   className="underline"
                 >
-                  Go to Verification → Payout Setup →
+                  Verification → Payout Setup →
                 </button>
               </p>
             </div>
@@ -1079,36 +1126,24 @@ export default function FinancialsPage() {
             <div className="bg-red-900/20 border border-red-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Lock size={14} className="text-red-400 shrink-0" />
               <p className="text-red-300 text-sm">
-                Your withdrawals are currently frozen by admin. Contact support.
+                Your withdrawals are currently frozen. Contact support.
               </p>
             </div>
           )}
-          {pendingPayments.length > 0 && (
-            <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
-              <Clock size={14} className="text-amber-400 shrink-0" />
-              <p className="text-amber-300 text-sm">
-                <strong>
-                  {pendingPayments.length} payment
-                  {pendingPayments.length > 1 ? "s" : ""}
-                </strong>{" "}
-                pending admin confirmation.
-              </p>
-            </div>
-          )}
-          {pendingWithdrawals.length > 0 && (
+          {pendingWDs.length > 0 && (
             <div className="bg-blue-900/20 border border-blue-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Clock size={14} className="text-blue-400 shrink-0" />
               <p className="text-blue-300 text-sm">
                 <strong>
-                  {pendingWithdrawals.length} withdrawal
-                  {pendingWithdrawals.length > 1 ? "s" : ""}
+                  {pendingWDs.length} withdrawal
+                  {pendingWDs.length > 1 ? "s" : ""}
                 </strong>{" "}
                 currently being processed.
               </p>
             </div>
           )}
 
-          {/* Balance Cards */}
+          {/* Balance Cards — 2×2 on mobile */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <StatBox
               label="Available Balance"
@@ -1118,44 +1153,40 @@ export default function FinancialsPage() {
               sub="Ready to withdraw"
             />
             <StatBox
-              label="Total Committed"
+              label="Total GPU Invested"
               value={`$${totalInvested.toFixed(2)}`}
               color="text-violet-400"
-              icon={Server}
-              sub={`${activeNodes.length} active node${activeNodes.length !== 1 ? "s" : ""}`}
+              icon={Cpu}
+              sub={`${activeNodes.length} active`}
             />
             <StatBox
-              label="Total Paid In"
-              value={`$${totalPaid.toFixed(2)}`}
+              label="Total Deposited"
+              value={`$${totalDeposited.toFixed(2)}`}
               color="text-cyan-400"
               icon={CreditCard}
-              sub={`${confirmedPayments.length} confirmed`}
+              sub={`${confirmedDeposits.length} confirmed`}
             />
             <StatBox
               label="Active Licenses"
               value={activeLicenses.length}
               color="text-amber-400"
               icon={Shield}
-              sub={
-                activeLicenses.length > 0
-                  ? "Licensed operator"
-                  : "No active license"
-              }
+              sub={activeLicenses.length > 0 ? "Licensed" : "No license"}
             />
           </div>
 
           {/* Tabs */}
-          <div className="flex gap-1 bg-slate-900/60 border border-slate-800 rounded-xl p-1 flex-wrap">
+          <div className="grid grid-cols-3 md:flex gap-1 bg-slate-900/60 border border-slate-800 rounded-xl p-1">
             {TABS.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 onClick={() => setTab(id)}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${tab === id ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300"}`}
+                className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${tab === id ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300"}`}
               >
-                <Icon size={12} /> {label}
-                {id === "withdrawals" && pendingWithdrawals.length > 0 && (
+                <Icon size={11} /> {label}
+                {id === "withdrawals" && pendingWDs.length > 0 && (
                   <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 text-blue-400">
-                    {pendingWithdrawals.length}
+                    {pendingWDs.length}
                   </span>
                 )}
               </button>
@@ -1164,7 +1195,7 @@ export default function FinancialsPage() {
 
           {/* ── OVERVIEW ── */}
           {tab === "overview" && (
-            <div className="space-y-5">
+            <div className="space-y-4">
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
                 <p className="text-white font-bold text-sm mb-4 flex items-center gap-2">
                   <BarChart3 size={14} className="text-emerald-400" /> Financial
@@ -1188,13 +1219,13 @@ export default function FinancialsPage() {
                       color: "text-amber-400",
                     },
                     {
-                      label: "Total Earned (All Time)",
+                      label: "Total Earned",
                       value: `$${totalEarned.toFixed(2)}`,
                       color: "text-cyan-400",
                     },
                     {
                       label: "Total Withdrawn",
-                      value: `$${totalWithdrawn.toFixed(2)}`,
+                      value: `$${totalWd.toFixed(2)}`,
                       color: "text-blue-400",
                     },
                     {
@@ -1215,46 +1246,45 @@ export default function FinancialsPage() {
                 </div>
               </div>
 
-              {/* Quick Withdraw CTA */}
+              {/* Withdraw CTA */}
               <div
-                className="rounded-2xl p-5 flex items-center justify-between gap-4"
+                className="rounded-2xl p-4 flex items-center justify-between gap-4"
                 style={{
                   background: "rgba(16,185,129,0.06)",
                   border: "1px solid rgba(16,185,129,0.2)",
                 }}
               >
-                <div>
+                <div className="min-w-0">
                   <p className="text-white font-black text-base">
                     Ready to Withdraw?
                   </p>
                   <p className="text-slate-400 text-sm mt-0.5">
-                    You have{" "}
                     <span className="text-emerald-400 font-bold">
                       ${avail.toFixed(2)}
                     </span>{" "}
-                    available.
-                    {!userKycOk
-                      ? " Complete KYC verification first."
+                    available.{" "}
+                    {!kycOk
+                      ? "Complete KYC to enable withdrawals (mining is unaffected)."
                       : !profile?.payout_registered
-                        ? " Set up your payout account first."
+                        ? "Set up your payout account first."
                         : avail < 10
-                          ? " You need at least $10 to withdraw."
-                          : " Submit a request and admin will process it."}
+                          ? "You need at least $10 to withdraw."
+                          : "Submit a request and admin will process it."}
                   </p>
                 </div>
                 <button
                   onClick={() => setShowWithdrawModal(true)}
                   disabled={!canWithdraw}
-                  className="shrink-0 px-6 py-3 rounded-xl text-sm font-black text-white flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="shrink-0 px-5 py-2.5 rounded-xl text-sm font-black text-white flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                   style={{
                     background: "linear-gradient(135deg,#10b981,#059669)",
                   }}
                 >
-                  <ArrowUpRight size={15} /> Withdraw Now
+                  <ArrowUpRight size={14} /> Withdraw
                 </button>
               </div>
 
-              {/* Payout account card */}
+              {/* Payout account */}
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
                 <p className="text-white font-bold text-sm mb-3 flex items-center gap-2">
                   <Shield size={14} className="text-blue-400" /> Payout Account
@@ -1275,7 +1305,7 @@ export default function FinancialsPage() {
                     <p className="text-blue-400 text-xs capitalize">
                       via {profile.payout_gateway}
                     </p>
-                    {userKycOk ? (
+                    {kycOk ? (
                       <p className="text-emerald-400 text-xs flex items-center gap-1">
                         <CheckCircle size={10} /> KYC verified
                       </p>
@@ -1313,43 +1343,43 @@ export default function FinancialsPage() {
                   {[
                     {
                       label: "Tasks Completed",
-                      value: profile?.total_task_completed || 0,
+                      value: profile?.total_task_completed ?? 0,
                       color: "text-white",
                     },
                     {
                       label: "Approved",
-                      value: profile?.approved_count || 0,
+                      value: profile?.approved_count ?? 0,
                       color: "text-emerald-400",
                     },
                     {
                       label: "Rejected",
-                      value: profile?.rejected_countb || 0,
+                      value: profile?.rejected_countb ?? 0,
                       color: "text-red-400",
                     },
                     {
                       label: "Quality Score",
-                      value: `${((profile?.qaulity_score || 0) * 100).toFixed(0)}%`,
+                      value: `${((profile?.qaulity_score ?? 0) * 100).toFixed(0)}%`,
                       color:
-                        (profile?.qaulity_score || 0) >= 0.8
+                        (profile?.qaulity_score ?? 0) >= 0.8
                           ? "text-emerald-400"
                           : "text-amber-400",
                     },
                     {
                       label: "Streak",
-                      value: `${profile?.streak_count || 0} days`,
+                      value: `${profile?.streak_count ?? 0} days`,
                       color: "text-amber-400",
                     },
                     {
-                      label: "Referral Earnings",
-                      value: `$${(profile?.referral_earnings || 0).toFixed(2)}`,
+                      label: "Referral Earned",
+                      value: `$${(profile?.referral_earnings ?? 0).toFixed(2)}`,
                       color: "text-violet-400",
                     },
                     {
                       label: "KYC Status",
-                      value: userKycOk
+                      value: kycOk
                         ? "Verified ✓"
-                        : profile?.kyc_status || "Pending",
-                      color: userKycOk ? "text-emerald-400" : "text-amber-400",
+                        : (profile?.kyc_status ?? "Pending"),
+                      color: kycOk ? "text-emerald-400" : "text-amber-400",
                     },
                     {
                       label: "Last Active",
@@ -1373,6 +1403,358 @@ export default function FinancialsPage() {
             </div>
           )}
 
+          {/* ── DEPOSITS TAB (FIX #3: was "Payments" — now shows ALL deposits) ── */}
+          {tab === "deposits" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-white font-bold">
+                  {depositEntries.length} total deposits
+                </p>
+                <p className="text-emerald-400 text-xs font-bold">
+                  ${totalDeposited.toFixed(2)} confirmed
+                </p>
+              </div>
+
+              {/* Summary */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
+                  <p className="text-slate-500 text-[10px] uppercase">
+                    GPU Mining
+                  </p>
+                  <p className="text-emerald-400 font-black text-base">
+                    {
+                      depositEntries.filter(
+                        (d) =>
+                          d.type === "gpu_mining" || d.type === "gpu_contract",
+                      ).length
+                    }
+                  </p>
+                </div>
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
+                  <p className="text-slate-500 text-[10px] uppercase">Other</p>
+                  <p className="text-cyan-400 font-black text-base">
+                    {depositEntries.filter((d) => d.type === "payment").length}
+                  </p>
+                </div>
+                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
+                  <p className="text-slate-500 text-[10px] uppercase">
+                    Total Value
+                  </p>
+                  <p className="text-white font-black text-base">
+                    ${totalDeposited.toFixed(0)}
+                  </p>
+                </div>
+              </div>
+
+              {depositEntries.length === 0 ? (
+                <div className="text-center py-14 border border-dashed border-slate-800 rounded-2xl text-slate-500">
+                  <CreditCard size={28} className="mx-auto mb-2 opacity-30" />
+                  <p>No deposits yet</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {depositEntries.map((dep) => {
+                    const isOpen = expanded === dep.id;
+                    const isGpu =
+                      dep.type === "gpu_mining" || dep.type === "gpu_contract";
+                    return (
+                      <div
+                        key={dep.id}
+                        className="border border-slate-800 rounded-xl overflow-hidden"
+                      >
+                        <button
+                          onClick={() => setExpanded(isOpen ? null : dep.id)}
+                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-800/20 transition-colors"
+                        >
+                          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-slate-800 border border-slate-700">
+                            {isGpu ? (
+                              <Pickaxe size={13} className="text-emerald-400" />
+                            ) : (
+                              <CreditCard
+                                size={13}
+                                className="text-slate-400"
+                              />
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <p className="text-white text-sm font-semibold">
+                                {dep.label}
+                              </p>
+                              <GatewayBadge gateway={dep.gateway} />
+                              <StatusBadge status={dep.status} />
+                            </div>
+                            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                              {dep.miningPeriod && dep.type !== "payment" && (
+                                <span className="text-[10px] text-emerald-400/70">
+                                  {PERIOD_LABELS[dep.miningPeriod] ??
+                                    dep.miningPeriod}{" "}
+                                  session
+                                </span>
+                              )}
+                              <span className="text-slate-500 text-[10px]">
+                                {new Date(dep.created_at).toLocaleString()}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 mr-2">
+                            <p className="text-white font-black text-base">
+                              ${dep.amount.toFixed(2)}
+                            </p>
+                            <p className="text-slate-600 text-[10px]">USD</p>
+                          </div>
+                          {isOpen ? (
+                            <ChevronUp
+                              size={13}
+                              className="text-slate-600 shrink-0"
+                            />
+                          ) : (
+                            <ChevronDown
+                              size={13}
+                              className="text-slate-600 shrink-0"
+                            />
+                          )}
+                        </button>
+                        {isOpen && (
+                          <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/20">
+                            <div className="bg-slate-800/40 rounded-xl p-3 space-y-1.5 text-xs mt-3">
+                              {[
+                                ["Type", dep.type.replace(/_/g, " ")],
+                                ["Amount", `$${dep.amount.toFixed(2)} USD`],
+                                ["Status", dep.status],
+                                ["Gateway", dep.gateway],
+                                ...(dep.planName
+                                  ? [["Plan", dep.planName]]
+                                  : []),
+                                ...(dep.gpuModel
+                                  ? [["GPU", dep.gpuModel]]
+                                  : []),
+                                ...(dep.miningPeriod
+                                  ? [
+                                      [
+                                        "Session Duration",
+                                        PERIOD_LABELS[dep.miningPeriod] ??
+                                          dep.miningPeriod,
+                                      ],
+                                    ]
+                                  : []),
+                                ...(dep.reference
+                                  ? [
+                                      [
+                                        "Reference ID",
+                                        dep.reference.slice(0, 20) + "...",
+                                      ],
+                                    ]
+                                  : []),
+                                [
+                                  "Date",
+                                  new Date(dep.created_at).toLocaleString(),
+                                ],
+                              ].map(([l, v]) => (
+                                <div
+                                  key={l}
+                                  className="flex justify-between gap-4"
+                                >
+                                  <span className="text-slate-500 shrink-0">
+                                    {l}
+                                  </span>
+                                  <span className="text-slate-300 text-right break-all">
+                                    {v}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── MINING PORTFOLIO TAB (FIX #5: shows plan names, mining period, timer) ── */}
+          {tab === "investments" && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-white font-bold">
+                  {nodeAllocations.length} mining sessions
+                </p>
+                <p className="text-emerald-400 text-xs font-bold">
+                  ${totalInvested.toFixed(2)} total committed
+                </p>
+              </div>
+
+              {nodeAllocations.length === 0 ? (
+                <div className="text-center py-14 border border-dashed border-slate-800 rounded-2xl text-slate-500">
+                  <Cpu size={28} className="mx-auto mb-2 opacity-30" />
+                  <p>No GPU mining sessions yet</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {nodeAllocations.map((node) => {
+                    // FIX #5: Show plan name from lookup map, not UUID
+                    const plan = gpuPlans[node.plan_id];
+                    const planName =
+                      plan?.name ?? node.plan_id.slice(0, 8) + "...";
+                    const gpuModel = plan?.gpu_model ?? "";
+                    const isComplete =
+                      node.mining_completed || node.status === "matured";
+                    const endsAt = node.mining_ends_at
+                      ? new Date(node.mining_ends_at)
+                      : null;
+                    const maturesAt = node.maturity_date
+                      ? new Date(node.maturity_date)
+                      : null;
+                    const period = node.mining_period ?? "daily";
+                    const isContract = node.payment_model === "contract";
+                    const isOpen = expanded === `node-${node.id}`;
+
+                    return (
+                      <div
+                        key={node.id}
+                        className="border border-slate-800 rounded-2xl overflow-hidden"
+                      >
+                        <button
+                          onClick={() =>
+                            setExpanded(isOpen ? null : `node-${node.id}`)
+                          }
+                          className="w-full p-4 text-left hover:bg-slate-800/10 transition-colors"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-3 min-w-0">
+                              <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                                {isContract ? (
+                                  <Cpu size={14} className="text-violet-400" />
+                                ) : (
+                                  <Pickaxe
+                                    size={14}
+                                    className="text-emerald-400"
+                                  />
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  {/* FIX #5: Plan name instead of UUID */}
+                                  <p className="text-white font-black text-sm">
+                                    {planName}
+                                  </p>
+                                  <StatusBadge
+                                    status={
+                                      isComplete ? "matured" : node.status
+                                    }
+                                  />
+                                  {!isComplete && (
+                                    <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                      LIVE
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-slate-500 text-[10px] mt-0.5">
+                                  {gpuModel} ·{" "}
+                                  {isContract
+                                    ? "Contract"
+                                    : (PERIOD_LABELS[period] ?? period)}{" "}
+                                  session ·{" "}
+                                  {new Date(
+                                    node.created_at,
+                                  ).toLocaleDateString()}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-white font-black">
+                                ${node.amount_invested.toFixed(2)}
+                              </p>
+                              <p className="text-emerald-400 text-xs">
+                                +${(node.total_earned ?? 0).toFixed(4)}
+                              </p>
+                            </div>
+                            {isOpen ? (
+                              <ChevronUp
+                                size={13}
+                                className="text-slate-600 shrink-0"
+                              />
+                            ) : (
+                              <ChevronDown
+                                size={13}
+                                className="text-slate-600 shrink-0"
+                              />
+                            )}
+                          </div>
+                        </button>
+                        {isOpen && (
+                          <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/20">
+                            <div className="bg-slate-800/40 rounded-xl p-3 space-y-1.5 text-xs mt-3">
+                              {[
+                                ["Plan", planName],
+                                ["GPU", gpuModel ?? "—"],
+                                [
+                                  "Capital Staked",
+                                  `$${node.amount_invested.toFixed(2)}`,
+                                ],
+                                [
+                                  "Coins Mined",
+                                  `$${(node.total_earned ?? 0).toFixed(6)}`,
+                                ],
+                                [
+                                  "Payment Model",
+                                  isContract
+                                    ? `Contract — ${node.contract_label ?? ""}`
+                                    : "Pay-As-You-Go",
+                                ],
+                                [
+                                  "Session Duration",
+                                  PERIOD_LABELS[period] ?? period,
+                                ],
+                                [
+                                  "Status",
+                                  isComplete ? "Complete ✓" : "Active ⛏️",
+                                ],
+                                ...(endsAt && !isContract
+                                  ? [["Ends At", endsAt.toLocaleString()]]
+                                  : []),
+                                ...(maturesAt && isContract
+                                  ? [["Matures", maturesAt.toLocaleString()]]
+                                  : []),
+                                [
+                                  "Started",
+                                  new Date(node.created_at).toLocaleString(),
+                                ],
+                                ...(node.final_profit != null
+                                  ? [
+                                      [
+                                        "Final Profit",
+                                        `$${node.final_profit.toFixed(6)}`,
+                                      ],
+                                    ]
+                                  : []),
+                              ].map(([l, v]) => (
+                                <div
+                                  key={l}
+                                  className="flex justify-between gap-4"
+                                >
+                                  <span className="text-slate-500 shrink-0">
+                                    {l}
+                                  </span>
+                                  <span className="text-slate-300 text-right">
+                                    {v}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ── WITHDRAWALS TAB ── */}
           {tab === "withdrawals" && (
             <div className="space-y-4">
@@ -1381,22 +1763,22 @@ export default function FinancialsPage() {
                   <p className="text-slate-500 text-[10px] uppercase">
                     Total Withdrawn
                   </p>
-                  <p className="text-white font-black text-lg">
-                    ${totalWithdrawn.toFixed(2)}
+                  <p className="text-white font-black text-base">
+                    ${totalWd.toFixed(2)}
                   </p>
                 </div>
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
                   <p className="text-slate-500 text-[10px] uppercase">
                     Pending
                   </p>
-                  <p className="text-blue-400 font-black text-lg">
-                    {pendingWithdrawals.length}
+                  <p className="text-blue-400 font-black text-base">
+                    {pendingWDs.length}
                   </p>
                 </div>
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
                   <p className="text-slate-500 text-[10px] uppercase">Status</p>
                   <p
-                    className={`font-black text-lg ${isFrozen ? "text-red-400" : "text-emerald-400"}`}
+                    className={`font-black text-base ${isFrozen ? "text-red-400" : "text-emerald-400"}`}
                   >
                     {isFrozen ? "Frozen" : "Open"}
                   </p>
@@ -1411,15 +1793,15 @@ export default function FinancialsPage() {
                   background: "linear-gradient(135deg,#10b981,#059669)",
                 }}
               >
-                <ArrowUpRight size={16} />
+                <ArrowUpRight size={15} />
                 {isFrozen
                   ? "Withdrawals Frozen"
-                  : !userKycOk
-                    ? "KYC Verification Required"
+                  : !kycOk
+                    ? "KYC Verification Required (Mining still active)"
                     : !profile?.payout_registered
                       ? "Setup Payout Account First"
                       : avail < 10
-                        ? `Balance too low (need $10, have $${avail.toFixed(2)})`
+                        ? `Need $10 min (have $${avail.toFixed(2)})`
                         : `Request Withdrawal — $${avail.toFixed(2)} Available`}
               </button>
 
@@ -1435,11 +1817,11 @@ export default function FinancialsPage() {
                       key={w.id}
                       className="bg-slate-900/60 border border-slate-800 rounded-xl p-4"
                     >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
                             <StatusBadge
-                              status={w.tracking_status || w.status}
+                              status={w.tracking_status ?? w.status}
                             />
                             {w.expected_date && w.status !== "paid" && (
                               <span className="text-[10px] text-slate-500">
@@ -1449,7 +1831,7 @@ export default function FinancialsPage() {
                             )}
                           </div>
                           <p className="text-slate-400 text-xs">
-                            {w.payout_account_name || w.wallet_address}
+                            {w.payout_account_name ?? w.wallet_address}
                           </p>
                           <p className="text-slate-600 text-[10px] mt-0.5">
                             {new Date(w.created_at).toLocaleString()}
@@ -1471,132 +1853,6 @@ export default function FinancialsPage() {
                       </div>
                     </div>
                   ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ── PAYMENTS TAB ── */}
-          {tab === "payments" && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <p className="text-white font-bold">
-                  {paymentTxs.length} payments
-                </p>
-                <p className="text-emerald-400 text-xs font-bold">
-                  ${totalPaid.toFixed(2)} confirmed
-                </p>
-              </div>
-              {paymentTxs.length === 0 ? (
-                <div className="text-center py-14 border border-dashed border-slate-800 rounded-2xl text-slate-500">
-                  <CreditCard size={28} className="mx-auto mb-2 opacity-30" />
-                  <p>No payment history yet</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {paymentTxs.map((p) => {
-                    const meta = (() => {
-                      try {
-                        return p.metadata ? JSON.parse(p.metadata) : {};
-                      } catch {
-                        return {};
-                      }
-                    })();
-                    const isOpen = expanded === `pay-${p.id}`;
-                    return (
-                      <div
-                        key={p.id}
-                        className="border border-slate-800 rounded-xl overflow-hidden"
-                      >
-                        <button
-                          onClick={() =>
-                            setExpanded(isOpen ? null : `pay-${p.id}`)
-                          }
-                          className="w-full flex items-center gap-3 p-4 text-left hover:bg-slate-800/20 transition-colors"
-                        >
-                          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 bg-slate-800 border border-slate-700">
-                            <CreditCard size={14} className="text-slate-400" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <p className="text-white text-sm font-semibold">
-                                {p.node_key || "Payment"}
-                              </p>
-                              <GatewayBadge gateway={p.gateway} />
-                              <StatusBadge status={p.status} />
-                            </div>
-                            <p className="text-slate-500 text-[10px] mt-0.5">
-                              {meta.purchaseType === "license"
-                                ? "Operator License"
-                                : "GPU Node"}{" "}
-                              · {new Date(p.created_at).toLocaleString()}
-                            </p>
-                          </div>
-                          <div className="text-right shrink-0 mr-2">
-                            <p className="text-white font-black text-base">
-                              ${(p.amount || 0).toFixed(2)}
-                            </p>
-                            <p className="text-slate-600 text-[10px]">
-                              {p.currency}
-                            </p>
-                          </div>
-                          {isOpen ? (
-                            <ChevronUp
-                              size={14}
-                              className="text-slate-600 shrink-0"
-                            />
-                          ) : (
-                            <ChevronDown
-                              size={14}
-                              className="text-slate-600 shrink-0"
-                            />
-                          )}
-                        </button>
-                        {isOpen && (
-                          <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/20">
-                            <div className="bg-slate-800/40 rounded-xl p-3 space-y-1.5 text-xs mt-3">
-                              {[
-                                ["Payment ID", String(p.id)],
-                                ["Gateway Ref", p.gateway_reference || "—"],
-                                [
-                                  "Amount",
-                                  `$${(p.amount || 0).toFixed(2)} ${p.currency}`,
-                                ],
-                                ["Gateway", p.gateway],
-                                ["Status", p.status],
-                                [
-                                  "Submitted",
-                                  new Date(p.created_at).toLocaleString(),
-                                ],
-                                ...(p.confirmed_at
-                                  ? [
-                                      [
-                                        "Confirmed",
-                                        new Date(
-                                          p.confirmed_at,
-                                        ).toLocaleString(),
-                                      ],
-                                    ]
-                                  : []),
-                              ].map(([l, v]) => (
-                                <div
-                                  key={l}
-                                  className="flex justify-between gap-4"
-                                >
-                                  <span className="text-slate-500 shrink-0">
-                                    {l}
-                                  </span>
-                                  <span className="text-slate-300 text-right break-all">
-                                    {v}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
                 </div>
               )}
             </div>
@@ -1626,17 +1882,17 @@ export default function FinancialsPage() {
                           className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isDebit ? "bg-red-900/20 border border-red-900/30" : "bg-emerald-900/20 border border-emerald-900/30"}`}
                         >
                           {isDebit ? (
-                            <TrendingDown size={13} className="text-red-400" />
+                            <TrendingDown size={12} className="text-red-400" />
                           ) : (
                             <TrendingUp
-                              size={13}
+                              size={12}
                               className="text-emerald-400"
                             />
                           )}
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-white text-sm font-semibold truncate">
-                            {tx.description || tx.type}
+                            {tx.description ?? tx.type}
                           </p>
                           <p className="text-slate-500 text-[10px] mt-0.5">
                             {tx.type?.replace(/_/g, " ")} ·{" "}
@@ -1652,40 +1908,6 @@ export default function FinancialsPage() {
                     );
                   })}
                 </div>
-              )}
-            </div>
-          )}
-
-          {/* ── MINING PORTFOLIO TAB ── */}
-          {tab === "investments" && (
-            <div className="space-y-4">
-              {nodeAllocations.length === 0 ? (
-                <p>No GPU mining sessions yet</p>
-              ) : (
-                nodeAllocations.map((node) => (
-                  <div
-                    key={node.id}
-                    className="border border-slate-800 rounded-2xl p-5"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-white font-black">{node.plan_id}</p>
-                        <p className="text-slate-500 text-xs">
-                          {node.payment_model} ·{" "}
-                          {new Date(node.created_at).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-emerald-400 font-black">
-                          ${node.amount_invested.toFixed(2)}
-                        </p>
-                        <p className="text-slate-500 text-[10px]">
-                          Earned: ${(node.total_earned || 0).toFixed(4)}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ))
               )}
             </div>
           )}
@@ -1710,7 +1932,7 @@ export default function FinancialsPage() {
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-white font-black">
-                            {LICENSE_LABELS[lic.license_type] ||
+                            {LICENSE_LABELS[lic.license_type] ??
                               lic.license_type}
                           </p>
                           <p className="text-slate-400 text-xs">
@@ -1719,6 +1941,12 @@ export default function FinancialsPage() {
                               ? new Date(lic.purchased_at).toLocaleDateString()
                               : "—"}
                           </p>
+                          {lic.expires_at && (
+                            <p className="text-slate-500 text-xs">
+                              Expires:{" "}
+                              {new Date(lic.expires_at).toLocaleDateString()}
+                            </p>
+                          )}
                         </div>
                         <StatusBadge
                           status={expired ? "expired" : lic.status}
