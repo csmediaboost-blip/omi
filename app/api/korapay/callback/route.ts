@@ -1,9 +1,21 @@
 // app/api/korapay/callback/route.ts
-// FIXED: uses gateway_reference (not transaction_id), full error handling,
-// handles both license and gpu_plan purchase types
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES:
+//  1. Uses createNodeAllocation helper — all mining fields correctly set
+//  2. miningPeriod, mining_ends_at, rate_factor_used now saved to allocation
+//  3. Idempotency: if allocation already exists, skip creation silently
+//  4. lockInMonths = 0 for flexible (was 6 before)
+//  5. balance_locked only incremented for contracts (not flexible mining)
+//  6. Sends in-app notification after activation
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  createNodeAllocation,
+  activateLicense,
+  writeLedgerEntry,
+} from "@/lib/allocation-creator";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -39,11 +51,10 @@ export async function GET(req: NextRequest) {
   const supabase = getSupabase();
 
   try {
-    // ── Load KoraPay key ──────────────────────────────────────
+    // Load KoraPay config
     const { data: configData } = await supabase
       .from("payment_config")
       .select("key, value");
-
     const cfg: Record<string, string> = {};
     (configData || []).forEach((r: any) => {
       cfg[r.key] = r.value;
@@ -62,21 +73,16 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // ── Verify with KoraPay ───────────────────────────────────
+    // Verify with KoraPay
     const verifyRes = await fetch(
       `https://api.korapay.com/merchant/api/v1/charges/${reference}`,
-      {
-        method: "GET",
-        headers: { Authorization: `Bearer ${korapayKey}` },
-      },
+      { method: "GET", headers: { Authorization: `Bearer ${korapayKey}` } },
     );
 
-    let verifyData: any;
+    let verifyData: any = {};
     try {
       verifyData = await verifyRes.json();
-    } catch {
-      verifyData = {};
-    }
+    } catch {}
 
     console.log(
       "[korapay/callback] Verify status:",
@@ -91,7 +97,6 @@ export async function GET(req: NextRequest) {
         .from("payment_transactions")
         .update({ status: "declined", updated_at: new Date().toISOString() })
         .eq("gateway_reference", reference);
-
       return NextResponse.redirect(
         `${APP_URL}/dashboard/checkout?status=declined&reference=${reference}`,
       );
@@ -100,7 +105,7 @@ export async function GET(req: NextRequest) {
     const chargeStatus = verifyData?.data?.status;
 
     if (chargeStatus === "success" || chargeStatus === "completed") {
-      // ── Get transaction ───────────────────────────────────
+      // Load transaction
       const { data: txData, error: txErr } = await supabase
         .from("payment_transactions")
         .select("*")
@@ -114,7 +119,7 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      // Skip if already processed (idempotency)
+      // Idempotency: skip if already processed
       if (txData.status === "confirmed" || txData.status === "completed") {
         console.log("[korapay/callback] Already processed:", reference);
         return NextResponse.redirect(
@@ -128,11 +133,9 @@ export async function GET(req: NextRequest) {
           : txData.metadata || {};
 
       const now = new Date().toISOString();
-      const fourYears = new Date(
-        Date.now() + 4 * 365 * 24 * 3600 * 1000,
-      ).toISOString();
+      const purchaseType = metadata.purchaseType || "gpu_plan";
 
-      // ── Mark transaction confirmed ────────────────────────
+      // Mark transaction confirmed
       await supabase
         .from("payment_transactions")
         .update({
@@ -143,114 +146,84 @@ export async function GET(req: NextRequest) {
         })
         .eq("gateway_reference", reference);
 
-      const purchaseType = metadata.purchaseType || "gpu_plan";
-
       if (purchaseType === "license") {
-        // ── Activate license ──────────────────────────────
+        // Activate license
         const licenseType =
           metadata.licenseType || txData.node_key || "operator_license";
-        const resolvedType =
-          licenseType === "operator_license" ? "all" : licenseType;
-
-        await supabase.from("operator_licenses").upsert(
-          {
-            user_id: userId,
-            license_type: resolvedType,
-            status: "active",
-            expires_at: fourYears,
-            purchased_at: now,
-            amount_paid: txData.amount,
-            transaction_ref: String(txData.id),
-          },
-          { onConflict: "user_id,license_type" },
+        const result = await activateLicense(
+          supabase,
+          userId,
+          licenseType,
+          txData.amount,
+          String(txData.id),
         );
-
-        await supabase
-          .from("users")
-          .update({
-            has_operator_license: true,
-            license_expires_at: fourYears,
-            node_activated_at: now,
-          })
-          .eq("id", userId);
+        if (!result.success) {
+          console.error(
+            "[korapay/callback] License activation failed:",
+            result.error,
+          );
+        }
       } else {
-        // ── Activate GPU node ─────────────────────────────
-        const isContract = metadata.paymentModel === "contract";
-        const maturityDate =
-          isContract && metadata.contractMonths
-            ? new Date(
-                Date.now() + metadata.contractMonths * 30 * 24 * 3600 * 1000,
-              ).toISOString()
-            : null;
-
-        await supabase.from("node_allocations").insert({
-          user_id: userId,
-          plan_id: txData.node_key,
-          amount_invested: txData.amount,
-          amount_paid: txData.converted_amount || txData.amount,
-          currency: metadata.currency || "USD",
-          instance_type: metadata.itype || "on_demand",
-          payment_model: metadata.paymentModel || "flexible",
-          contract_months: metadata.contractMonths || null,
-          contract_label: metadata.contractLabel || null,
-          contract_min_pct: metadata.contractMinPct || null,
-          contract_max_pct: metadata.contractMaxPct || null,
-          maturity_date: maturityDate,
-          lock_in_months: metadata.lockInMonths || 6,
-          lock_in_multiplier: metadata.lockInMultiplier || 1.0,
-          lock_in_label: metadata.lockInLabel || "6 months",
-          status: "active",
-          total_earned: 0,
-          total_withdrawn: 0,
-          created_at: now,
-          updated_at: now,
-        });
-
-        // Update user balance_locked
-        const { data: u } = await supabase
-          .from("users")
-          .select("balance_locked")
-          .eq("id", userId)
-          .single();
-        await supabase
-          .from("users")
-          .update({
-            balance_locked: (u?.balance_locked || 0) + txData.amount,
-            node_activated_at: now,
-          })
-          .eq("id", userId);
-      }
-
-      // ── Write to transaction_ledger ───────────────────────
-      try {
-        await supabase.from("transaction_ledger").insert({
-          user_id: userId,
-          type: purchaseType === "license" ? "license_purchase" : "investment",
+        // FIX: Create GPU node allocation with ALL mining fields via shared helper
+        const result = await createNodeAllocation(supabase, {
+          userId,
+          planId: txData.node_key,
           amount: txData.amount,
-          currency: metadata.currency || "USD",
-          description:
+          metadata, // contains miningPeriod, paymentModel, etc.
+          transactionRef: reference,
+        });
+
+        if (!result.success && !result.alreadyExisted) {
+          console.error(
+            "[korapay/callback] Allocation creation failed:",
+            result.error,
+          );
+          // Non-fatal — payment confirmed, allocation can be created manually
+        }
+      }
+
+      // Write ledger entry
+      await writeLedgerEntry(supabase, {
+        userId,
+        type: purchaseType === "license" ? "license_purchase" : "investment",
+        amount: txData.amount,
+        currency: metadata.currency || "USD",
+        description:
+          purchaseType === "license"
+            ? `Operator License via Bank Transfer (${metadata.licenseType || txData.node_key})`
+            : `GPU Node via Bank Transfer (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
+        referenceId: String(txData.id),
+        metadata: { ...metadata, gateway: "korapay" },
+      });
+
+      // In-app notification
+      try {
+        await supabase.from("user_notifications").insert({
+          user_id: userId,
+          type:
+            purchaseType === "license" ? "license_activated" : "mining_started",
+          title:
             purchaseType === "license"
-              ? `Operator License (${metadata.licenseType || txData.node_key}) via Bank Transfer`
-              : `GPU Node (${txData.node_key}) via Bank Transfer — ${metadata.lockInLabel || "flexible"}`,
-          reference_id: String(txData.id),
-          metadata: { ...metadata, gateway: "korapay" },
+              ? "🏆 License Activated!"
+              : "⛏️ Mining Session Started!",
+          body:
+            purchaseType === "license"
+              ? "Your operator license has been activated. Head to Tasks to start earning."
+              : `Your ${metadata.miningPeriod || "daily"} GPU mining session is now live. Watch your earnings in the portfolio.`,
           created_at: now,
         });
-      } catch (e) {
-        console.error("[korapay/callback] Ledger write failed (non-fatal):", e);
-      }
+      } catch {}
 
       return NextResponse.redirect(
         `${APP_URL}/dashboard/checkout?status=success&reference=${reference}`,
       );
     } else {
-      // Declined / pending / failed
+      // Declined / failed
       console.log("[korapay/callback] Charge not successful:", chargeStatus);
       await supabase
         .from("payment_transactions")
         .update({ status: "declined", updated_at: new Date().toISOString() })
         .eq("gateway_reference", reference);
-
       return NextResponse.redirect(
         `${APP_URL}/dashboard/checkout?status=declined&reference=${reference}`,
       );

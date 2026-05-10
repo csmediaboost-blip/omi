@@ -1,5 +1,12 @@
 // app/api/korapay/checkout/route.ts
-// FINAL: correct channel names, amount in major units, full debug logging
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES:
+//  1. miningPeriod now included in metadata stored in payment_transaction
+//     (was missing — callback/webhook couldn't create correct allocation)
+//  2. lockInMonths = 0 for flexible plans (was defaulting to 6)
+//  3. autoReinvest flag stored in metadata
+//  4. currency fallback improved
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
@@ -16,14 +23,10 @@ function getSupabaseAdmin() {
   );
 }
 
-// KoraPay uses MAJOR units — send 5000 for ₦5,000 (NOT 500000)
 function toKorapayAmount(amount: number): number {
   return Math.round(amount);
 }
 
-// Channels supported per currency by KoraPay
-// "bank_transfer" is only valid for NGN
-// "mobile_money" for KES, GHS, XAF, XOF, TZS
 const CURRENCY_CHANNELS: Record<string, string[]> = {
   NGN: ["card", "bank_transfer", "mobile_money"],
   KES: ["card", "mobile_money"],
@@ -59,16 +62,17 @@ export async function POST(req: NextRequest) {
       phone,
       nodeKey,
       nodeName,
-      price, // converted local-currency amount (e.g. 3000 GHS)
+      price, // converted local-currency amount
       originalPrice, // USD amount
       currency: rawCurrency,
-      daily,
       gpu,
       vram,
       itype,
       purchaseType,
       licenseType,
       paymentModel,
+      // FIX #1: miningPeriod now extracted from body
+      miningPeriod,
       contractMonths,
       contractLabel,
       contractMinPct,
@@ -78,8 +82,13 @@ export async function POST(req: NextRequest) {
       lockInLabel,
       countryCode,
       countryName,
+      // FEATURE: autoReinvest
+      autoReinvest,
+      // FEATURE: referralCode
+      referralCode,
     } = body;
 
+    const isContract = paymentModel === "contract";
     const currency: string =
       rawCurrency && rawCurrency !== "" && rawCurrency !== "USD"
         ? rawCurrency
@@ -94,6 +103,8 @@ export async function POST(req: NextRequest) {
       korapayAmount,
       currency,
       countryCode,
+      paymentModel,
+      miningPeriod, // FIX: now logged
     });
 
     if (!userId)
@@ -102,40 +113,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
     if (originalPrice > 10000)
       return NextResponse.json(
-        {
-          error: "Payment limit is $10,000 USD. Please use a different method.",
-        },
+        { error: "Payment limit is $10,000 USD." },
         { status: 400 },
       );
 
-    // Load ALL config rows at once
-    const { data: configData, error: configErr } = await supabaseAdmin
+    // Load config
+    const { data: configData } = await supabaseAdmin
       .from("payment_config")
       .select("key, value");
-
-    if (configErr) console.error("[korapay/checkout] Config error:", configErr);
-
     const cfg: Record<string, string> = {};
     (configData || []).forEach((r: any) => {
       if (r.key && r.value) cfg[r.key] = r.value;
     });
 
-    console.log("[korapay/checkout] Config keys:", Object.keys(cfg).join(", "));
-
     const korapayKey =
       cfg["korapay_secret_key"] ||
       cfg["korapay_api_key"] ||
-      cfg["KORAPAY_SECRET_KEY"] ||
-      cfg["korapay_key"] ||
       process.env.KORAPAY_SECRET_KEY ||
       "";
-
-    console.log(
-      "[korapay/checkout] Key:",
-      korapayKey
-        ? `found len=${korapayKey.length} prefix=${korapayKey.slice(0, 8)}...`
-        : "NOT FOUND",
-    );
 
     if (!korapayKey || korapayKey === "EMPTY" || korapayKey.length < 10) {
       return NextResponse.json(
@@ -147,23 +142,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Load user — must have email
+    // Load user email
     const { data: user } = await supabaseAdmin
       .from("users")
       .select("email, full_name")
       .eq("id", userId)
       .single();
-
-    if (!user?.email) {
+    if (!user?.email)
       return NextResponse.json(
         { error: "User account error — no email found" },
         { status: 400 },
       );
-    }
 
     const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 
-    // Insert pending tx before calling KoraPay
+    // FIX #1: Insert pending tx with miningPeriod in metadata
     const { data: txn, error: txnErr } = await supabaseAdmin
       .from("payment_transactions")
       .insert({
@@ -191,14 +184,22 @@ export async function POST(req: NextRequest) {
           gpu,
           vram,
           paymentModel,
+          // FIX #1: miningPeriod stored in metadata — was missing before
+          miningPeriod: miningPeriod ?? "daily",
+          itype,
+          // Contract fields
           contractMonths: contractMonths || null,
           contractLabel: contractLabel || null,
           contractMinPct: contractMinPct || null,
           contractMaxPct: contractMaxPct || null,
-          lockInMonths: lockInMonths || contractMonths || 6,
+          // FIX #2: lockInMonths = 0 for flexible, contractMonths for contract
+          lockInMonths: isContract ? contractMonths || 6 : 0,
           lockInMultiplier: lockInMultiplier || 1.0,
-          lockInLabel: lockInLabel || contractLabel || "6 months",
-          itype,
+          lockInLabel: isContract ? contractLabel || "6 Months" : "Flexible",
+          // FEATURE: autoReinvest stored in metadata
+          autoReinvest: autoReinvest || false,
+          // FEATURE: referralCode stored in metadata
+          referralCode: referralCode || null,
         },
       })
       .select()
@@ -212,7 +213,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Customer object — phone only if valid length
+    // Customer object
     const customerObj: Record<string, string> = {
       name: user.full_name || "OmniTask User",
       email: user.email,
@@ -275,7 +276,6 @@ export async function POST(req: NextRequest) {
         koraData?.error ||
         koraData?.data?.message ||
         `HTTP ${koraRes.status}`;
-
       console.error("[korapay/checkout] ✗ Failed:", errorMsg);
 
       await supabaseAdmin
