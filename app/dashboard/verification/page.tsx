@@ -32,7 +32,6 @@ type Profile = {
   cla_signed: boolean;
   terms_signed: boolean;
 };
-
 type Step = "identity" | "agreement" | "payout";
 
 const DOC_TYPES: Record<
@@ -164,16 +163,19 @@ const COUNTRIES = [
 
 export default function VerificationPage() {
   const router = useRouter();
+  const mountedRef = useRef(true);
+  const loadCalledRef = useRef(false);
+
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [activeStep, setActiveStep] = useState<Step>("identity");
-  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [toastMsg, setToastMsg] = useState<{ msg: string; ok: boolean } | null>(
+    null,
+  );
   const [saving, setSaving] = useState(false);
   const [uploadProgress, setUploadProgress] = useState("");
-  const loadedRef = useRef(false); // prevent double-load in StrictMode
 
-  // Form fields
   const [idFullName, setIdFullName] = useState("");
   const [idPhone, setIdPhone] = useState("");
   const [idCountry, setIdCountry] = useState("");
@@ -185,63 +187,59 @@ export default function VerificationPage() {
   const [idNumber, setIdNumber] = useState("");
   const [idFile, setIdFile] = useState<File | null>(null);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   function showToast(msg: string, ok = true) {
-    setToast({ msg, ok });
-    setTimeout(() => setToast(null), 5000);
+    if (!mountedRef.current) return;
+    setToastMsg({ msg, ok });
+    setTimeout(() => {
+      if (mountedRef.current) setToastMsg(null);
+    }, 5000);
   }
 
-  // ─────────────────────────────────────────────────────────
-  // LOAD — uses getSession() (reads localStorage, instant, no
-  // network call) instead of getUser() (requires network round-trip
-  // to validate token — this was the cause of the infinite hang).
-  // A hard 6-second bail-out timer is also set as a safety net.
-  // ─────────────────────────────────────────────────────────
   const load = useCallback(async () => {
-    if (loadedRef.current) return;
-    loadedRef.current = true;
-    setLoading(true);
-    setLoadErr("");
-
-    // ── Hard 6-second escape hatch ──────────────────────────
-    const bailTimer = setTimeout(() => {
-      setLoading(false);
-      setLoadErr("Loading timed out. Check your connection and tap Retry.");
-    }, 6000);
+    if (loadCalledRef.current) return;
+    loadCalledRef.current = true;
+    if (mountedRef.current) {
+      setLoading(true);
+      setLoadErr("");
+    }
 
     try {
-      // getSession() reads from localStorage — never hangs
+      // KEY FIX: getSession() reads from localStorage — NO network call.
+      // Old code used getUser() which hit Supabase auth server every time.
       const {
         data: { session },
         error: sessErr,
       } = await supabase.auth.getSession();
-
       if (sessErr || !session?.user) {
-        clearTimeout(bailTimer);
         router.push("/auth/signin");
         return;
       }
 
-      const user = session.user;
-
-      // Profile fetch
+      const uid = session.user.id;
       const { data, error } = await supabase
         .from("users")
         .select(
           "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
         )
-        .eq("id", user.id)
+        .eq("id", uid)
         .single();
 
-      clearTimeout(bailTimer); // got a response — cancel the bail timer
+      if (!mountedRef.current) return;
 
       if (error) {
         if (error.code === "PGRST116" || error.message?.includes("no rows")) {
-          // Row doesn't exist yet — create it
           const { data: created } = await supabase
             .from("users")
             .insert({
-              id: user.id,
-              email: user.email || "",
+              id: uid,
+              email: session.user.email || "",
               kyc_status: "not_started",
               kyc_verified: false,
               phone_verified: false,
@@ -253,41 +251,42 @@ export default function VerificationPage() {
               "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
             )
             .single();
-          if (created) setProfile(created);
+          if (created && mountedRef.current) setProfile(created);
         } else {
-          setLoadErr(`Failed to load profile: ${error.message}`);
+          if (mountedRef.current)
+            setLoadErr(`Failed to load: ${error.message}`);
         }
-      } else if (data) {
-        setProfile(data);
-
-        // Pre-fill known fields
-        if (data.kyc_full_name) setIdFullName(data.kyc_full_name);
-        else if (data.full_name) setIdFullName(data.full_name);
-        if (data.phone) setIdPhone(data.phone);
-
-        // Post-KYC redirect
-        if (data.kyc_verified && typeof window !== "undefined") {
-          const redirect = sessionStorage.getItem("kyc_redirect");
-          if (redirect) {
-            sessionStorage.removeItem("kyc_redirect");
-            router.push(redirect);
-            return;
-          }
-        }
-
-        if (!data.kyc_verified) setActiveStep("identity");
-        else if (!data.cla_signed || !data.terms_signed)
-          setActiveStep("agreement");
-        else if (!data.payout_registered) setActiveStep("payout");
-        else setActiveStep("identity");
+        return;
       }
+
+      if (!data || !mountedRef.current) return;
+      setProfile(data);
+      if (data.kyc_full_name) setIdFullName(data.kyc_full_name);
+      else if (data.full_name) setIdFullName(data.full_name);
+      if (data.phone) setIdPhone(data.phone);
+
+      if (data.kyc_verified) {
+        const redirect =
+          typeof window !== "undefined"
+            ? sessionStorage.getItem("kyc_redirect")
+            : null;
+        if (redirect) {
+          sessionStorage.removeItem("kyc_redirect");
+          router.push(redirect);
+          return;
+        }
+      }
+
+      if (!data.kyc_verified) setActiveStep("identity");
+      else if (!data.cla_signed || !data.terms_signed)
+        setActiveStep("agreement");
+      else if (!data.payout_registered) setActiveStep("payout");
+      else setActiveStep("identity");
     } catch (err: unknown) {
-      clearTimeout(bailTimer);
-      setLoadErr(
-        err instanceof Error ? err.message : "Unknown error — please refresh",
-      );
+      if (mountedRef.current)
+        setLoadErr(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, [router]);
 
@@ -295,7 +294,6 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
-  // ── File upload ──────────────────────────────────────────
   async function uploadFile(file: File, path: string): Promise<string | null> {
     for (const bucket of ["kyc-documents", "documents"]) {
       try {
@@ -305,14 +303,23 @@ export default function VerificationPage() {
         if (!error)
           return supabase.storage.from(bucket).getPublicUrl(path).data
             .publicUrl;
-      } catch {
-        /* try next */
+        if (
+          error.message?.includes("not found") ||
+          error.message?.includes("Bucket")
+        )
+          continue;
+        throw new Error(error.message);
+      } catch (e: any) {
+        if (e.message?.includes("not found") || e.message?.includes("Bucket"))
+          continue;
+        throw e;
       }
     }
-    return null;
+    throw new Error(
+      "Storage bucket not found. Create a 'kyc-documents' bucket in Supabase Storage.",
+    );
   }
 
-  // ── Submit KYC ───────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -353,20 +360,35 @@ export default function VerificationPage() {
       );
       return;
     }
+    if (idFile.size > 5 * 1024 * 1024) {
+      showToast("File too large — max 5 MB", false);
+      return;
+    }
 
     setSaving(true);
     try {
       const uid = profile.id;
       const ts = Date.now();
+      const ext = idFile.name.split(".").pop() || "jpg";
+      let docUrl = "";
 
-      setUploadProgress(`Uploading ${DOC_TYPES[idType]?.label}...`);
-      const ext = idFile.name.split(".").pop();
-      const docUrl =
-        (await uploadFile(idFile, `kyc/${uid}/doc-${ts}.${ext}`)) || "";
+      setUploadProgress(
+        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB)`,
+      );
+      try {
+        docUrl =
+          (await uploadFile(idFile, `kyc/${uid}/doc-${ts}.${ext}`)) || "";
+      } catch (e: any) {
+        showToast(
+          e.message?.includes("bucket")
+            ? "⚠️ Storage not set up — details saved without photo."
+            : `Upload error: ${e.message}`,
+          false,
+        );
+      }
 
-      setUploadProgress("Saving details...");
+      setUploadProgress("Saving your details...");
 
-      // Insert into kyc_documents (admin reads from here)
       const { error: docErr } = await supabase.from("kyc_documents").insert({
         user_id: uid,
         document_type: idType,
@@ -386,11 +408,9 @@ export default function VerificationPage() {
         docErr &&
         docErr.code !== "42P01" &&
         !docErr.message?.includes("does not exist")
-      ) {
-        throw new Error(`Submission error: ${docErr.message}`);
-      }
+      )
+        throw new Error(`Could not save record: ${docErr.message}`);
 
-      // Update users table — sets kyc_status to pending
       const { error: updErr } = await supabase
         .from("users")
         .update({
@@ -403,11 +423,12 @@ export default function VerificationPage() {
         })
         .eq("id", uid);
 
-      if (updErr) throw new Error(`Update error: ${updErr.message}`);
+      if (updErr)
+        throw new Error(`Could not update profile: ${updErr.message}`);
 
       setUploadProgress("");
       showToast("Identity submitted — pending review within 24–48 hrs ✓");
-      loadedRef.current = false;
+      loadCalledRef.current = false;
       load();
     } catch (err: unknown) {
       setUploadProgress("");
@@ -420,10 +441,9 @@ export default function VerificationPage() {
     }
   }
 
-  // ── Sign agreements ──────────────────────────────────────
   async function signAgreements() {
     if (!profile) {
-      showToast("Profile not loaded yet", false);
+      showToast("Profile not loaded", false);
       return;
     }
     setSaving(true);
@@ -434,14 +454,13 @@ export default function VerificationPage() {
     if (error) showToast(error.message, false);
     else {
       showToast("Agreements signed ✓");
-      loadedRef.current = false;
+      loadCalledRef.current = false;
       load();
     }
     setSaving(false);
   }
 
-  // ── Loading screen ───────────────────────────────────────
-  if (loading) {
+  if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
         <DashboardNavigation />
@@ -449,40 +468,35 @@ export default function VerificationPage() {
           <div className="flex flex-col items-center gap-4 px-6 text-center">
             <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
             <p className="text-slate-400 text-sm">Loading your profile...</p>
-            <p className="text-slate-600 text-xs max-w-xs">
-              If this takes more than a few seconds, tap the button below.
-            </p>
             <button
               onClick={() => {
-                clearTimeout(undefined);
-                setLoading(false);
+                loadCalledRef.current = false;
+                load();
               }}
-              className="mt-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
+              className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
             >
-              Continue anyway
+              Tap to retry
             </button>
           </div>
         </div>
       </div>
     );
-  }
 
-  // ── Error screen ─────────────────────────────────────────
-  if (loadErr) {
+  if (loadErr)
     return (
       <div className="flex min-h-screen bg-slate-950">
         <DashboardNavigation />
         <div className="flex-1 flex items-center justify-center">
           <div className="flex flex-col items-center gap-4 px-6 text-center max-w-sm">
             <AlertCircle size={32} className="text-red-400" />
-            <p className="text-white font-bold text-sm">{loadErr}</p>
+            <p className="text-slate-300 font-bold text-sm">{loadErr}</p>
             <button
               onClick={() => {
-                loadedRef.current = false;
+                loadCalledRef.current = false;
                 setLoadErr("");
                 load();
               }}
-              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-6 py-2.5 rounded-xl transition-colors text-sm"
+              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-6 py-2.5 rounded-xl text-sm"
             >
               Retry
             </button>
@@ -490,7 +504,6 @@ export default function VerificationPage() {
         </div>
       </div>
     );
-  }
 
   const steps = [
     {
@@ -524,16 +537,14 @@ export default function VerificationPage() {
     <div className="flex min-h-screen bg-slate-950 text-slate-200">
       <DashboardNavigation />
       <div className="flex-1 overflow-y-auto">
-        {toast && (
+        {toastMsg && (
           <div
-            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm ${toast.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
+            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm ${toastMsg.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
           >
-            {toast.msg}
+            {toastMsg.msg}
           </div>
         )}
-
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-          {/* Header */}
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/dashboard")}
@@ -551,7 +562,6 @@ export default function VerificationPage() {
             </div>
           </div>
 
-          {/* Progress */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
               <p className="text-white font-bold text-sm">
@@ -600,7 +610,6 @@ export default function VerificationPage() {
             </div>
           </div>
 
-          {/* ══ IDENTITY ══════════════════════════════════════════ */}
           {activeStep === "identity" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-5">
               <div className="flex items-center gap-2">
@@ -628,7 +637,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
-
               {profile?.kyc_verified && (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -640,7 +648,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               )}
-
               {kycPending && (
                 <div className="flex items-start gap-2 bg-amber-900/20 border border-amber-800/40 p-4 rounded-xl">
                   <Clock size={14} className="text-amber-400 shrink-0 mt-0.5" />
@@ -649,8 +656,7 @@ export default function VerificationPage() {
                       Documents Under Review
                     </p>
                     <p className="text-amber-400/70 text-xs mt-1">
-                      Your documents are being reviewed. This typically takes
-                      24–48 hours.
+                      Your documents are being reviewed. This takes 24–48 hours.
                     </p>
                     <button
                       onClick={async () => {
@@ -658,7 +664,7 @@ export default function VerificationPage() {
                           .from("users")
                           .update({ kyc_status: "not_started" })
                           .eq("id", profile!.id);
-                        loadedRef.current = false;
+                        loadCalledRef.current = false;
                         load();
                       }}
                       className="mt-2 text-amber-400 hover:text-amber-300 text-xs underline underline-offset-2 transition-colors"
@@ -668,7 +674,6 @@ export default function VerificationPage() {
                   </div>
                 </div>
               )}
-
               {!profile?.kyc_verified && !kycPending && (
                 <div className="space-y-5">
                   <div className="flex items-start gap-2 bg-blue-500/5 border border-blue-500/15 p-3 rounded-xl">
@@ -678,12 +683,9 @@ export default function VerificationPage() {
                     />
                     <p className="text-blue-300 text-xs leading-relaxed">
                       Enter details exactly as they appear on your
-                      government-issued ID. Information is encrypted and used
-                      only for identity verification.
+                      government-issued ID.
                     </p>
                   </div>
-
-                  {/* Personal info */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Personal Information
@@ -692,8 +694,8 @@ export default function VerificationPage() {
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Full Legal Name{" "}
-                          <span className="text-red-400">*</span>
-                          <span className="text-slate-600 font-normal ml-1">
+                          <span className="text-red-400">*</span>{" "}
+                          <span className="text-slate-600 font-normal">
                             (exactly as on ID)
                           </span>
                         </label>
@@ -704,7 +706,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
@@ -715,7 +716,7 @@ export default function VerificationPage() {
                             type="date"
                             value={idDob}
                             onChange={(e) => setIdDob(e.target.value)}
-                            className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none"
+                            className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm outline-none"
                           />
                         </div>
                         <div>
@@ -733,7 +734,6 @@ export default function VerificationPage() {
                           </select>
                         </div>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Phone Number <span className="text-red-400">*</span>
@@ -746,7 +746,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Country of Residence{" "}
@@ -765,7 +764,6 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Full Residential Address{" "}
@@ -778,7 +776,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           City / State
@@ -792,8 +789,6 @@ export default function VerificationPage() {
                       </div>
                     </div>
                   </section>
-
-                  {/* Document */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Identity Document
@@ -818,7 +813,6 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.label} Number{" "}
@@ -831,8 +825,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
-                      {/* Single upload */}
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.uploadLabel}{" "}
@@ -858,8 +850,8 @@ export default function VerificationPage() {
                                   {idFile.name}
                                 </p>
                                 <p className="text-slate-500 text-xs mt-0.5">
-                                  {(idFile.size / 1024 / 1024).toFixed(2)} MB —
-                                  tap to replace
+                                  {(idFile.size / 1024).toFixed(0)} KB — tap to
+                                  replace
                                 </p>
                               </>
                             ) : (
@@ -877,15 +869,19 @@ export default function VerificationPage() {
                             type="file"
                             accept="image/*,.pdf"
                             className="hidden"
-                            onChange={(e) =>
-                              setIdFile(e.target.files?.[0] || null)
-                            }
+                            onChange={(e) => {
+                              const f = e.target.files?.[0];
+                              if (f && f.size > 5 * 1024 * 1024) {
+                                showToast("File too large — max 5 MB", false);
+                                return;
+                              }
+                              setIdFile(f || null);
+                            }}
                           />
                         </label>
                       </div>
                     </div>
                   </section>
-
                   {uploadProgress && (
                     <div className="flex items-center gap-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <Loader2
@@ -895,7 +891,6 @@ export default function VerificationPage() {
                       <p className="text-blue-300 text-xs">{uploadProgress}</p>
                     </div>
                   )}
-
                   <button
                     onClick={submitIdentity}
                     disabled={saving}
@@ -903,25 +898,22 @@ export default function VerificationPage() {
                   >
                     {saving ? (
                       <>
-                        <Loader2 size={14} className="animate-spin" />{" "}
-                        Submitting...
+                        <Loader2 size={14} className="animate-spin" />
+                        {uploadProgress ? " Uploading..." : " Submitting..."}
                       </>
                     ) : (
                       "Submit Identity Verification"
                     )}
                   </button>
-
                   <p className="text-center text-slate-600 text-xs">
                     Fields marked <span className="text-red-400">*</span> are
-                    required · Your details are used only for identity
-                    verification
+                    required · Used only for identity verification
                   </p>
                 </div>
               )}
             </Card>
           )}
 
-          {/* ══ AGREEMENTS ══════════════════════════════════════ */}
           {activeStep === "agreement" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -945,7 +937,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
-
               {profile?.cla_signed && profile?.terms_signed ? (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -986,7 +977,7 @@ export default function VerificationPage() {
                       size={13}
                       className="text-amber-400 shrink-0 mt-0.5"
                     />
-                    <p className="text-amber-300 text-xs leading-relaxed">
+                    <p className="text-amber-300 text-xs">
                       By clicking below, you are electronically signing both
                       agreements.
                     </p>
@@ -1010,7 +1001,6 @@ export default function VerificationPage() {
             </Card>
           )}
 
-          {/* ══ PAYOUT ══════════════════════════════════════════ */}
           {activeStep === "payout" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -1034,7 +1024,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
-
               {profile?.payout_registered ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
@@ -1045,7 +1034,7 @@ export default function VerificationPage() {
                   </div>
                   <button
                     onClick={() => router.push("/dashboard/settings/payout")}
-                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-2.5 rounded-xl text-sm transition-all flex items-center justify-center gap-2"
+                    className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold py-2.5 rounded-xl text-sm flex items-center justify-center gap-2"
                   >
                     <CreditCard size={13} /> Manage Payout Account{" "}
                     <ChevronRight size={13} />
@@ -1054,9 +1043,8 @@ export default function VerificationPage() {
               ) : (
                 <div className="space-y-3">
                   <p className="text-slate-400 text-sm leading-relaxed">
-                    Register your bank account or crypto wallet to receive
-                    earnings. Your account name must match your verified
-                    identity exactly.
+                    Register your bank account or crypto wallet. Your account
+                    name must match your verified identity exactly.
                   </p>
                   {!profile?.kyc_verified && (
                     <div className="flex items-start gap-2 bg-amber-500/5 border border-amber-500/15 p-3 rounded-xl">
