@@ -202,6 +202,7 @@ export default function VerificationPage() {
     }, 5000);
   }
 
+  // ── Load profile — getSession() reads localStorage, zero network calls ──
   const load = useCallback(async () => {
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
@@ -211,8 +212,6 @@ export default function VerificationPage() {
     }
 
     try {
-      // KEY FIX: getSession() reads from localStorage — NO network call.
-      // Old code used getUser() which hit Supabase auth server every time.
       const {
         data: { session },
         error: sessErr,
@@ -294,32 +293,62 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
+  // ── uploadFile — 25-second hard timeout via AbortController ─────────────
+  // Supabase storage SDK never rejects on RLS block — it just hangs forever.
+  // We use createSignedUploadUrl + native fetch so we can attach AbortSignal.
   async function uploadFile(file: File, path: string): Promise<string | null> {
+    const TIMEOUT_MS = 25000;
+
     for (const bucket of ["kyc-documents", "documents"]) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
       try {
-        const { error } = await supabase.storage
+        // Get a signed upload URL from Supabase storage
+        const { data: signedData, error: urlErr } = await supabase.storage
           .from(bucket)
-          .upload(path, file, { upsert: true });
-        if (!error)
-          return supabase.storage.from(bucket).getPublicUrl(path).data
-            .publicUrl;
-        if (
-          error.message?.includes("not found") ||
-          error.message?.includes("Bucket")
-        )
-          continue;
-        throw new Error(error.message);
+          .createSignedUploadUrl(path);
+
+        if (urlErr || !signedData?.signedUrl) {
+          clearTimeout(timer);
+          continue; // bucket missing or no permission — try next
+        }
+
+        // Upload via native fetch with the abort signal attached
+        const uploadRes = await fetch(signedData.signedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timer);
+
+        if (!uploadRes.ok) continue;
+
+        // Return the public URL
+        const { data: urlData } = supabase.storage
+          .from(bucket)
+          .getPublicUrl(path);
+        return urlData?.publicUrl || null;
       } catch (e: any) {
-        if (e.message?.includes("not found") || e.message?.includes("Bucket"))
-          continue;
-        throw e;
+        clearTimeout(timer);
+        if (e.name === "AbortError") {
+          throw new Error(
+            "Upload timed out after 25 seconds. Your internet may be slow. " +
+              "Your form details will still be saved — contact support to attach your document.",
+          );
+        }
+        continue; // any other error — try next bucket
       }
     }
+
     throw new Error(
-      "Storage bucket not found. Create a 'kyc-documents' bucket in Supabase Storage.",
+      "Storage not set up. Go to Supabase → Storage → kyc-documents → Policies and add an INSERT policy for authenticated users.",
     );
   }
 
+  // ── submitIdentity ──────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -366,27 +395,29 @@ export default function VerificationPage() {
     }
 
     setSaving(true);
+    let docUrl = "";
+
     try {
       const uid = profile.id;
       const ts = Date.now();
       const ext = idFile.name.split(".").pop() || "jpg";
-      let docUrl = "";
 
+      // Step 1: Upload with timeout
       setUploadProgress(
-        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB)`,
+        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB) — please wait`,
       );
+
       try {
         docUrl =
           (await uploadFile(idFile, `kyc/${uid}/doc-${ts}.${ext}`)) || "";
-      } catch (e: any) {
-        showToast(
-          e.message?.includes("bucket")
-            ? "⚠️ Storage not set up — details saved without photo."
-            : `Upload error: ${e.message}`,
-          false,
-        );
+      } catch (uploadErr: any) {
+        // Show error but keep going — save form data without photo
+        showToast(uploadErr.message, false);
+        docUrl = "";
+        await new Promise((r) => setTimeout(r, 2000));
       }
 
+      // Step 2: Save to kyc_documents table
       setUploadProgress("Saving your details...");
 
       const { error: docErr } = await supabase.from("kyc_documents").insert({
@@ -408,9 +439,11 @@ export default function VerificationPage() {
         docErr &&
         docErr.code !== "42P01" &&
         !docErr.message?.includes("does not exist")
-      )
+      ) {
         throw new Error(`Could not save record: ${docErr.message}`);
+      }
 
+      // Step 3: Update users table
       const { error: updErr } = await supabase
         .from("users")
         .update({
@@ -427,13 +460,19 @@ export default function VerificationPage() {
         throw new Error(`Could not update profile: ${updErr.message}`);
 
       setUploadProgress("");
-      showToast("Identity submitted — pending review within 24–48 hrs ✓");
+      showToast(
+        docUrl
+          ? "Identity submitted — pending review within 24–48 hrs ✓"
+          : "Details saved (without photo) — pending review ✓",
+      );
       loadCalledRef.current = false;
       load();
     } catch (err: unknown) {
       setUploadProgress("");
       showToast(
-        err instanceof Error ? err.message : "Submission failed",
+        err instanceof Error
+          ? err.message
+          : "Submission failed — please try again",
         false,
       );
     } finally {
@@ -441,6 +480,7 @@ export default function VerificationPage() {
     }
   }
 
+  // ── Sign agreements ─────────────────────────────────────────────────────
   async function signAgreements() {
     if (!profile) {
       showToast("Profile not loaded", false);
@@ -460,6 +500,7 @@ export default function VerificationPage() {
     setSaving(false);
   }
 
+  // ── Loading state ───────────────────────────────────────────────────────
   if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -482,6 +523,7 @@ export default function VerificationPage() {
       </div>
     );
 
+  // ── Error state ─────────────────────────────────────────────────────────
   if (loadErr)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -544,7 +586,9 @@ export default function VerificationPage() {
             {toastMsg.msg}
           </div>
         )}
+
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+          {/* Header */}
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/dashboard")}
@@ -562,6 +606,7 @@ export default function VerificationPage() {
             </div>
           </div>
 
+          {/* Progress */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
               <p className="text-white font-bold text-sm">
@@ -610,6 +655,7 @@ export default function VerificationPage() {
             </div>
           </div>
 
+          {/* ══ IDENTITY ══════════════════════════════════════════════════ */}
           {activeStep === "identity" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-5">
               <div className="flex items-center gap-2">
@@ -637,6 +683,7 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
+
               {profile?.kyc_verified && (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -648,6 +695,7 @@ export default function VerificationPage() {
                   </p>
                 </div>
               )}
+
               {kycPending && (
                 <div className="flex items-start gap-2 bg-amber-900/20 border border-amber-800/40 p-4 rounded-xl">
                   <Clock size={14} className="text-amber-400 shrink-0 mt-0.5" />
@@ -674,6 +722,7 @@ export default function VerificationPage() {
                   </div>
                 </div>
               )}
+
               {!profile?.kyc_verified && !kycPending && (
                 <div className="space-y-5">
                   <div className="flex items-start gap-2 bg-blue-500/5 border border-blue-500/15 p-3 rounded-xl">
@@ -686,6 +735,8 @@ export default function VerificationPage() {
                       government-issued ID.
                     </p>
                   </div>
+
+                  {/* Personal Information */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Personal Information
@@ -706,6 +757,7 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
+
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
@@ -734,6 +786,7 @@ export default function VerificationPage() {
                           </select>
                         </div>
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Phone Number <span className="text-red-400">*</span>
@@ -746,6 +799,7 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Country of Residence{" "}
@@ -764,6 +818,7 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Full Residential Address{" "}
@@ -776,6 +831,7 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           City / State
@@ -789,6 +845,8 @@ export default function VerificationPage() {
                       </div>
                     </div>
                   </section>
+
+                  {/* Identity Document */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Identity Document
@@ -813,6 +871,7 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.label} Number{" "}
@@ -825,6 +884,7 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
+
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.uploadLabel}{" "}
@@ -882,6 +942,7 @@ export default function VerificationPage() {
                       </div>
                     </div>
                   </section>
+
                   {uploadProgress && (
                     <div className="flex items-center gap-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <Loader2
@@ -891,6 +952,7 @@ export default function VerificationPage() {
                       <p className="text-blue-300 text-xs">{uploadProgress}</p>
                     </div>
                   )}
+
                   <button
                     onClick={submitIdentity}
                     disabled={saving}
@@ -905,6 +967,7 @@ export default function VerificationPage() {
                       "Submit Identity Verification"
                     )}
                   </button>
+
                   <p className="text-center text-slate-600 text-xs">
                     Fields marked <span className="text-red-400">*</span> are
                     required · Used only for identity verification
@@ -914,6 +977,7 @@ export default function VerificationPage() {
             </Card>
           )}
 
+          {/* ══ AGREEMENTS ════════════════════════════════════════════════ */}
           {activeStep === "agreement" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -937,6 +1001,7 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
+
               {profile?.cla_signed && profile?.terms_signed ? (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -1001,6 +1066,7 @@ export default function VerificationPage() {
             </Card>
           )}
 
+          {/* ══ PAYOUT ════════════════════════════════════════════════════ */}
           {activeStep === "payout" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -1024,6 +1090,7 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
+
               {profile?.payout_registered ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
@@ -1069,6 +1136,7 @@ export default function VerificationPage() {
             </Card>
           )}
 
+          {/* ══ ALL DONE ══════════════════════════════════════════════════ */}
           {allDone && (
             <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-2xl p-5 text-center space-y-3">
               <CheckCircle size={32} className="text-emerald-400 mx-auto" />
