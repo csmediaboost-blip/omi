@@ -199,10 +199,9 @@ export default function VerificationPage() {
     setToastMsg({ msg, ok });
     setTimeout(() => {
       if (mountedRef.current) setToastMsg(null);
-    }, 5000);
+    }, 6000);
   }
 
-  // ── Load profile — getSession() reads localStorage, zero network calls ──
   const load = useCallback(async () => {
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
@@ -210,7 +209,6 @@ export default function VerificationPage() {
       setLoading(true);
       setLoadErr("");
     }
-
     try {
       const {
         data: { session },
@@ -220,7 +218,6 @@ export default function VerificationPage() {
         router.push("/auth/signin");
         return;
       }
-
       const uid = session.user.id;
       const { data, error } = await supabase
         .from("users")
@@ -229,9 +226,7 @@ export default function VerificationPage() {
         )
         .eq("id", uid)
         .single();
-
       if (!mountedRef.current) return;
-
       if (error) {
         if (error.code === "PGRST116" || error.message?.includes("no rows")) {
           const { data: created } = await supabase
@@ -257,13 +252,11 @@ export default function VerificationPage() {
         }
         return;
       }
-
       if (!data || !mountedRef.current) return;
       setProfile(data);
       if (data.kyc_full_name) setIdFullName(data.kyc_full_name);
       else if (data.full_name) setIdFullName(data.full_name);
       if (data.phone) setIdPhone(data.phone);
-
       if (data.kyc_verified) {
         const redirect =
           typeof window !== "undefined"
@@ -275,7 +268,6 @@ export default function VerificationPage() {
           return;
         }
       }
-
       if (!data.kyc_verified) setActiveStep("identity");
       else if (!data.cla_signed || !data.terms_signed)
         setActiveStep("agreement");
@@ -293,62 +285,87 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
-  // ── uploadFile — 25-second hard timeout via AbortController ─────────────
-  // Supabase storage SDK never rejects on RLS block — it just hangs forever.
-  // We use createSignedUploadUrl + native fetch so we can attach AbortSignal.
+  // ─────────────────────────────────────────────────────────────────────────
+  // uploadFile — uses Promise.race so the upload can NEVER hang forever.
+  // The standard supabase.storage.upload() call is used (no createSignedUploadUrl
+  // needed — that requires extra permissions). We race it against a 30-second
+  // timer. If the timer wins, we catch the rejection and surface a clear error.
+  // ─────────────────────────────────────────────────────────────────────────
   async function uploadFile(file: File, path: string): Promise<string | null> {
-    const TIMEOUT_MS = 25000;
+    const TIMEOUT_MS = 30000; // 30 seconds — enough for a 5 MB file on 4G
 
     for (const bucket of ["kyc-documents", "documents"]) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
       try {
-        // Get a signed upload URL from Supabase storage
-        const { data: signedData, error: urlErr } = await supabase.storage
-          .from(bucket)
-          .createSignedUploadUrl(path);
+        // Race: upload vs timeout
+        type UploadResult = { data: any; error: any };
+        const result = await Promise.race<UploadResult>([
+          supabase.storage.from(bucket).upload(path, file, {
+            upsert: true,
+            cacheControl: "3600",
+          }) as Promise<UploadResult>,
+          new Promise<UploadResult>((_, reject) =>
+            setTimeout(() => reject(new Error("UPLOAD_TIMEOUT")), TIMEOUT_MS),
+          ),
+        ]);
 
-        if (urlErr || !signedData?.signedUrl) {
-          clearTimeout(timer);
-          continue; // bucket missing or no permission — try next
+        // Storage returned an error (not a timeout)
+        if (result.error) {
+          const msg = result.error.message || "";
+          // Bucket missing — try the next one
+          if (
+            msg.includes("not found") ||
+            msg.includes("Bucket") ||
+            msg.includes("404")
+          ) {
+            continue;
+          }
+          // RLS blocked — surface clearly
+          if (
+            msg.includes("policy") ||
+            msg.includes("403") ||
+            msg.includes("Unauthorized") ||
+            msg.includes("new row")
+          ) {
+            throw new Error(
+              "Upload blocked by storage policy. Go to Supabase → Storage → " +
+                "kyc-documents → Policies and add an INSERT policy for authenticated users, then try again.",
+            );
+          }
+          throw new Error(`Upload error: ${msg}`);
         }
 
-        // Upload via native fetch with the abort signal attached
-        const uploadRes = await fetch(signedData.signedUrl, {
-          method: "PUT",
-          headers: { "Content-Type": file.type || "application/octet-stream" },
-          body: file,
-          signal: controller.signal,
-        });
-
-        clearTimeout(timer);
-
-        if (!uploadRes.ok) continue;
-
-        // Return the public URL
+        // ✅ Upload succeeded — return public URL
         const { data: urlData } = supabase.storage
           .from(bucket)
           .getPublicUrl(path);
-        return urlData?.publicUrl || null;
+        return urlData?.publicUrl ?? null;
       } catch (e: any) {
-        clearTimeout(timer);
-        if (e.name === "AbortError") {
+        if (e.message === "UPLOAD_TIMEOUT") {
           throw new Error(
-            "Upload timed out after 25 seconds. Your internet may be slow. " +
-              "Your form details will still be saved — contact support to attach your document.",
+            "Upload timed out after 30 seconds. Your internet connection is too slow for the file size. " +
+              "Try compressing the image or connecting to a faster network, then submit again.",
           );
         }
-        continue; // any other error — try next bucket
+        // Bucket-related errors — try next bucket
+        if (
+          e.message?.includes("not found") ||
+          e.message?.includes("Bucket") ||
+          e.message?.includes("404")
+        ) {
+          continue;
+        }
+        throw e; // real error — bubble up
       }
     }
 
+    // Both buckets failed
     throw new Error(
-      "Storage not set up. Go to Supabase → Storage → kyc-documents → Policies and add an INSERT policy for authenticated users.",
+      "Storage not configured. In Supabase: Storage → kyc-documents → Policies → " +
+        "add INSERT policy with expression: (auth.role() = 'authenticated')",
     );
   }
 
-  // ── submitIdentity ──────────────────────────────────────────────────────
+  // ── Submit KYC ───────────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -402,7 +419,6 @@ export default function VerificationPage() {
       const ts = Date.now();
       const ext = idFile.name.split(".").pop() || "jpg";
 
-      // Step 1: Upload with timeout
       setUploadProgress(
         `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB) — please wait`,
       );
@@ -411,13 +427,12 @@ export default function VerificationPage() {
         docUrl =
           (await uploadFile(idFile, `kyc/${uid}/doc-${ts}.${ext}`)) || "";
       } catch (uploadErr: any) {
-        // Show error but keep going — save form data without photo
+        // Show the upload error clearly but still save the form data
         showToast(uploadErr.message, false);
         docUrl = "";
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 2500));
       }
 
-      // Step 2: Save to kyc_documents table
       setUploadProgress("Saving your details...");
 
       const { error: docErr } = await supabase.from("kyc_documents").insert({
@@ -443,7 +458,6 @@ export default function VerificationPage() {
         throw new Error(`Could not save record: ${docErr.message}`);
       }
 
-      // Step 3: Update users table
       const { error: updErr } = await supabase
         .from("users")
         .update({
@@ -463,7 +477,7 @@ export default function VerificationPage() {
       showToast(
         docUrl
           ? "Identity submitted — pending review within 24–48 hrs ✓"
-          : "Details saved (without photo) — pending review ✓",
+          : "Details saved (photo upload failed) — our team will contact you ✓",
       );
       loadCalledRef.current = false;
       load();
@@ -480,7 +494,6 @@ export default function VerificationPage() {
     }
   }
 
-  // ── Sign agreements ─────────────────────────────────────────────────────
   async function signAgreements() {
     if (!profile) {
       showToast("Profile not loaded", false);
@@ -500,7 +513,6 @@ export default function VerificationPage() {
     setSaving(false);
   }
 
-  // ── Loading state ───────────────────────────────────────────────────────
   if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -523,7 +535,6 @@ export default function VerificationPage() {
       </div>
     );
 
-  // ── Error state ─────────────────────────────────────────────────────────
   if (loadErr)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -581,14 +592,13 @@ export default function VerificationPage() {
       <div className="flex-1 overflow-y-auto">
         {toastMsg && (
           <div
-            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm ${toastMsg.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
+            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-xs ${toastMsg.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
           >
             {toastMsg.msg}
           </div>
         )}
 
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-          {/* Header */}
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/dashboard")}
@@ -606,7 +616,6 @@ export default function VerificationPage() {
             </div>
           </div>
 
-          {/* Progress */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
               <p className="text-white font-bold text-sm">
@@ -655,7 +664,7 @@ export default function VerificationPage() {
             </div>
           </div>
 
-          {/* ══ IDENTITY ══════════════════════════════════════════════════ */}
+          {/* ══ IDENTITY ══ */}
           {activeStep === "identity" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-5">
               <div className="flex items-center gap-2">
@@ -704,7 +713,7 @@ export default function VerificationPage() {
                       Documents Under Review
                     </p>
                     <p className="text-amber-400/70 text-xs mt-1">
-                      Your documents are being reviewed. This takes 24–48 hours.
+                      Being reviewed — 24–48 hours.
                     </p>
                     <button
                       onClick={async () => {
@@ -715,7 +724,7 @@ export default function VerificationPage() {
                         loadCalledRef.current = false;
                         load();
                       }}
-                      className="mt-2 text-amber-400 hover:text-amber-300 text-xs underline underline-offset-2 transition-colors"
+                      className="mt-2 text-amber-400 hover:text-amber-300 text-xs underline underline-offset-2"
                     >
                       Submitted wrong info? Tap to resubmit →
                     </button>
@@ -736,7 +745,6 @@ export default function VerificationPage() {
                     </p>
                   </div>
 
-                  {/* Personal Information */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Personal Information
@@ -757,7 +765,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
@@ -786,7 +793,6 @@ export default function VerificationPage() {
                           </select>
                         </div>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Phone Number <span className="text-red-400">*</span>
@@ -799,7 +805,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Country of Residence{" "}
@@ -818,7 +823,6 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           Full Residential Address{" "}
@@ -831,7 +835,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           City / State
@@ -846,7 +849,6 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
-                  {/* Identity Document */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Identity Document
@@ -871,7 +873,6 @@ export default function VerificationPage() {
                           ))}
                         </select>
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.label} Number{" "}
@@ -884,7 +885,6 @@ export default function VerificationPage() {
                           className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2.5 text-sm focus:border-emerald-500/40 outline-none placeholder-slate-600"
                         />
                       </div>
-
                       <div>
                         <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                           {currentDoc.uploadLabel}{" "}
@@ -967,7 +967,6 @@ export default function VerificationPage() {
                       "Submit Identity Verification"
                     )}
                   </button>
-
                   <p className="text-center text-slate-600 text-xs">
                     Fields marked <span className="text-red-400">*</span> are
                     required · Used only for identity verification
@@ -977,7 +976,7 @@ export default function VerificationPage() {
             </Card>
           )}
 
-          {/* ══ AGREEMENTS ════════════════════════════════════════════════ */}
+          {/* ══ AGREEMENTS ══ */}
           {activeStep === "agreement" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -1001,7 +1000,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
-
               {profile?.cla_signed && profile?.terms_signed ? (
                 <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
                   <CheckCircle size={14} className="text-emerald-400" />
@@ -1066,7 +1064,7 @@ export default function VerificationPage() {
             </Card>
           )}
 
-          {/* ══ PAYOUT ════════════════════════════════════════════════════ */}
+          {/* ══ PAYOUT ══ */}
           {activeStep === "payout" && (
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
@@ -1090,7 +1088,6 @@ export default function VerificationPage() {
                   </p>
                 </div>
               </div>
-
               {profile?.payout_registered ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 bg-emerald-900/20 border border-emerald-800/40 p-3 rounded-xl">
@@ -1136,7 +1133,6 @@ export default function VerificationPage() {
             </Card>
           )}
 
-          {/* ══ ALL DONE ══════════════════════════════════════════════════ */}
           {allDone && (
             <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-2xl p-5 text-center space-y-3">
               <CheckCircle size={32} className="text-emerald-400 mx-auto" />
