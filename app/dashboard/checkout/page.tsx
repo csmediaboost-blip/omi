@@ -1810,7 +1810,7 @@ function CheckoutInner() {
                       </label>
                       <input
                         type="tel"
-                        placeholder="e.g. 08012345678"
+                        placeholder=""
                         value={kpPhone}
                         onChange={(e) => setKpPhone(e.target.value)}
                         className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500"

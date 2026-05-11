@@ -1,19 +1,25 @@
 "use client";
 // app/dashboard/page-client.tsx
-// Premium dark navy palette — deep blue intelligence platform aesthetic
-// OPTIMIZED: Uses data caching for instant loads, lazy loading for non-critical data
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES:
+//  1. Realtime subscription on users table — balance_available auto-updates
+//     when GPU mining completes and credits the wallet. No manual refresh needed.
+//  2. node_allocations queried — active GPU mining sessions now show live
+//     earnings on the dashboard "Live Mining" tile.
+//  3. London time in DatacenterFeed — was using local OS time before.
+//  4. Mining live ticker computed with capital-proportional earnings.
+//  5. balance_available always reflects latest DB value via realtime push.
+// ─────────────────────────────────────────────────────────────────────────────
 
-import { useEffect, useState, useRef, useCallback, Suspense } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import DashboardNavigation from "@/components/dashboard-navigation";
 import LicenseStatusBadge from "@/components/LicenseStatusBadge";
 import {
   NODES,
   normalizeNode,
   nextNode,
-  WITHDRAWAL,
   generateGPUSerial,
 } from "@/lib/nodeConfig";
 import {
@@ -26,7 +32,7 @@ import {
   Play,
   Server,
   Rocket,
-  ChevronRight,
+  ArrowUpRight,
   Activity,
   CheckCircle,
   AlertCircle,
@@ -34,9 +40,9 @@ import {
   Thermometer,
   Radio,
   Clock,
-  ArrowUpRight,
   LayoutGrid,
   MemoryStick,
+  Pickaxe,
 } from "lucide-react";
 import {
   AreaChart,
@@ -48,6 +54,7 @@ import {
   CartesianGrid,
 } from "recharts";
 
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type User = {
   id: string;
   email?: string;
@@ -65,33 +72,53 @@ type User = {
   payout_registered?: boolean;
   node_expiry_date?: string;
 };
-type Allocation = {
+
+type TaskAllocation = {
   id: string;
   started_at: string;
   earnings_accumulated: number;
   gpu_clients?: { name: string; base_hourly_rate: number; multiplier: number };
 };
+
+// FIX #2: Type for GPU mining allocations from node_allocations table
+type MiningAllocation = {
+  id: string;
+  plan_id: string;
+  amount_invested: number;
+  mining_period: string | null;
+  mining_ends_at: string | null;
+  total_earned: number | null;
+  rate_factor_used: number | null;
+  mining_completed: boolean;
+  status: string;
+  created_at: string;
+  updated_at: string | null;
+};
+
 type LiveVideo = { video_url?: string; poster_url?: string };
 
-// ── Palette ────────────────────────────────────────────────────────────────────
-// bg:         #040812  (deepest navy)
-// surface:    #080f1e  (card background)
-// border:     #0f1f3d  (card border)
-// border-hi:  #1a3560  (highlighted border)
-// accent:     #10b981  (emerald green — primary action)
-// accent-dim: #064e3b  (muted emerald)
-// blue-hi:    #3b82f6  (info / secondary)
-// text-1:     #e2e8f0  (primary text)
-// text-2:     #64748b  (secondary text)
-// text-3:     #1e3a5f  (very muted)
-
+// ─── PALETTE ──────────────────────────────────────────────────────────────────
 const BG = "#040812";
 const SURFACE = "#070e1c";
 const BORDER = "#0e1d38";
 const BORDER_HI = "#1a3560";
 const C_ACCENT = "#10b981";
 
-// ── Hooks ─────────────────────────────────────────────────────────────────────
+// Period durations for mining ticker
+const PERIOD_MS: Record<string, number> = {
+  hourly: 3_600_000,
+  daily: 86_400_000,
+  weekly: 604_800_000,
+  monthly: 2_592_000_000,
+};
+const PERIOD_MULT: Record<string, number> = {
+  hourly: 0.8 / 24,
+  daily: 1.0,
+  weekly: 7 * 1.1,
+  monthly: 30 * 1.25,
+};
+
+// ─── HOOKS ────────────────────────────────────────────────────────────────────
 function useRNG(min: number, max: number, ms = 3000) {
   const [v, setV] = useState(Math.round((min + max) / 2));
   useEffect(() => {
@@ -136,7 +163,7 @@ function useSeries(base: number, variance: number, points = 20) {
   return arr;
 }
 
-// ── Spark ─────────────────────────────────────────────────────────────────────
+// ─── SPARK ────────────────────────────────────────────────────────────────────
 function Spark({
   base,
   variance,
@@ -173,7 +200,7 @@ function Spark({
   );
 }
 
-// ── Metric tile ───────────────────────────────────────────────────────────────
+// ─── METRIC TILE ──────────────────────────────────────────────────────────────
 function MetricTile({
   label,
   base,
@@ -243,7 +270,7 @@ function MetricTile({
   );
 }
 
-// ── Workload feed ─────────────────────────────────────────────────────────────
+// ─── WORKLOAD FEED ────────────────────────────────────────────────────────────
 const T_POOL = [
   "Image Rendering",
   "NLP Tokenization",
@@ -342,35 +369,104 @@ function WorkloadFeed() {
   );
 }
 
-// ── Datacenter feed ───────────────────────────────────────────────────────────
+// ─── DATACENTER FEED ─────────────────────────────────────────────────────────
+// FIX #3: Uses Europe/London timezone — was using local OS time before
 function DatacenterFeed({ video }: { video: LiveVideo }) {
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const [tick, setTick] = useState("--:--:--");
 
   const CAMS = [
-    { label: "Server Rack 01-A", stat: "RACK-A · 68°C", sx: 0, sy: 0, sw: 0.333, sh: 0.333 },
-    { label: "Compute Node B03", stat: "NODE-B · 71°C", sx: 0.333, sy: 0, sw: 0.333, sh: 0.333 },
-    { label: "Network Bay C2",   stat: "BAY-C · 54°C",  sx: 0.666, sy: 0, sw: 0.334, sh: 0.333 },
-    { label: "Core Network D-9", stat: "CORE-D · 61°C", sx: 0, sy: 0.333, sw: 0.333, sh: 0.333 },
-    { label: "Power Unit P1",    stat: "PWR-P1 · 58°C", sx: 0.333, sy: 0.333, sw: 0.333, sh: 0.333 },
-    { label: "Cooling Sys E4",   stat: "COOL-E · 42°C", sx: 0.666, sy: 0.333, sw: 0.334, sh: 0.333 },
-    { label: "Data Store F23",   stat: "DATA-F · 49°C", sx: 0, sy: 0.666, sw: 0.333, sh: 0.334 },
-    { label: "Hi-Density G12",   stat: "RACK-G · 74°C", sx: 0.333, sy: 0.666, sw: 0.333, sh: 0.334 },
-    { label: "Compute Rack H8",  stat: "RACK-H · 66°C", sx: 0.666, sy: 0.666, sw: 0.334, sh: 0.334 },
+    {
+      label: "Server Rack 01-A",
+      stat: "RACK-A · 68°C",
+      sx: 0,
+      sy: 0,
+      sw: 0.333,
+      sh: 0.333,
+    },
+    {
+      label: "Compute Node B03",
+      stat: "NODE-B · 71°C",
+      sx: 0.333,
+      sy: 0,
+      sw: 0.333,
+      sh: 0.333,
+    },
+    {
+      label: "Network Bay C2",
+      stat: "BAY-C · 54°C",
+      sx: 0.666,
+      sy: 0,
+      sw: 0.334,
+      sh: 0.333,
+    },
+    {
+      label: "Core Network D-9",
+      stat: "CORE-D · 61°C",
+      sx: 0,
+      sy: 0.333,
+      sw: 0.333,
+      sh: 0.333,
+    },
+    {
+      label: "Power Unit P1",
+      stat: "PWR-P1 · 58°C",
+      sx: 0.333,
+      sy: 0.333,
+      sw: 0.333,
+      sh: 0.333,
+    },
+    {
+      label: "Cooling Sys E4",
+      stat: "COOL-E · 42°C",
+      sx: 0.666,
+      sy: 0.333,
+      sw: 0.334,
+      sh: 0.333,
+    },
+    {
+      label: "Data Store F23",
+      stat: "DATA-F · 49°C",
+      sx: 0,
+      sy: 0.666,
+      sw: 0.333,
+      sh: 0.334,
+    },
+    {
+      label: "Hi-Density G12",
+      stat: "RACK-G · 74°C",
+      sx: 0.333,
+      sy: 0.666,
+      sw: 0.333,
+      sh: 0.334,
+    },
+    {
+      label: "Compute Rack H8",
+      stat: "RACK-H · 66°C",
+      sx: 0.666,
+      sy: 0.666,
+      sw: 0.334,
+      sh: 0.334,
+    },
   ];
 
+  // FIX #3: London time — uses Europe/London timezone explicitly
+  function getLondonTime(): string {
+    return new Date().toLocaleTimeString("en-GB", {
+      hour12: false,
+      timeZone: "Europe/London",
+    });
+  }
+
   useEffect(() => {
-    setTick(new Date().toLocaleTimeString("en-US", { hour12: false }));
-    const iv = setInterval(
-      () => setTick(new Date().toLocaleTimeString("en-US", { hour12: false })),
-      1000,
-    );
+    setTick(getLondonTime());
+    const iv = setInterval(() => setTick(getLondonTime()), 1000);
     return () => clearInterval(iv);
   }, []);
 
   useEffect(() => {
     const img = new Image();
-    img.src = "/datacenter-feed.jpg"; // <-- save your image here in /public/
+    img.src = "/datacenter-feed.jpg";
     img.onload = () => {
       canvasRefs.current.forEach((canvas, idx) => {
         if (!canvas) return;
@@ -385,8 +481,6 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
         ctx.scale(dpr, dpr);
 
         let scanY = -20;
-        let noisePhase = Math.random() * 100;
-        let glitchTimer = 0;
 
         function draw() {
           ctx!.clearRect(0, 0, w, h);
@@ -397,11 +491,13 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
             img.naturalHeight * cam.sy,
             img.naturalWidth * cam.sw,
             img.naturalHeight * cam.sh,
-            0, 0, w, h
+            0,
+            0,
+            w,
+            h,
           );
           ctx!.filter = "none";
 
-          // scan line sweep
           scanY += 0.6;
           if (scanY > h + 20) scanY = -20;
           const grad = ctx!.createLinearGradient(0, scanY - 20, 0, scanY + 20);
@@ -411,101 +507,241 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
           ctx!.fillStyle = grad;
           ctx!.fillRect(0, scanY - 20, w, 40);
 
-          // noise
-          noisePhase += 0.02;
           const id = ctx!.getImageData(0, 0, w * dpr, h * dpr);
           const d = id.data;
           for (let i = 0; i < d.length; i += 16) {
             const n = (Math.random() - 0.5) * 20;
             d[i] = Math.min(255, Math.max(0, d[i] + n));
-            d[i+1] = Math.min(255, Math.max(0, d[i+1] + n));
-            d[i+2] = Math.min(255, Math.max(0, d[i+2] + n));
+            d[i + 1] = Math.min(255, Math.max(0, d[i + 1] + n));
+            d[i + 2] = Math.min(255, Math.max(0, d[i + 2] + n));
           }
           ctx!.putImageData(id, 0, 0);
-
           requestAnimationFrame(draw);
         }
         draw();
       });
     };
-  }, []);
+  }, []); // eslint-disable-line
 
   return (
-    <div style={{ background: "#020408", borderRadius: 8, overflow: "hidden", fontFamily: "monospace" }}>
-      {/* header */}
-      <div style={{ background: "#000", borderBottom: "1px solid #0f2a0f", padding: "5px 10px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ color: "#10b981", fontSize: 9, fontWeight: "bold", letterSpacing: "0.15em", textTransform: "uppercase" }}>GPU Cloud Compute Farm — Live Status</span>
-        <span style={{ color: "#ef4444", fontSize: 9, fontWeight: "bold" }}>● REC</span>
+    <div
+      style={{
+        background: "#020408",
+        borderRadius: 8,
+        overflow: "hidden",
+        fontFamily: "monospace",
+      }}
+    >
+      <div
+        style={{
+          background: "#000",
+          borderBottom: "1px solid #0f2a0f",
+          padding: "5px 10px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <span
+          style={{
+            color: "#10b981",
+            fontSize: 9,
+            fontWeight: "bold",
+            letterSpacing: "0.15em",
+            textTransform: "uppercase",
+          }}
+        >
+          GPU Cloud Compute Farm — Live Status
+        </span>
+        <span style={{ color: "#ef4444", fontSize: 9, fontWeight: "bold" }}>
+          ● REC
+        </span>
       </div>
-
-      {/* 3×3 grid */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 2, background: "#000" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3,1fr)",
+          gap: 2,
+          background: "#000",
+        }}
+      >
         {CAMS.map((cam, idx) => (
-          <div key={idx} style={{ position: "relative", aspectRatio: "4/3", overflow: "hidden", background: "#040c04" }}>
+          <div
+            key={idx}
+            style={{
+              position: "relative",
+              aspectRatio: "4/3",
+              overflow: "hidden",
+              background: "#040c04",
+            }}
+          >
             <canvas
-              ref={el => { canvasRefs.current[idx] = el; }}
+              ref={(el) => {
+                canvasRefs.current[idx] = el;
+              }}
               style={{ width: "100%", height: "100%", display: "block" }}
             />
-            {/* scanlines overlay */}
-            <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.15) 2px,rgba(0,0,0,0.15) 3px)", pointerEvents: "none", zIndex: 2 }} />
-            {/* vignette */}
-            <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,0.6) 100%)", pointerEvents: "none", zIndex: 3 }} />
-            {/* corners */}
-            {[["top:4px;left:4px;borderTop","borderLeft"], ["top:4px;right:4px;borderTop","borderRight"], ["bottom:4px;left:4px;borderBottom","borderLeft"], ["bottom:4px;right:4px;borderBottom","borderRight"]].map(([pos], ci) => (
-              <div key={ci} style={{ position: "absolute", width: 8, height: 8, zIndex: 5, pointerEvents: "none",
-                top: ci < 2 ? 4 : undefined, bottom: ci >= 2 ? 4 : undefined,
-                left: ci % 2 === 0 ? 4 : undefined, right: ci % 2 === 1 ? 4 : undefined,
-                borderTop: ci < 2 ? "1px solid rgba(16,185,129,0.45)" : undefined,
-                borderBottom: ci >= 2 ? "1px solid rgba(16,185,129,0.45)" : undefined,
-                borderLeft: ci % 2 === 0 ? "1px solid rgba(16,185,129,0.45)" : undefined,
-                borderRight: ci % 2 === 1 ? "1px solid rgba(16,185,129,0.45)" : undefined,
-              }} />
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                backgroundImage:
+                  "repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.15) 2px,rgba(0,0,0,0.15) 3px)",
+                pointerEvents: "none",
+                zIndex: 2,
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                background:
+                  "radial-gradient(ellipse at center,transparent 45%,rgba(0,0,0,0.6) 100%)",
+                pointerEvents: "none",
+                zIndex: 3,
+              }}
+            />
+            {[0, 1, 2, 3].map((ci) => (
+              <div
+                key={ci}
+                style={{
+                  position: "absolute",
+                  width: 8,
+                  height: 8,
+                  zIndex: 5,
+                  pointerEvents: "none",
+                  top: ci < 2 ? 4 : undefined,
+                  bottom: ci >= 2 ? 4 : undefined,
+                  left: ci % 2 === 0 ? 4 : undefined,
+                  right: ci % 2 === 1 ? 4 : undefined,
+                  borderTop:
+                    ci < 2 ? "1px solid rgba(16,185,129,0.45)" : undefined,
+                  borderBottom:
+                    ci >= 2 ? "1px solid rgba(16,185,129,0.45)" : undefined,
+                  borderLeft:
+                    ci % 2 === 0
+                      ? "1px solid rgba(16,185,129,0.45)"
+                      : undefined,
+                  borderRight:
+                    ci % 2 === 1
+                      ? "1px solid rgba(16,185,129,0.45)"
+                      : undefined,
+                }}
+              />
             ))}
-            {/* HUD */}
-            <div style={{ position: "absolute", inset: 0, zIndex: 6, padding: "4px 5px", display: "flex", flexDirection: "column", justifyContent: "space-between", pointerEvents: "none" }}>
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                zIndex: 6,
+                padding: "4px 5px",
+                display: "flex",
+                flexDirection: "column",
+                justifyContent: "space-between",
+                pointerEvents: "none",
+              }}
+            >
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ background: "rgba(0,0,0,0.7)", color: "rgba(255,255,255,0.85)", fontSize: 7, fontWeight: "bold", padding: "2px 4px", borderRadius: 2, letterSpacing: "0.05em", textTransform: "uppercase" }}>{cam.label}</span>
-                <span style={{ background: "rgba(180,0,0,0.85)", color: "#fff", fontSize: 7, fontWeight: "bold", padding: "2px 4px", borderRadius: 2 }}>● LIVE</span>
+                <span
+                  style={{
+                    background: "rgba(0,0,0,0.7)",
+                    color: "rgba(255,255,255,0.85)",
+                    fontSize: 7,
+                    fontWeight: "bold",
+                    padding: "2px 4px",
+                    borderRadius: 2,
+                    letterSpacing: "0.05em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {cam.label}
+                </span>
+                <span
+                  style={{
+                    background: "rgba(180,0,0,0.85)",
+                    color: "#fff",
+                    fontSize: 7,
+                    fontWeight: "bold",
+                    padding: "2px 4px",
+                    borderRadius: 2,
+                  }}
+                >
+                  ● LIVE
+                </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ background: "rgba(0,0,0,0.65)", color: "rgba(16,185,129,0.9)", fontSize: 7, padding: "2px 4px", borderRadius: 2 }}>{tick}</span>
-                <span style={{ background: "rgba(0,0,0,0.65)", color: "rgba(255,255,255,0.5)", fontSize: 7, padding: "2px 4px", borderRadius: 2 }}>{cam.stat}</span>
+                {/* FIX #3: London time shown */}
+                <span
+                  style={{
+                    background: "rgba(0,0,0,0.65)",
+                    color: "rgba(16,185,129,0.9)",
+                    fontSize: 7,
+                    padding: "2px 4px",
+                    borderRadius: 2,
+                  }}
+                >
+                  {tick} LON
+                </span>
+                <span
+                  style={{
+                    background: "rgba(0,0,0,0.65)",
+                    color: "rgba(255,255,255,0.5)",
+                    fontSize: 7,
+                    padding: "2px 4px",
+                    borderRadius: 2,
+                  }}
+                >
+                  {cam.stat}
+                </span>
               </div>
             </div>
           </div>
         ))}
       </div>
-
-      {/* footer */}
-      <div style={{ background: "#000", borderTop: "1px solid #0f2a0f", padding: "4px 10px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div
+        style={{
+          background: "#000",
+          borderTop: "1px solid #0f2a0f",
+          padding: "4px 10px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
         <div style={{ display: "flex", gap: 14 }}>
-          {[["Network","NOMINAL","#10b981"],["Uptime","99.97%","#10b981"],["Nodes","2,847","#10b981"]].map(([l,v,c]) => (
-            <span key={l} style={{ fontSize: 8, color: "#1e3a5f", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+          {[
+            ["Network", "NOMINAL", "#10b981"],
+            ["Uptime", "99.97%", "#10b981"],
+            ["Nodes", "2,847", "#10b981"],
+          ].map(([l, v, c]) => (
+            <span
+              key={l}
+              style={{
+                fontSize: 8,
+                color: "#1e3a5f",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+              }}
+            >
               {l} <strong style={{ color: c }}>{v}</strong>
             </span>
           ))}
         </div>
-        <span style={{ color: "rgba(16,185,129,0.5)", fontSize: 8, letterSpacing: "0.05em" }}>{tick} UTC</span>
+        <span
+          style={{
+            color: "rgba(16,185,129,0.5)",
+            fontSize: 8,
+            letterSpacing: "0.05em",
+          }}
+        >
+          {tick} UTC+LON
+        </span>
       </div>
-
-      {/* Corner brackets */}
-      {[
-        ["top-2 left-2", "border-t border-l"],
-        ["top-2 right-2", "border-t border-r"],
-        ["bottom-2 left-2", "border-b border-l"],
-        ["bottom-2 right-2", "border-b border-r"],
-      ].map(([p, b]) => (
-        <div
-          key={p}
-          className={`absolute z-20 w-3.5 h-3.5 ${p} ${b}`}
-          style={{ borderColor: `${C_ACCENT}50` }}
-        />
-      ))}
     </div>
   );
 }
 
-// ── Security row ──────────────────────────────────────────────────────────────
+// ─── SECURITY ROW ─────────────────────────────────────────────────────────────
 function SecurityRow({
   label,
   status,
@@ -557,7 +793,7 @@ function SecurityRow({
   );
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
 export default function DashboardClient({
   userDetails,
 }: {
@@ -569,7 +805,7 @@ export default function DashboardClient({
   const [earnings7d, setEarnings7d] = useState<
     { date: string; earnings: number }[]
   >([]);
-  const [activeAlloc, setActiveAlloc] = useState<Allocation | null>(null);
+  const [activeAlloc, setActiveAlloc] = useState<TaskAllocation | null>(null);
   const [liveEarnings, setLiveEarnings] = useState(0);
   const [liveVideo, setLiveVideo] = useState<LiveVideo>({});
   const [serial] = useState(() =>
@@ -577,19 +813,26 @@ export default function DashboardClient({
   );
   const liveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // FIX #2: GPU mining state
+  const [miningAllocs, setMiningAllocs] = useState<MiningAllocation[]>([]);
+  const [miningLiveTotal, setMiningLiveTotal] = useState(0);
+  const miningTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   const gpuUtil = useRNG(58, 94, 2300);
   const ramUsage = useRNG(52, 82, 3700);
   const temp = useRNG(57, 73, 3500);
   const power = useRNG(155, 210, 4000);
 
   const loadData = useCallback(async () => {
+    // FIX #1: Fresh user data read on every load
     const { data: ud } = await supabase
       .from("users")
       .select("*")
       .eq("id", userDetails.id)
       .single();
-    setUserData(ud);
+    if (ud) setUserData(ud);
 
+    // 7-day earnings chart
     const ago = new Date();
     ago.setDate(ago.getDate() - 7);
     const { data: txs } = await supabase
@@ -615,6 +858,7 @@ export default function DashboardClient({
       }),
     );
 
+    // Task-based allocation (legacy system)
     const { data: alloc } = await supabase
       .from("user_allocations")
       .select("*,gpu_clients(name,base_hourly_rate,multiplier)")
@@ -635,6 +879,18 @@ export default function DashboardClient({
       );
     }
 
+    // FIX #2: Query active GPU mining allocations from node_allocations
+    const { data: miningData } = await supabase
+      .from("node_allocations")
+      .select(
+        "id,plan_id,amount_invested,mining_period,mining_ends_at,total_earned,rate_factor_used,mining_completed,status,created_at,updated_at",
+      )
+      .eq("user_id", userDetails.id)
+      .eq("status", "active")
+      .eq("mining_completed", false)
+      .order("created_at", { ascending: false });
+    setMiningAllocs(miningData || []);
+
     const { data: vd } = await supabase
       .from("admin_settings")
       .select("video_url,poster_url")
@@ -648,8 +904,131 @@ export default function DashboardClient({
     loadData();
     return () => {
       if (liveRef.current) clearInterval(liveRef.current);
+      if (miningTickRef.current) clearInterval(miningTickRef.current);
     };
   }, [loadData]);
+
+  // FIX #1: Realtime subscription on users table
+  // When GPU mining completes and credits balance_available, dashboard auto-updates.
+  // No manual refresh needed.
+  useEffect(() => {
+    if (!userDetails.id) return;
+
+    const userChannel = supabase
+      .channel("dashboard_user_realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "users",
+          filter: `id=eq.${userDetails.id}`,
+        },
+        (payload) => {
+          // Merge updated fields — balance_available, total_earned, etc. now live-update
+          setUserData((prev) =>
+            prev
+              ? { ...prev, ...(payload.new as User) }
+              : (payload.new as User),
+          );
+        },
+      )
+      .subscribe();
+
+    // FIX #2: Also subscribe to node_allocations to detect when mining completes
+    const miningChannel = supabase
+      .channel("dashboard_mining_realtime")
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "node_allocations",
+          filter: `user_id=eq.${userDetails.id}`,
+        },
+        (payload) => {
+          const updated = payload.new as MiningAllocation;
+          if (updated.mining_completed) {
+            // Session completed — remove from active list and refresh user balance
+            setMiningAllocs((prev) => prev.filter((a) => a.id !== updated.id));
+            // Reload user to get updated balance_available
+            supabase
+              .from("users")
+              .select("balance_available,total_earned")
+              .eq("id", userDetails.id)
+              .single()
+              .then(({ data }) => {
+                if (data)
+                  setUserData((prev) => (prev ? { ...prev, ...data } : null));
+              });
+          } else {
+            // Update total_earned on existing session
+            setMiningAllocs((prev) =>
+              prev.map((a) =>
+                a.id === updated.id
+                  ? { ...a, total_earned: updated.total_earned }
+                  : a,
+              ),
+            );
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(userChannel);
+      supabase.removeChannel(miningChannel);
+    };
+  }, [userDetails.id]);
+
+  // FIX #2: GPU mining live ticker — capital-proportional earnings
+  // Updates every second for ALL active mining sessions combined
+  useEffect(() => {
+    if (miningTickRef.current) clearInterval(miningTickRef.current);
+    if (!miningAllocs.length) {
+      setMiningLiveTotal(0);
+      return;
+    }
+
+    // Compute combined per-second earnings and base for all active sessions
+    let totalPerSec = 0;
+    let baseTotal = 0;
+    let lastUpdate = Date.now();
+
+    for (const alloc of miningAllocs) {
+      const rf = alloc.rate_factor_used ?? 0.86;
+      // Capital-proportional: 0.29%–0.40%/day of amount_invested
+      const dailyDecMin = 0.29 / 100;
+      const dailyDecMax = 0.4 / 100;
+      const dailyDec = dailyDecMin + rf * (dailyDecMax - dailyDecMin);
+      const period = alloc.mining_period ?? "daily";
+      const mult = PERIOD_MULT[period] ?? 1.0;
+      const pMs = PERIOD_MS[period] ?? PERIOD_MS.daily;
+      const totalProfit = alloc.amount_invested * dailyDec * mult;
+      const perSec = totalProfit / (pMs / 1000);
+
+      totalPerSec += perSec;
+
+      // Seed from last DB sync + elapsed time
+      const base = alloc.total_earned ?? 0;
+      const elapsed = Math.max(
+        0,
+        (Date.now() -
+          new Date(alloc.updated_at || alloc.created_at).getTime()) /
+          1000,
+      );
+      baseTotal += Math.min(base + perSec * elapsed, totalProfit);
+    }
+
+    setMiningLiveTotal(baseTotal);
+    miningTickRef.current = setInterval(() => {
+      setMiningLiveTotal((p) => p + totalPerSec);
+    }, 1000);
+
+    return () => {
+      if (miningTickRef.current) clearInterval(miningTickRef.current);
+    };
+  }, [miningAllocs]);
 
   const logout = async () => {
     await supabase.auth.signOut();
@@ -664,7 +1043,7 @@ export default function DashboardClient({
         style={{ background: BG }}
       >
         <div
-          className="w-6 h-6 rounded-full border-2 border-t-emerald-400/80 animate-spin"
+          className="w-6 h-6 rounded-full border-2 animate-spin"
           style={{ borderColor: `${BORDER} ${BORDER} ${BORDER} ${C_ACCENT}` }}
         />
       </div>
@@ -674,6 +1053,7 @@ export default function DashboardClient({
   const nodeKey = normalizeNode(userData?.tier);
   const node = NODES[nodeKey];
   const upgrade = nextNode(nodeKey);
+  // FIX #1: balance always reflects latest DB value via realtime subscription
   const balance = Number(userData?.balance_available ?? 0);
   const totalEarned = Number(userData?.total_earned ?? 0);
   const streak = userData?.streak_count || 0;
@@ -698,9 +1078,12 @@ export default function DashboardClient({
     payoutReg,
   ].filter(Boolean).length;
 
-  // Card style helper
   const card = { background: SURFACE, border: `1px solid ${BORDER}` };
   const cardHi = { background: SURFACE, border: `1px solid ${BORDER_HI}` };
+
+  // FIX #2: Determine what to show in live tile
+  const hasMiningActive = miningAllocs.length > 0;
+  const hasTaskActive = !!activeAlloc;
 
   return (
     <div
@@ -710,14 +1093,13 @@ export default function DashboardClient({
       <DashboardNavigation />
 
       <div className="flex-1 flex flex-col min-w-0 overflow-x-hidden">
-        {/* ── Top bar ────────────────────────────────────────────────────── */}
+        {/* Top bar */}
         <header
           className="sticky top-0 z-40 backdrop-blur-md"
           style={{ background: `${BG}f2`, borderBottom: `1px solid ${BORDER}` }}
         >
           <div className="px-5 py-3.5 flex items-center justify-between">
             <div className="flex items-center gap-4">
-              {/* Brand */}
               <div className="flex items-center gap-2.5">
                 <div
                   className="w-7 h-7 rounded-lg flex items-center justify-center"
@@ -743,8 +1125,6 @@ export default function DashboardClient({
                   </p>
                 </div>
               </div>
-
-              {/* Node badge */}
               <div
                 className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-full"
                 style={{
@@ -765,7 +1145,6 @@ export default function DashboardClient({
                 </span>
               </div>
             </div>
-
             <div className="flex items-center gap-2">
               {userData?.id && <LicenseStatusBadge userId={userData.id} />}
               <button
@@ -782,16 +1161,15 @@ export default function DashboardClient({
           </div>
         </header>
 
-        {/* ── Main content ───────────────────────────────────────────────── */}
         <main className="flex-1 p-3 md:p-5 pb-28 md:pb-8 max-w-[1400px] mx-auto w-full space-y-4 overflow-y-auto">
           {/* ROW 1 — 4 stat tiles */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 w-full">
-            {/* Balance */}
+            {/* Tile 1: Available Balance — FIX #1: auto-updates via realtime */}
             <div
               className="relative rounded-2xl overflow-hidden p-4 sm:p-5 w-full"
               style={{
                 ...cardHi,
-                background: `linear-gradient(135deg, #04112a 0%, ${SURFACE} 100%)`,
+                background: "linear-gradient(135deg, #04112a 0%, #070e1c 100%)",
               }}
             >
               <div
@@ -814,8 +1192,18 @@ export default function DashboardClient({
               >
                 ${balance.toFixed(2)}
               </p>
+              {/* FIX #2: Show if mining is adding to this balance */}
+              {hasMiningActive && (
+                <p
+                  className="text-[9px] mt-1 font-mono flex items-center gap-1"
+                  style={{ color: `${C_ACCENT}80` }}
+                >
+                  <Pickaxe size={8} />
+                  +${miningLiveTotal.toFixed(6)} mining live
+                </p>
+              )}
               <p
-                className="text-[9px] mt-1.5 font-mono"
+                className="text-[9px] mt-1 font-mono"
                 style={{ color: "#1e3a5f" }}
               >
                 +${node.dailyEarning.toFixed(2)} / day potential
@@ -829,15 +1217,61 @@ export default function DashboardClient({
               </button>
             </div>
 
-            {/* Live allocation */}
+            {/* Tile 2: Live Earnings — FIX #2: shows GPU mining OR task allocation */}
             <div className="rounded-2xl p-5 relative" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
                 style={{ color: "#1e3a5f" }}
               >
-                Live Allocation
+                {hasMiningActive ? "GPU Mining Live" : "Live Allocation"}
               </p>
-              {activeAlloc ? (
+
+              {/* GPU Mining sessions (priority display) */}
+              {hasMiningActive && (
+                <>
+                  <p
+                    className="font-black text-2xl leading-none tabular-nums"
+                    style={{ color: C_ACCENT }}
+                  >
+                    ${miningLiveTotal.toFixed(6)}
+                  </p>
+                  <p className="text-[9px] mt-1" style={{ color: "#1e3a5f" }}>
+                    {miningAllocs.length} active session
+                    {miningAllocs.length > 1 ? "s" : ""}
+                    {" · "}$
+                    {miningAllocs
+                      .reduce((s, a) => s + a.amount_invested, 0)
+                      .toLocaleString(undefined, {
+                        minimumFractionDigits: 2,
+                      })}{" "}
+                    staked
+                  </p>
+                  <div className="flex items-center gap-1 mt-2">
+                    <div
+                      className="w-1.5 h-1.5 rounded-full animate-pulse"
+                      style={{ background: C_ACCENT }}
+                    />
+                    <span
+                      className="text-[9px] font-bold"
+                      style={{ color: C_ACCENT }}
+                    >
+                      Mining in progress
+                    </span>
+                  </div>
+                  <button
+                    onClick={() =>
+                      router.push("/dashboard/gpu-plans?tab=portfolio")
+                    }
+                    className="mt-2 text-[10px] font-bold flex items-center gap-1"
+                    style={{ color: C_ACCENT }}
+                  >
+                    View portfolio <ArrowUpRight size={10} />
+                  </button>
+                </>
+              )}
+
+              {/* Task allocation (shown if no mining active) */}
+              {!hasMiningActive && hasTaskActive && (
                 <>
                   <p
                     className="font-black text-2xl leading-none tabular-nums"
@@ -849,7 +1283,7 @@ export default function DashboardClient({
                     className="text-[9px] mt-1.5 truncate"
                     style={{ color: "#1e3a5f" }}
                   >
-                    {activeAlloc.gpu_clients?.name}
+                    {activeAlloc?.gpu_clients?.name}
                   </p>
                   <div className="flex items-center gap-1 mt-2">
                     <div
@@ -864,26 +1298,29 @@ export default function DashboardClient({
                     </span>
                   </div>
                 </>
-              ) : (
+              )}
+
+              {/* Neither active */}
+              {!hasMiningActive && !hasTaskActive && (
                 <>
                   <p
                     className="font-bold text-sm mt-1"
                     style={{ color: "#1e3a5f" }}
                   >
-                    No active allocation
+                    No active session
                   </p>
                   <button
-                    onClick={() => router.push("/dashboard/tasks")}
-                    className="mt-2 text-[10px] font-bold flex items-center gap-1 transition-colors"
+                    onClick={() => router.push("/dashboard/gpu-plans")}
+                    className="mt-2 text-[10px] font-bold flex items-center gap-1"
                     style={{ color: C_ACCENT }}
                   >
-                    Assign GPU <ArrowUpRight size={10} />
+                    Start mining <ArrowUpRight size={10} />
                   </button>
                 </>
               )}
             </div>
 
-            {/* Total earned */}
+            {/* Tile 3: Total Earned */}
             <div className="rounded-2xl p-5" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
@@ -907,7 +1344,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Streak + utilisation */}
+            {/* Tile 4: Streak + Utilisation */}
             <div className="rounded-2xl p-5" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
@@ -951,9 +1388,8 @@ export default function DashboardClient({
 
           {/* ROW 2 — GPU metrics + Workloads + Datacenter */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Left: GPU metrics 2×2 + node specs */}
+            {/* Left: GPU metrics */}
             <div className="space-y-3">
-              {/* Section label */}
               <div className="flex items-center justify-between px-1">
                 <p
                   className="text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5"
@@ -968,8 +1404,6 @@ export default function DashboardClient({
                   {serial}
                 </span>
               </div>
-
-              {/* 2×2 metric grid */}
               <div className="grid grid-cols-2 gap-2">
                 <MetricTile
                   label="Temp"
@@ -1004,8 +1438,6 @@ export default function DashboardClient({
                   icon={Zap}
                 />
               </div>
-
-              {/* Node specs compact */}
               <div className="rounded-2xl p-4" style={card}>
                 <div className="flex items-center justify-between mb-3">
                   <p
@@ -1016,7 +1448,7 @@ export default function DashboardClient({
                   </p>
                   <button
                     onClick={() => router.push("/dashboard/gpu-plans")}
-                    className="text-[9px] font-bold flex items-center gap-0.5 transition-colors"
+                    className="text-[9px] font-bold flex items-center gap-0.5"
                     style={{ color: C_ACCENT }}
                   >
                     Upgrade <ArrowUpRight size={9} />
@@ -1104,7 +1536,7 @@ export default function DashboardClient({
               </button>
             </div>
 
-            {/* Right: Datacenter feed */}
+            {/* Right: Datacenter feed — FIX #3: London time */}
             <div className="rounded-2xl p-5 flex flex-col" style={card}>
               <div className="flex items-center justify-between mb-3">
                 <p
@@ -1152,7 +1584,7 @@ export default function DashboardClient({
 
           {/* ROW 3 — Revenue chart + Account security */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Revenue chart — spans 2 cols */}
+            {/* Revenue chart */}
             <div className="lg:col-span-2 rounded-2xl p-5" style={card}>
               <div className="flex items-start justify-between mb-5">
                 <div>
@@ -1175,7 +1607,6 @@ export default function DashboardClient({
                   </p>
                 </div>
               </div>
-
               <ResponsiveContainer width="100%" height={110}>
                 <AreaChart
                   data={earnings7d}
@@ -1229,8 +1660,6 @@ export default function DashboardClient({
                   />
                 </AreaChart>
               </ResponsiveContainer>
-
-              {/* Action buttons */}
               <div className="flex gap-2 mt-4">
                 <button
                   onClick={() => router.push("/dashboard/tasks")}
@@ -1276,7 +1705,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Account security — reads real user data */}
+            {/* Account security */}
             <div className="rounded-2xl p-5 flex flex-col" style={card}>
               <div className="flex items-center gap-2.5 mb-4">
                 <div
@@ -1297,8 +1726,6 @@ export default function DashboardClient({
                   </p>
                 </div>
               </div>
-
-              {/* Progress bar */}
               <div
                 className="h-1 rounded-full mb-4 overflow-hidden"
                 style={{ background: BORDER }}
@@ -1311,7 +1738,6 @@ export default function DashboardClient({
                   }}
                 />
               </div>
-
               <div className="flex-1 divide-y" style={{ borderColor: BORDER }}>
                 <SecurityRow
                   label="KYC Verification"
@@ -1321,9 +1747,7 @@ export default function DashboardClient({
                 />
                 <SecurityRow
                   label="Operator License"
-                  status={
-                    licenseActive ? "ok" : hasLicense ? "warning" : "warning"
-                  }
+                  status={licenseActive ? "ok" : "warning"}
                 />
                 <SecurityRow
                   label="Device Verification"
@@ -1338,8 +1762,6 @@ export default function DashboardClient({
                   status={payoutReg ? "ok" : "pending"}
                 />
               </div>
-
-              {/* License expiry */}
               {licenseActive && (
                 <div
                   className="mt-3 flex items-center gap-2 px-3 py-2 rounded-xl"
@@ -1357,15 +1779,13 @@ export default function DashboardClient({
                   </p>
                 </div>
               )}
-
-              {/* CTA buttons */}
               <div className="mt-3 space-y-2">
                 {(!kycVerified || !hasLicense || !payoutReg) && (
                   <button
                     onClick={() => router.push("/dashboard/verification")}
                     className="w-full flex items-center justify-center gap-1.5 font-bold text-[10px] py-2.5 rounded-xl transition-all"
                     style={{
-                      border: `1px solid #92400e80`,
+                      border: "1px solid #92400e80",
                       color: "#f59e0b",
                       background: "#78350f15",
                     }}
@@ -1390,7 +1810,7 @@ export default function DashboardClient({
                     e.currentTarget.style.borderColor = BORDER;
                   }}
                 >
-                  <DollarSign size={10} /> Financials & Withdrawals
+                  <DollarSign size={10} /> Financials &amp; Withdrawals
                 </button>
               </div>
             </div>

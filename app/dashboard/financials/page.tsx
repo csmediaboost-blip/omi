@@ -786,6 +786,13 @@ export default function FinancialsPage() {
     }
     setUserId(user.id);
 
+    // CRITICAL FIX: Auto-complete any expired mining sessions BEFORE loading data.
+    // This ensures balance_available is credited before we display it.
+    // Mining sessions expire but balance never credits if cron doesn't run.
+    try {
+      await fetch("/api/mining/complete-sessions", { method: "POST" });
+    } catch {}
+
     const [profRes, payRes, nodeRes, licRes, ledgerRes, wRes, plansRes] =
       await Promise.allSettled([
         // FIX #4: Now selects ALL payout and security fields that were missing
@@ -924,6 +931,32 @@ export default function FinancialsPage() {
     (w) => w.status === "queued" || w.status === "processing",
   );
 
+  // CRITICAL FIX: "Available Balance" = DB balance_available + any matured
+  // sessions that are still awaiting credit (expired but not yet completed).
+  // This shows users what they CAN claim right now even if cron hasn't run.
+  const unclaimedMatured = nodeAllocations.filter(
+    (n) =>
+      !n.mining_completed &&
+      n.payment_model === "flexible" &&
+      n.mining_ends_at &&
+      new Date(n.mining_ends_at) <= new Date(),
+  );
+  const unclaimedCapital = unclaimedMatured.reduce(
+    (s, n) => s + (n.amount_invested ?? 0),
+    0,
+  );
+  const unclaimedEarnings = unclaimedMatured.reduce(
+    (s, n) => s + (n.total_earned ?? 0),
+    0,
+  );
+  const unclaimedTotal = unclaimedCapital + unclaimedEarnings;
+
+  // effectiveAvail shows what user actually has access to (DB balance + pending claim)
+  const effectiveAvail = avail + unclaimedTotal;
+
+  // Total mined = DB total_earned + live mining earnings (across ALL sessions)
+  const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
+
   // FIX #3: Build unified deposit list from both payment_transactions and node_allocations
   const depositEntries: DepositEntry[] = [];
 
@@ -1003,8 +1036,9 @@ export default function FinancialsPage() {
     (d) => d.status === "confirmed",
   );
   const totalDeposited = confirmedDeposits.reduce((s, d) => s + d.amount, 0);
+  // CRITICAL FIX: Use effectiveAvail (includes unclaimed mining) for withdrawal eligibility
   const canWithdraw =
-    !isFrozen && avail >= 10 && !!profile?.payout_registered && kycOk;
+    !isFrozen && effectiveAvail >= 10 && !!profile?.payout_registered && kycOk;
 
   const TABS: Array<{
     id: typeof tab;
@@ -1026,7 +1060,7 @@ export default function FinancialsPage() {
       {showWithdrawModal && userId && profile && (
         <WithdrawModal
           userId={userId}
-          availableBalance={avail}
+          availableBalance={effectiveAvail}
           isFrozen={isFrozen}
           profile={profile}
           onClose={() => setShowWithdrawModal(false)}
@@ -1086,7 +1120,7 @@ export default function FinancialsPage() {
                       ? "KYC Required"
                       : avail < 10
                         ? "Need $10 min"
-                        : `Withdraw $${avail.toFixed(2)}`}
+                        : `Withdraw $${effectiveAvail.toFixed(2)}`}
               </button>
             </div>
           </div>
@@ -1106,6 +1140,35 @@ export default function FinancialsPage() {
                   Complete verification →
                 </button>
               </p>
+            </div>
+          )}
+
+          {/* CRITICAL FIX: Unclaimed mining earnings banner */}
+          {unclaimedMatured.length > 0 && (
+            <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Pickaxe size={14} className="text-emerald-400 shrink-0" />
+                <p className="text-emerald-300 text-sm">
+                  <strong>
+                    {unclaimedMatured.length} mining session
+                    {unclaimedMatured.length > 1 ? "s" : ""} completed
+                  </strong>{" "}
+                  — ${unclaimedTotal.toFixed(2)} (capital + earnings) pending
+                  credit to your wallet.
+                </p>
+              </div>
+              <button
+                onClick={async () => {
+                  await fetch("/api/mining/complete-sessions", {
+                    method: "POST",
+                  });
+                  loadData();
+                }}
+                className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-black text-slate-950"
+                style={{ background: "#10b981" }}
+              >
+                Claim Now
+              </button>
             </div>
           )}
           {kycOk && !profile?.payout_registered && (
@@ -1147,7 +1210,7 @@ export default function FinancialsPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <StatBox
               label="Available Balance"
-              value={`$${avail.toFixed(2)}`}
+              value={`$${effectiveAvail.toFixed(2)}`}
               color="text-emerald-400"
               icon={DollarSign}
               sub="Ready to withdraw"
@@ -1205,7 +1268,7 @@ export default function FinancialsPage() {
                   {[
                     {
                       label: "Available Balance",
-                      value: `$${avail.toFixed(2)}`,
+                      value: `$${effectiveAvail.toFixed(2)}`,
                       color: "text-emerald-400",
                     },
                     {
@@ -1220,7 +1283,7 @@ export default function FinancialsPage() {
                     },
                     {
                       label: "Total Earned",
-                      value: `$${totalEarned.toFixed(2)}`,
+                      value: `$${effectiveTotalEarned.toFixed(2)}`,
                       color: "text-cyan-400",
                     },
                     {
@@ -1260,7 +1323,7 @@ export default function FinancialsPage() {
                   </p>
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-emerald-400 font-bold">
-                      ${avail.toFixed(2)}
+                      ${effectiveAvail.toFixed(2)}
                     </span>{" "}
                     available.{" "}
                     {!kycOk
@@ -1801,8 +1864,8 @@ export default function FinancialsPage() {
                     : !profile?.payout_registered
                       ? "Setup Payout Account First"
                       : avail < 10
-                        ? `Need $10 min (have $${avail.toFixed(2)})`
-                        : `Request Withdrawal — $${avail.toFixed(2)} Available`}
+                        ? `Need $10 min (have $${effectiveAvail.toFixed(2)})`
+                        : `Request Withdrawal — $${effectiveAvail.toFixed(2)} Available`}
               </button>
 
               {withdrawals.length === 0 ? (

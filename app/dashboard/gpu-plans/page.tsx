@@ -1129,6 +1129,30 @@ function PortfolioCard({
   const available = Math.max(0, liveEarned - withdrawn);
   const canWithdraw = isContract ? isMatured : miningDone;
 
+  // CRITICAL FIX: Session expired but not yet claimed — cron never ran
+  const isExpiredUnclaimed =
+    !miningDone &&
+    !isContract &&
+    miningEndsAt !== null &&
+    miningEndsAt <= new Date();
+  const [claiming, setClaiming] = useState(false);
+  const [claimDone, setClaimDone] = useState(false);
+
+  async function claimEarnings() {
+    if (claiming || claimDone) return;
+    setClaiming(true);
+    try {
+      const res = await fetch("/api/mining/complete-sessions", {
+        method: "POST",
+      });
+      if (res.ok) {
+        setClaimDone(true);
+        onWithdrawSuccess();
+      }
+    } catch {}
+    setClaiming(false);
+  }
+
   // Contract progress
   const daysElapsed = Math.floor(
     (now.getTime() - startDate.getTime()) / 86400000,
@@ -1223,12 +1247,18 @@ function PortfolioCard({
             >
               {isContract ? "📋 Contract" : "⛏️ Pay-As-You-Go"}
             </span>
-            {(miningDone || isMatured) && (
+            {(miningDone || isMatured || claimDone) && (
               <span className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-emerald-900/30 border-emerald-700/50 text-emerald-400">
                 Done ✓
               </span>
             )}
-            {!miningDone && !isContract && (
+            {isExpiredUnclaimed && !claimDone && (
+              <span className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-amber-900/30 border-amber-700/50 text-amber-400 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />{" "}
+                CLAIM READY
+              </span>
+            )}
+            {!miningDone && !isExpiredUnclaimed && !isContract && (
               <span className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-emerald-900/20 border-emerald-800/40 text-emerald-400 flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />{" "}
                 LIVE
@@ -1249,21 +1279,31 @@ function PortfolioCard({
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1">
-                {miningDone
+                {miningDone || claimDone
                   ? "Total Earned (Final)"
-                  : "Earning Right Now (Live)"}
+                  : isExpiredUnclaimed
+                    ? "Mining Complete — Pending Claim"
+                    : "Earning Right Now (Live)"}
               </p>
               <p className="text-emerald-400 font-black text-2xl tabular-nums">
                 ${liveEarned.toFixed(6)}
               </p>
-              {!miningDone && !isContract && (
-                <p className="text-emerald-500/60 text-[10px] mt-1">
-                  +${perSec.toFixed(8)}/sec · +${perHour.toFixed(6)}/hr
+              {!miningDone &&
+                !claimDone &&
+                !isContract &&
+                !isExpiredUnclaimed && (
+                  <p className="text-emerald-500/60 text-[10px] mt-1">
+                    +${perSec.toFixed(8)}/sec · +${perHour.toFixed(6)}/hr
+                  </p>
+                )}
+              {isExpiredUnclaimed && !claimDone && (
+                <p className="text-amber-400/80 text-[10px] mt-1">
+                  Session ended · Tap Claim to credit your wallet
                 </p>
               )}
-              {miningDone && (
+              {(miningDone || claimDone) && (
                 <p className="text-emerald-400/60 text-[10px] mt-1">
-                  Session complete · Capital returned
+                  Session complete · Capital returned to wallet
                 </p>
               )}
             </div>
@@ -1443,28 +1483,51 @@ function PortfolioCard({
 
           {/* Actions */}
           <div className="flex gap-2 pt-1">
-            <button
-              onClick={() => setShowWithdraw(true)}
-              disabled={!canWithdraw || available < 10}
-              className="flex-1 py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{
-                background:
-                  canWithdraw && available >= 10
-                    ? "linear-gradient(135deg,#10b981,#059669)"
-                    : "rgba(100,116,139,0.2)",
-                color: "white",
-              }}
-            >
-              <ArrowUpRight size={14} />
-              {!isContract && !miningDone
-                ? "Mining in Progress…"
-                : isContract && !isMatured
-                  ? `Locked · ${daysLeft}d left`
-                  : available < 10
-                    ? "Min $10 to withdraw"
-                    : `Withdraw $${available.toFixed(2)}`}
-            </button>
-            {!isContract && miningDone && (
+            {/* CRITICAL FIX: Show Claim button for expired unclaimed sessions */}
+            {isExpiredUnclaimed && !claimDone ? (
+              <button
+                onClick={claimEarnings}
+                disabled={claiming}
+                className="flex-1 py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+                style={{
+                  background: "linear-gradient(135deg,#f59e0b,#d97706)",
+                  color: "#020b04",
+                }}
+              >
+                {claiming ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" /> Claiming…
+                  </>
+                ) : (
+                  <>
+                    <Coins size={14} /> Claim Earnings + Capital
+                  </>
+                )}
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowWithdraw(true)}
+                disabled={(!canWithdraw && !claimDone) || available < 10}
+                className="flex-1 py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background:
+                    (canWithdraw || claimDone) && available >= 10
+                      ? "linear-gradient(135deg,#10b981,#059669)"
+                      : "rgba(100,116,139,0.2)",
+                  color: "white",
+                }}
+              >
+                <ArrowUpRight size={14} />
+                {!isContract && !miningDone && !claimDone
+                  ? "Mining in Progress…"
+                  : isContract && !isMatured
+                    ? `Locked · ${daysLeft}d left`
+                    : available < 10
+                      ? "Min $10 to withdraw"
+                      : `Withdraw $${available.toFixed(2)}`}
+              </button>
+            )}
+            {!isContract && (miningDone || claimDone) && (
               <button
                 onClick={onStartNewMining}
                 className="px-3 py-3 rounded-xl font-black text-sm flex items-center justify-center gap-1.5 transition-all"
@@ -2463,6 +2526,46 @@ export default function GPUPlansPage() {
     loadAll();
   }, [loadAll]);
 
+  // ── AUTO-COMPLETE EXPIRED SESSIONS ────────────────────────────────────────
+  // CRITICAL FIX: Mining sessions expire but balance never credits if cron
+  // doesn't run. This fires on every portfolio tab open and claims any expired
+  // sessions automatically — crediting balance_available without needing a cron.
+  const [autoCompleting, setAutoCompleting] = useState(false);
+  const autoCompleteExpiredSessions = useCallback(async () => {
+    if (!userId || autoCompleting) return;
+    const expired = allocations.filter(
+      (a) =>
+        !a.mining_completed &&
+        a.payment_model === "flexible" &&
+        a.mining_ends_at &&
+        new Date(a.mining_ends_at) <= new Date(),
+    );
+    if (!expired.length) return;
+    setAutoCompleting(true);
+    try {
+      const res = await fetch("/api/mining/complete-sessions", {
+        method: "POST",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const n = data.completed ?? data.processed ?? 0;
+        if (n > 0) {
+          showToast(
+            `✅ ${n} session${n > 1 ? "s" : ""} completed — earnings credited to your wallet!`,
+          );
+          await loadAll();
+        }
+      }
+    } catch {}
+    setAutoCompleting(false);
+  }, [userId, allocations, autoCompleting, loadAll]); // eslint-disable-line
+
+  useEffect(() => {
+    if (activeTab === "portfolio") {
+      autoCompleteExpiredSessions();
+    }
+  }, [activeTab]); // eslint-disable-line
+
   // Realtime subscription
   useEffect(() => {
     if (!userId) return;
@@ -2890,13 +2993,45 @@ export default function GPUPlansPage() {
           {/* ── PORTFOLIO TAB ── */}
           {activeTab === "portfolio" && (
             <section>
-              <div className="mb-4">
-                <h2 className="text-white font-black text-xl">
-                  Active Mining Sessions
-                </h2>
-                <p className="text-slate-500 text-sm mt-1">
-                  Real-time earnings, progress &amp; withdrawals
-                </p>
+              <div className="mb-4 flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <h2 className="text-white font-black text-xl">
+                    Active Mining Sessions
+                  </h2>
+                  <p className="text-slate-500 text-sm mt-1">
+                    Real-time earnings, progress &amp; withdrawals
+                  </p>
+                </div>
+                {/* CRITICAL FIX: Manual trigger for claiming expired sessions */}
+                {allocations.some(
+                  (a) =>
+                    !a.mining_completed &&
+                    a.mining_ends_at &&
+                    new Date(a.mining_ends_at) <= new Date() &&
+                    a.payment_model === "flexible",
+                ) && (
+                  <button
+                    onClick={autoCompleteExpiredSessions}
+                    disabled={autoCompleting}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-black transition-all"
+                    style={{
+                      background: "rgba(245,158,11,0.15)",
+                      border: "1px solid rgba(245,158,11,0.4)",
+                      color: "#f59e0b",
+                    }}
+                  >
+                    {autoCompleting ? (
+                      <>
+                        <RefreshCw size={11} className="animate-spin" />{" "}
+                        Processing…
+                      </>
+                    ) : (
+                      <>
+                        <Coins size={11} /> Claim All Expired
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
 
               {activeAllocs.length > 0 && (

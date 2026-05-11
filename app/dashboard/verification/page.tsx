@@ -161,6 +161,151 @@ const COUNTRIES = [
   "Zimbabwe",
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// uploadViaXHR — uses XMLHttpRequest instead of fetch.
+//
+// WHY: On mobile browsers (Android Chrome, iOS Safari), supabase.storage.upload()
+// uses the browser's fetch() API internally. Mobile browsers have known issues
+// where fetch() requests to storage endpoints can stall indefinitely — they
+// never resolve() or reject(), so Promise.race timeouts also never fire.
+//
+// XMLHttpRequest (XHR) is the older API but is rock-solid on ALL mobile
+// browsers. It has a native .timeout property that is guaranteed to fire,
+// and .onprogress for upload percentage. This is the correct solution for
+// reliable file uploads on mobile.
+// ─────────────────────────────────────────────────────────────────────────────
+function uploadViaXHR(
+  url: string,
+  file: File,
+  contentType: string,
+  timeoutMs: number,
+  onProgress?: (pct: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    // Hard timeout — guaranteed to fire on mobile, unlike fetch AbortController
+    xhr.timeout = timeoutMs;
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Upload failed with status ${xhr.status}: ${xhr.responseText?.slice(0, 200)}`,
+          ),
+        );
+      }
+    };
+
+    xhr.onerror = () =>
+      reject(
+        new Error(
+          "Network error during upload. Check your connection and try again.",
+        ),
+      );
+    xhr.ontimeout = () =>
+      reject(
+        new Error(
+          "Upload timed out. Your connection may be too slow — try a smaller image.",
+        ),
+      );
+    xhr.onabort = () => reject(new Error("Upload was cancelled."));
+
+    xhr.open("PUT", url, true);
+    xhr.setRequestHeader(
+      "Content-Type",
+      contentType || "application/octet-stream",
+    );
+    xhr.send(file);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// uploadFileForKYC — gets a signed upload URL from Supabase, then uses XHR.
+// Tries kyc-documents bucket first, falls back to documents bucket.
+// ─────────────────────────────────────────────────────────────────────────────
+async function uploadFileForKYC(
+  file: File,
+  path: string,
+  onProgress?: (pct: number) => void,
+): Promise<string | null> {
+  // Determine content type — mobile browsers sometimes return "" for images
+  // taken from camera. We detect from extension as fallback.
+  const ext = path.split(".").pop()?.toLowerCase() || "";
+  const mimeMap: Record<string, string> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    pdf: "application/pdf",
+  };
+  const contentType = file.type || mimeMap[ext] || "application/octet-stream";
+
+  for (const bucket of ["kyc-documents", "documents"]) {
+    try {
+      // Step 1: Get a signed upload URL (this is a fast DB call, not an upload)
+      const { data: signedData, error: urlErr } = await supabase.storage
+        .from(bucket)
+        .createSignedUploadUrl(path);
+
+      if (urlErr) {
+        // Bucket doesn't exist or no permission — try next
+        console.warn(
+          `[KYC Upload] createSignedUploadUrl failed for bucket "${bucket}":`,
+          urlErr.message,
+        );
+        continue;
+      }
+
+      if (!signedData?.signedUrl) {
+        console.warn(
+          `[KYC Upload] No signed URL returned for bucket "${bucket}"`,
+        );
+        continue;
+      }
+
+      // Step 2: Upload via XHR — works on all mobile browsers
+      await uploadViaXHR(
+        signedData.signedUrl,
+        file,
+        contentType,
+        60000,
+        onProgress,
+      );
+
+      // Step 3: Return the public URL
+      const { data: urlData } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(path);
+      return urlData?.publicUrl ?? null;
+    } catch (e: any) {
+      // Timeout or network error — don't silently swallow, re-throw
+      if (
+        e.message?.includes("timed out") ||
+        e.message?.includes("Network error")
+      ) {
+        throw e;
+      }
+      // Other error (bucket missing etc) — try next bucket
+      console.warn(`[KYC Upload] bucket "${bucket}" failed:`, e.message);
+      continue;
+    }
+  }
+
+  throw new Error(
+    "Upload failed: could not reach storage. Please check your Supabase Storage has a 'kyc-documents' bucket with an INSERT policy for authenticated users.",
+  );
+}
+
 export default function VerificationPage() {
   const router = useRouter();
   const mountedRef = useRef(true);
@@ -175,6 +320,7 @@ export default function VerificationPage() {
   );
   const [saving, setSaving] = useState(false);
   const [uploadProgress, setUploadProgress] = useState("");
+  const [uploadPct, setUploadPct] = useState(0);
 
   const [idFullName, setIdFullName] = useState("");
   const [idPhone, setIdPhone] = useState("");
@@ -285,87 +431,6 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // uploadFile — uses Promise.race so the upload can NEVER hang forever.
-  // The standard supabase.storage.upload() call is used (no createSignedUploadUrl
-  // needed — that requires extra permissions). We race it against a 30-second
-  // timer. If the timer wins, we catch the rejection and surface a clear error.
-  // ─────────────────────────────────────────────────────────────────────────
-  async function uploadFile(file: File, path: string): Promise<string | null> {
-    const TIMEOUT_MS = 30000; // 30 seconds — enough for a 5 MB file on 4G
-
-    for (const bucket of ["kyc-documents", "documents"]) {
-      try {
-        // Race: upload vs timeout
-        type UploadResult = { data: any; error: any };
-        const result = await Promise.race<UploadResult>([
-          supabase.storage.from(bucket).upload(path, file, {
-            upsert: true,
-            cacheControl: "3600",
-          }) as Promise<UploadResult>,
-          new Promise<UploadResult>((_, reject) =>
-            setTimeout(() => reject(new Error("UPLOAD_TIMEOUT")), TIMEOUT_MS),
-          ),
-        ]);
-
-        // Storage returned an error (not a timeout)
-        if (result.error) {
-          const msg = result.error.message || "";
-          // Bucket missing — try the next one
-          if (
-            msg.includes("not found") ||
-            msg.includes("Bucket") ||
-            msg.includes("404")
-          ) {
-            continue;
-          }
-          // RLS blocked — surface clearly
-          if (
-            msg.includes("policy") ||
-            msg.includes("403") ||
-            msg.includes("Unauthorized") ||
-            msg.includes("new row")
-          ) {
-            throw new Error(
-              "Upload blocked by storage policy. Go to Supabase → Storage → " +
-                "kyc-documents → Policies and add an INSERT policy for authenticated users, then try again.",
-            );
-          }
-          throw new Error(`Upload error: ${msg}`);
-        }
-
-        // ✅ Upload succeeded — return public URL
-        const { data: urlData } = supabase.storage
-          .from(bucket)
-          .getPublicUrl(path);
-        return urlData?.publicUrl ?? null;
-      } catch (e: any) {
-        if (e.message === "UPLOAD_TIMEOUT") {
-          throw new Error(
-            "Upload timed out after 30 seconds. Your internet connection is too slow for the file size. " +
-              "Try compressing the image or connecting to a faster network, then submit again.",
-          );
-        }
-        // Bucket-related errors — try next bucket
-        if (
-          e.message?.includes("not found") ||
-          e.message?.includes("Bucket") ||
-          e.message?.includes("404")
-        ) {
-          continue;
-        }
-        throw e; // real error — bubble up
-      }
-    }
-
-    // Both buckets failed
-    throw new Error(
-      "Storage not configured. In Supabase: Storage → kyc-documents → Policies → " +
-        "add INSERT policy with expression: (auth.role() = 'authenticated')",
-    );
-  }
-
-  // ── Submit KYC ───────────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -412,28 +477,35 @@ export default function VerificationPage() {
     }
 
     setSaving(true);
+    setUploadPct(0);
     let docUrl = "";
 
     try {
       const uid = profile.id;
       const ts = Date.now();
       const ext = idFile.name.split(".").pop() || "jpg";
+      const path = `kyc/${uid}/doc-${ts}.${ext}`;
 
       setUploadProgress(
-        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB) — please wait`,
+        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB)`,
       );
 
       try {
         docUrl =
-          (await uploadFile(idFile, `kyc/${uid}/doc-${ts}.${ext}`)) || "";
+          (await uploadFileForKYC(idFile, path, (pct) => {
+            if (mountedRef.current) {
+              setUploadPct(pct);
+              setUploadProgress(`Uploading... ${pct}%`);
+            }
+          })) || "";
       } catch (uploadErr: any) {
-        // Show the upload error clearly but still save the form data
         showToast(uploadErr.message, false);
         docUrl = "";
         await new Promise((r) => setTimeout(r, 2500));
       }
 
       setUploadProgress("Saving your details...");
+      setUploadPct(0);
 
       const { error: docErr } = await supabase.from("kyc_documents").insert({
         user_id: uid,
@@ -449,14 +521,12 @@ export default function VerificationPage() {
         date_of_birth: idDob,
         status: "pending",
       });
-
       if (
         docErr &&
         docErr.code !== "42P01" &&
         !docErr.message?.includes("does not exist")
-      ) {
+      )
         throw new Error(`Could not save record: ${docErr.message}`);
-      }
 
       const { error: updErr } = await supabase
         .from("users")
@@ -469,7 +539,6 @@ export default function VerificationPage() {
           country: idCountry,
         })
         .eq("id", uid);
-
       if (updErr)
         throw new Error(`Could not update profile: ${updErr.message}`);
 
@@ -483,6 +552,7 @@ export default function VerificationPage() {
       load();
     } catch (err: unknown) {
       setUploadProgress("");
+      setUploadPct(0);
       showToast(
         err instanceof Error
           ? err.message
@@ -598,7 +668,7 @@ export default function VerificationPage() {
           </div>
         )}
 
-        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 space-y-6">
+        <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 pb-28 space-y-6">
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/dashboard")}
@@ -943,34 +1013,49 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
+                  {/* Upload progress with real percentage bar */}
                   {uploadProgress && (
-                    <div className="flex items-center gap-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
-                      <Loader2
-                        size={13}
-                        className="text-blue-400 animate-spin shrink-0"
-                      />
-                      <p className="text-blue-300 text-xs">{uploadProgress}</p>
+                    <div className="space-y-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
+                      <div className="flex items-center gap-2">
+                        <Loader2
+                          size={13}
+                          className="text-blue-400 animate-spin shrink-0"
+                        />
+                        <p className="text-blue-300 text-xs">
+                          {uploadProgress}
+                        </p>
+                      </div>
+                      {uploadPct > 0 && (
+                        <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-blue-400 rounded-full transition-all duration-300"
+                            style={{ width: `${uploadPct}%` }}
+                          />
+                        </div>
+                      )}
                     </div>
                   )}
 
-                  <button
-                    onClick={submitIdentity}
-                    disabled={saving}
-                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-3.5 rounded-xl transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {saving ? (
-                      <>
-                        <Loader2 size={14} className="animate-spin" />
-                        {uploadProgress ? " Uploading..." : " Submitting..."}
-                      </>
-                    ) : (
-                      "Submit Identity Verification"
-                    )}
-                  </button>
-                  <p className="text-center text-slate-600 text-xs">
-                    Fields marked <span className="text-red-400">*</span> are
-                    required · Used only for identity verification
-                  </p>
+                  <div className="pb-4">
+                    <button
+                      onClick={submitIdentity}
+                      disabled={saving}
+                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-4 rounded-xl transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {saving ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />
+                          {uploadProgress ? " Uploading..." : " Submitting..."}
+                        </>
+                      ) : (
+                        "Submit Identity Verification"
+                      )}
+                    </button>
+                    <p className="text-center text-slate-600 text-xs mt-3">
+                      Fields marked <span className="text-red-400">*</span> are
+                      required · Used only for identity verification
+                    </p>
+                  </div>
                 </div>
               )}
             </Card>
@@ -1045,20 +1130,22 @@ export default function VerificationPage() {
                       agreements.
                     </p>
                   </div>
-                  <button
-                    onClick={signAgreements}
-                    disabled={saving}
-                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-3.5 rounded-xl transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
-                  >
-                    {saving ? (
-                      <>
-                        <Loader2 size={14} className="animate-spin" />{" "}
-                        Signing...
-                      </>
-                    ) : (
-                      "✓ I Have Read and Accept Both Agreements"
-                    )}
-                  </button>
+                  <div className="pb-4">
+                    <button
+                      onClick={signAgreements}
+                      disabled={saving}
+                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-4 rounded-xl transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                      {saving ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />{" "}
+                          Signing...
+                        </>
+                      ) : (
+                        "✓ I Have Read and Accept Both Agreements"
+                      )}
+                    </button>
+                  </div>
                 </div>
               )}
             </Card>
@@ -1121,13 +1208,15 @@ export default function VerificationPage() {
                       </p>
                     </div>
                   )}
-                  <button
-                    onClick={() => router.push("/dashboard/settings/payout")}
-                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-3.5 rounded-xl transition-all text-sm flex items-center justify-center gap-2"
-                  >
-                    <CreditCard size={14} /> Register Payout Account{" "}
-                    <ChevronRight size={14} />
-                  </button>
+                  <div className="pb-4">
+                    <button
+                      onClick={() => router.push("/dashboard/settings/payout")}
+                      className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-4 rounded-xl transition-all text-sm flex items-center justify-center gap-2"
+                    >
+                      <CreditCard size={14} /> Register Payout Account{" "}
+                      <ChevronRight size={14} />
+                    </button>
+                  </div>
                 </div>
               )}
             </Card>
