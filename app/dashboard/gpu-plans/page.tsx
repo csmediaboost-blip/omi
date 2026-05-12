@@ -1142,9 +1142,7 @@ function PortfolioCard({
     if (claiming || claimDone) return;
     setClaiming(true);
     try {
-      const res = await fetch("/api/mining/complete-sessions", {
-        method: "POST",
-      });
+      const res = await fetch("/api/mining/claim-session", { method: "POST" });
       if (res.ok) {
         setClaimDone(true);
         onWithdrawSuccess();
@@ -2543,9 +2541,7 @@ export default function GPUPlansPage() {
     if (!expired.length) return;
     setAutoCompleting(true);
     try {
-      const res = await fetch("/api/mining/complete-sessions", {
-        method: "POST",
-      });
+      const res = await fetch("/api/mining/claim-session", { method: "POST" });
       if (res.ok) {
         const data = await res.json();
         const n = data.completed ?? data.processed ?? 0;
