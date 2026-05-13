@@ -162,6 +162,39 @@ const COUNTRIES = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// withTimeout — wraps ANY promise with a hard timeout.
+//
+// WHY: Supabase JS uses fetch() internally for all DB and auth calls.
+// On mobile browsers (Android Chrome, iOS Safari), fetch() can stall
+// indefinitely — it never resolves OR rejects, so awaiting it hangs forever.
+// This causes the infinite spinner and "bounces to home" bugs on mobile.
+//
+// Promise.race() guarantees one of the two paths fires within `ms` milliseconds.
+// The timeout rejects with a user-friendly message so catch/finally blocks
+// always execute and the UI recovers properly.
+// ─────────────────────────────────────────────────────────────────────────────
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${label} timed out — check your connection and try again`,
+            ),
+          ),
+        ms,
+      ),
+    ),
+  ]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // uploadViaXHR — uses XMLHttpRequest instead of fetch.
 //
 // WHY: On mobile browsers (Android Chrome, iOS Safari), supabase.storage.upload()
@@ -252,10 +285,12 @@ async function uploadFileForKYC(
 
   for (const bucket of ["kyc-documents", "documents"]) {
     try {
-      // Step 1: Get a signed upload URL (this is a fast DB call, not an upload)
-      const { data: signedData, error: urlErr } = await supabase.storage
-        .from(bucket)
-        .createSignedUploadUrl(path);
+      // Step 1: Get a signed upload URL — wrapped in timeout for mobile safety
+      const { data: signedData, error: urlErr } = await withTimeout(
+        supabase.storage.from(bucket).createSignedUploadUrl(path),
+        15000,
+        "Get upload URL",
+      );
 
       if (urlErr) {
         // Bucket doesn't exist or no permission — try next
@@ -349,48 +384,69 @@ export default function VerificationPage() {
   }
 
   const load = useCallback(async () => {
+    // ── FIX: Guard prevents duplicate calls, but we always reset it in
+    // finally so retries work after a timeout or error.
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
+
     if (mountedRef.current) {
       setLoading(true);
       setLoadErr("");
     }
+
     try {
+      // ── FIX: getSession() uses fetch() internally. On mobile it can stall
+      // forever, making session appear null and triggering router.push("/auth/signin").
+      // withTimeout() guarantees it either resolves or rejects within 12 s.
       const {
         data: { session },
         error: sessErr,
-      } = await supabase.auth.getSession();
+      } = await withTimeout(supabase.auth.getSession(), 12000, "Session check");
+
       if (sessErr || !session?.user) {
         router.push("/auth/signin");
         return;
       }
+
       const uid = session.user.id;
-      const { data, error } = await supabase
-        .from("users")
-        .select(
-          "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
-        )
-        .eq("id", uid)
-        .single();
+
+      // ── FIX: DB select also uses fetch() — same stall risk on mobile.
+      const { data, error } = await withTimeout(
+        supabase
+          .from("users")
+          .select(
+            "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
+          )
+          .eq("id", uid)
+          .single(),
+        12000,
+        "Profile load",
+      );
+
       if (!mountedRef.current) return;
+
       if (error) {
         if (error.code === "PGRST116" || error.message?.includes("no rows")) {
-          const { data: created } = await supabase
-            .from("users")
-            .insert({
-              id: uid,
-              email: session.user.email || "",
-              kyc_status: "not_started",
-              kyc_verified: false,
-              phone_verified: false,
-              payout_registered: false,
-              cla_signed: false,
-              terms_signed: false,
-            })
-            .select(
-              "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
-            )
-            .single();
+          const { data: created } = await withTimeout(
+            supabase
+              .from("users")
+              .insert({
+                id: uid,
+                email: session.user.email || "",
+                kyc_status: "not_started",
+                kyc_verified: false,
+                phone_verified: false,
+                payout_registered: false,
+                cla_signed: false,
+                terms_signed: false,
+              })
+              .select(
+                "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
+              )
+              .single(),
+            12000,
+            "Create profile",
+          );
           if (created && mountedRef.current) setProfile(created);
         } else {
           if (mountedRef.current)
@@ -398,11 +454,14 @@ export default function VerificationPage() {
         }
         return;
       }
+
       if (!data || !mountedRef.current) return;
+
       setProfile(data);
       if (data.kyc_full_name) setIdFullName(data.kyc_full_name);
       else if (data.full_name) setIdFullName(data.full_name);
       if (data.phone) setIdPhone(data.phone);
+
       if (data.kyc_verified) {
         const redirect =
           typeof window !== "undefined"
@@ -414,15 +473,22 @@ export default function VerificationPage() {
           return;
         }
       }
+
       if (!data.kyc_verified) setActiveStep("identity");
       else if (!data.cla_signed || !data.terms_signed)
         setActiveStep("agreement");
       else if (!data.payout_registered) setActiveStep("payout");
       else setActiveStep("identity");
     } catch (err: unknown) {
+      // ── FIX: Timeout errors (and any other errors) now always land here
+      // because loadCalledRef resets in finally, so the retry button works.
       if (mountedRef.current)
         setLoadErr(err instanceof Error ? err.message : "Unknown error");
     } finally {
+      // ── FIX: Reset the guard here, not only on success paths.
+      // Previously it only reset inside specific if-branches, so a timeout
+      // or thrown error left it true forever — blocking all retry attempts.
+      loadCalledRef.current = false;
       if (mountedRef.current) setLoading(false);
     }
   }, [router]);
@@ -507,20 +573,27 @@ export default function VerificationPage() {
       setUploadProgress("Saving your details...");
       setUploadPct(0);
 
-      const { error: docErr } = await supabase.from("kyc_documents").insert({
-        user_id: uid,
-        document_type: idType,
-        document_number: idNumber.trim(),
-        document_url: docUrl || null,
-        full_name: idFullName.trim(),
-        country: idCountry,
-        phone: idPhone.trim(),
-        address: idAddress.trim(),
-        city: idCity.trim(),
-        gender: idGender,
-        date_of_birth: idDob,
-        status: "pending",
-      });
+      // ── FIX: DB insert wrapped in timeout — prevents infinite spinner
+      // on mobile when the fetch() call stalls after the file upload.
+      const { error: docErr } = await withTimeout(
+        supabase.from("kyc_documents").insert({
+          user_id: uid,
+          document_type: idType,
+          document_number: idNumber.trim(),
+          document_url: docUrl || null,
+          full_name: idFullName.trim(),
+          country: idCountry,
+          phone: idPhone.trim(),
+          address: idAddress.trim(),
+          city: idCity.trim(),
+          gender: idGender,
+          date_of_birth: idDob,
+          status: "pending",
+        }),
+        15000,
+        "Saving KYC record",
+      );
+
       if (
         docErr &&
         docErr.code !== "42P01" &&
@@ -528,17 +601,23 @@ export default function VerificationPage() {
       )
         throw new Error(`Could not save record: ${docErr.message}`);
 
-      const { error: updErr } = await supabase
-        .from("users")
-        .update({
-          full_name: idFullName.trim(),
-          kyc_full_name: idFullName.trim(),
-          kyc_status: "pending",
-          phone: idPhone.trim(),
-          phone_verified: true,
-          country: idCountry,
-        })
-        .eq("id", uid);
+      // ── FIX: Profile update also wrapped in timeout.
+      const { error: updErr } = await withTimeout(
+        supabase
+          .from("users")
+          .update({
+            full_name: idFullName.trim(),
+            kyc_full_name: idFullName.trim(),
+            kyc_status: "pending",
+            phone: idPhone.trim(),
+            phone_verified: true,
+            country: idCountry,
+          })
+          .eq("id", uid),
+        15000,
+        "Updating profile",
+      );
+
       if (updErr)
         throw new Error(`Could not update profile: ${updErr.message}`);
 
@@ -548,7 +627,6 @@ export default function VerificationPage() {
           ? "Identity submitted — pending review within 24–48 hrs ✓"
           : "Details saved (photo upload failed) — our team will contact you ✓",
       );
-      loadCalledRef.current = false;
       load();
     } catch (err: unknown) {
       setUploadProgress("");
@@ -570,17 +648,31 @@ export default function VerificationPage() {
       return;
     }
     setSaving(true);
-    const { error } = await supabase
-      .from("users")
-      .update({ cla_signed: true, terms_signed: true })
-      .eq("id", profile.id);
-    if (error) showToast(error.message, false);
-    else {
-      showToast("Agreements signed ✓");
-      loadCalledRef.current = false;
-      load();
+
+    try {
+      // ── FIX: Agreement update wrapped in timeout.
+      const { error } = await withTimeout(
+        supabase
+          .from("users")
+          .update({ cla_signed: true, terms_signed: true })
+          .eq("id", profile.id),
+        15000,
+        "Signing agreements",
+      );
+
+      if (error) showToast(error.message, false);
+      else {
+        showToast("Agreements signed ✓");
+        load();
+      }
+    } catch (err: unknown) {
+      showToast(
+        err instanceof Error ? err.message : "Failed to sign — please retry",
+        false,
+      );
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   }
 
   if (loading)
@@ -593,7 +685,6 @@ export default function VerificationPage() {
             <p className="text-slate-400 text-sm">Loading your profile...</p>
             <button
               onClick={() => {
-                loadCalledRef.current = false;
                 load();
               }}
               className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
@@ -615,7 +706,6 @@ export default function VerificationPage() {
             <p className="text-slate-300 font-bold text-sm">{loadErr}</p>
             <button
               onClick={() => {
-                loadCalledRef.current = false;
                 setLoadErr("");
                 load();
               }}
@@ -787,11 +877,19 @@ export default function VerificationPage() {
                     </p>
                     <button
                       onClick={async () => {
-                        await supabase
-                          .from("users")
-                          .update({ kyc_status: "not_started" })
-                          .eq("id", profile!.id);
-                        loadCalledRef.current = false;
+                        try {
+                          await withTimeout(
+                            supabase
+                              .from("users")
+                              .update({ kyc_status: "not_started" })
+                              .eq("id", profile!.id),
+                            10000,
+                            "Reset KYC status",
+                          );
+                        } catch (e: any) {
+                          showToast(e.message, false);
+                          return;
+                        }
                         load();
                       }}
                       className="mt-2 text-amber-400 hover:text-amber-300 text-xs underline underline-offset-2"
