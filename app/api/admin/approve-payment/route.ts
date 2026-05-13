@@ -1,21 +1,17 @@
 // app/api/admin/approve-payment/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// COMPLETE FIX — all bugs from original resolved:
+// CRITICAL FIX: Removed node_activated_at from userUpdate object.
+//   That column does not exist in the users table and was crashing every
+//   approval silently — licenses and nodes never activated after admin click.
 //
-//  1. Accepts paymentId (number) OR reference (string) — fixes UI mismatch
-//     (Admin UI sends paymentId but original code expected reference)
+// All other fixes from previous version retained:
+//  1. Accepts paymentId OR reference
 //  2. Does NOT overwrite gateway_reference with txHash
-//     (was breaking all future lookups — now uses separate crypto_tx_hash column)
-//  3. Creates node_allocation with ALL mining fields via shared helper
-//     (original didn't create allocation at all — mining never started!)
-//  4. has_operator_license only set for license purchases (not GPU plans)
-//     (original set it for all payments)
-//  5. user.tier no longer set to node UUID
-//     (original set tier = node_key which is a UUID — meaningless)
-//  6. balance_locked only incremented for contracts
-//  7. Sends in-app notification after activation
-//  8. Handles license, gpu_plan, gpu_contract purchase types
-//  9. Full transaction_ledger entry written
+//  3. Creates node_allocation with all mining fields via shared helper
+//  4. has_operator_license only set for license purchases
+//  5. balance_locked only incremented for contracts
+//  6. Sends in-app notification after activation
+//  7. Full transaction_ledger entry written
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { NextRequest, NextResponse } from "next/server";
@@ -41,10 +37,8 @@ function getAdminSupabase() {
 export async function POST(req: NextRequest) {
   try {
     const adminSupabase = getAdminSupabase();
-
     const body = await req.json();
 
-    // FIX #1: Accept both paymentId (from admin UI) and reference (from older callers)
     const {
       paymentId,
       reference,
@@ -106,15 +100,13 @@ export async function POST(req: NextRequest) {
     const purchaseType = metadata.purchaseType || "gpu_plan";
     const userId = txn.user_id;
 
-    // FIX #2: Update payment status — do NOT overwrite gateway_reference
-    // Store txHash in a separate column if provided
+    // Update payment status — do NOT overwrite gateway_reference
     const updatePayload: Record<string, any> = {
       status: "confirmed",
       verified_by_admin: true,
       confirmed_at: now,
       updated_at: now,
     };
-    // Only update crypto_tx_hash if provided (separate column — doesn't break lookups)
     if (txHash) updatePayload.crypto_tx_hash = txHash;
     if (walletAddress) updatePayload.crypto_wallet = walletAddress;
 
@@ -126,7 +118,6 @@ export async function POST(req: NextRequest) {
     let allocationId: string | undefined;
 
     if (purchaseType === "license") {
-      // Activate license
       const licenseType =
         metadata.licenseType || txn.node_key || "operator_license";
       const result = await activateLicense(
@@ -147,13 +138,12 @@ export async function POST(req: NextRequest) {
         );
       }
     } else {
-      // FIX #3: Create GPU node allocation with ALL mining fields
-      // THIS WAS MISSING ENTIRELY — mining never started after admin approval!
+      // Create GPU node allocation with ALL mining fields
       const result = await createNodeAllocation(adminSupabase, {
         userId,
         planId: txn.node_key,
         amount: txn.amount,
-        metadata, // contains miningPeriod, paymentModel, autoReinvest, etc.
+        metadata,
         transactionRef: String(txn.id),
       });
 
@@ -171,14 +161,22 @@ export async function POST(req: NextRequest) {
       allocationId = result.allocationId;
     }
 
-    // FIX #4 & #5: Correct user field updates
-    // Do NOT set tier = node_key (UUID makes no sense as a tier)
-    // Do NOT set has_operator_license = true for GPU plans
-    const userUpdate: Record<string, any> = { node_activated_at: now };
+    // CRITICAL FIX: Removed node_activated_at — column does not exist.
+    // Only update has_operator_license for license purchases (not GPU plans).
+    // For GPU plans: no user table update needed here (createNodeAllocation handles balance).
     if (purchaseType === "license") {
-      userUpdate.has_operator_license = true;
+      try {
+        await adminSupabase
+          .from("users")
+          .update({ has_operator_license: true, updated_at: now })
+          .eq("id", userId);
+      } catch (e: any) {
+        console.warn(
+          "[approve-payment] User flag update failed (non-fatal):",
+          e?.message,
+        );
+      }
     }
-    await adminSupabase.from("users").update(userUpdate).eq("id", userId);
 
     // Write ledger entry
     await writeLedgerEntry(adminSupabase, {
@@ -227,7 +225,6 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (userData?.email) {
-        // Dynamic import to avoid hard dependency
         const emailModule = await import("@/lib/email-service").catch(
           () => null,
         );

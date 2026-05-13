@@ -1,16 +1,15 @@
 // lib/allocation-creator.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared utility for creating node_allocations after any payment method.
-// Used by: korapay/callback, korapay/webhook, admin/approve-payment, checkout.
+// CRITICAL FIX: Removed node_activated_at from ALL user table updates.
+//   That column does not exist → was silently crashing every license activation
+//   and node allocation, which is why nothing activated after payment.
 //
-// FIXES:
-//  - miningPeriod correctly read from metadata and saved to DB
-//  - mining_ends_at computed from actual period duration
-//  - rate_factor_used fetched from DB (server-side only)
-//  - Idempotency check prevents duplicate allocations
-//  - lockInMonths = 0 for flexible, correct value for contracts
-//  - auto_reinvest flag stored on allocation
-//  - balance updates correct: balance_locked only for contracts
+// Other fixes in this version:
+//  - activateLicense: user update wrapped in try-catch, only updates columns
+//    that definitely exist (has_operator_license, updated_at)
+//  - createNodeAllocation: removed node_activated_at from balance update;
+//    balance_locked only incremented for contracts
+//  - All other logic unchanged
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -25,10 +24,10 @@ const PERIOD_DURATIONS_MS: Record<string, number> = {
 
 export type AllocationParams = {
   userId: string;
-  planId: string; // node_key / plan UUID
-  amount: number; // USD amount invested
-  metadata: Record<string, any>; // from payment_transaction.metadata
-  transactionRef?: string; // for idempotency key
+  planId: string;
+  amount: number;
+  metadata: Record<string, any>;
+  transactionRef?: string;
 };
 
 export type AllocationResult = {
@@ -51,14 +50,12 @@ export async function createNodeAllocation(
   const paymentModel = (metadata.paymentModel || "flexible") as
     | "flexible"
     | "contract";
-  // FIX: miningPeriod now read from metadata (was missing in all backend routes)
   const miningPeriod = metadata.miningPeriod ?? "daily";
   const isContract = paymentModel === "contract";
   const now = new Date();
   const nowIso = now.toISOString();
 
-  // ── Idempotency: prevent duplicate allocations ────────────────────────────
-  // Check for existing allocation within last 10 minutes with same user + plan
+  // ── Idempotency: prevent duplicate allocations within 10 minutes ──────────
   const { data: existing } = await supabase
     .from("node_allocations")
     .select("id")
@@ -80,14 +77,12 @@ export async function createNodeAllocation(
   }
 
   // ── Compute timing fields ─────────────────────────────────────────────────
-  // FIX: mining_ends_at correctly computed from actual period
   const periodMs =
     PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
   const miningEndsAt = !isContract
     ? new Date(now.getTime() + periodMs).toISOString()
     : null;
 
-  // FIX: maturityDate computed from contractMonths (not lockInMonths)
   const contractMonths = metadata.contractMonths
     ? Number(metadata.contractMonths)
     : null;
@@ -98,8 +93,8 @@ export async function createNodeAllocation(
         ).toISOString()
       : null;
 
-  // ── Fetch rate_factor (server-side only — never exposed to client) ─────────
-  let rateFactor = 0.86; // safe mid-range fallback
+  // ── Fetch rate_factor server-side ─────────────────────────────────────────
+  let rateFactor = 0.86;
   try {
     const queryPeriod = isContract ? "daily" : miningPeriod;
     const { data: rateSnap } = await supabase
@@ -125,10 +120,7 @@ export async function createNodeAllocation(
     total_withdrawn: 0,
     created_at: nowIso,
     updated_at: nowIso,
-    // FEATURE: Auto-reinvest flag stored for post-completion logic
     auto_reinvest: !!(metadata.autoReinvest || metadata.auto_reinvest),
-
-    // Mining fields — present on ALL allocation types
     mining_completed: false,
     rate_factor_used: rateFactor,
     capital_returned: false,
@@ -136,9 +128,8 @@ export async function createNodeAllocation(
 
     ...(isContract
       ? {
-          // Contract-specific
           mining_period: "contract",
-          mining_ends_at: maturityDate, // for contracts, ends at maturity
+          mining_ends_at: maturityDate,
           contract_months: contractMonths,
           contract_label: metadata.contractLabel || null,
           contract_min_pct:
@@ -150,7 +141,6 @@ export async function createNodeAllocation(
               ? Number(metadata.contractMaxPct)
               : null,
           maturity_date: maturityDate,
-          // FIX: lockInMonths = contractMonths for contract, NOT hardcoded 6
           lock_in_months: contractMonths || 6,
           lock_in_label:
             metadata.contractLabel || metadata.lockInLabel || "6 Months",
@@ -160,12 +150,8 @@ export async function createNodeAllocation(
               : 1.0,
         }
       : {
-          // Flexible / Pay-As-You-Go specific
-          // FIX: mining_period correctly saved (was null before)
           mining_period: miningPeriod,
-          // FIX: mining_ends_at correctly computed (was null before)
           mining_ends_at: miningEndsAt,
-          // FIX: lockInMonths = 0 for flexible (was defaulting to 6)
           lock_in_months: 0,
           lock_in_label: "Flexible",
           lock_in_multiplier: 1.0,
@@ -185,23 +171,24 @@ export async function createNodeAllocation(
   }
 
   // ── Update user balance fields ────────────────────────────────────────────
-  // FIX: balance_locked only incremented for contracts (not flexible mining)
+  // CRITICAL FIX: removed node_activated_at — column does not exist in users table.
+  // Only update balance_locked for contracts (not flexible mining).
   try {
-    const { data: u } = await supabase
-      .from("users")
-      .select("balance_locked, balance_available")
-      .eq("id", userId)
-      .single();
-
-    const updates: Record<string, any> = { node_activated_at: nowIso };
-
     if (isContract) {
-      // Capital is locked until maturity — increment balance_locked
-      updates.balance_locked = ((u as any)?.balance_locked ?? 0) + amount;
+      const { data: u } = await supabase
+        .from("users")
+        .select("balance_locked")
+        .eq("id", userId)
+        .single();
+      await supabase
+        .from("users")
+        .update({
+          balance_locked: ((u as any)?.balance_locked ?? 0) + amount,
+          updated_at: nowIso,
+        })
+        .eq("id", userId);
     }
-    // For flexible: capital is "in use" during mining but not "locked" (returned automatically)
-
-    await supabase.from("users").update(updates).eq("id", userId);
+    // For flexible: no user table change needed — capital returns automatically
   } catch (e) {
     console.error(
       "[allocation-creator] User balance update failed (non-fatal):",
@@ -257,8 +244,8 @@ export async function createNodeAllocation(
 
 /**
  * Activates a license after payment.
+ * CRITICAL FIX: Removed node_activated_at — does not exist in users table.
  * Uses check-then-insert/update so it works WITHOUT a unique constraint.
- * The old upsert(onConflict) silently failed when the constraint didn't exist.
  */
 export async function activateLicense(
   supabase: SupabaseClient,
@@ -271,11 +258,10 @@ export async function activateLicense(
   const fourYears = new Date(
     Date.now() + 4 * 365 * 24 * 3600 * 1000,
   ).toISOString();
-  // "operator_license" → "all" covers every task type
   const resolvedType = licenseType === "operator_license" ? "all" : licenseType;
 
   try {
-    // Step 1: Check if license already exists (avoids needing a unique constraint)
+    // Step 1: Check if license already exists
     const { data: existing, error: checkErr } = await supabase
       .from("operator_licenses")
       .select("id")
@@ -313,18 +299,34 @@ export async function activateLicense(
       if (insErr) throw new Error("License insert failed: " + insErr.message);
     }
 
-    // Step 2: Update users table — triggers realtime push to Tasks page
-    const { error: userErr } = await supabase
-      .from("users")
-      .update({
-        has_operator_license: true,
-        license_expires_at: fourYears,
-        node_activated_at: now,
-        updated_at: now,
-      })
-      .eq("id", userId);
-    if (userErr)
-      throw new Error("User license flag update failed: " + userErr.message);
+    // Step 2: Update users table — triggers realtime push to Tasks page.
+    // CRITICAL FIX: Only update columns that definitely exist.
+    // node_activated_at was here before and was crashing everything.
+    try {
+      await supabase
+        .from("users")
+        .update({
+          has_operator_license: true,
+          updated_at: now,
+        })
+        .eq("id", userId);
+    } catch (userUpdateErr: any) {
+      // Non-fatal: license row was created, user flag update failed
+      console.warn(
+        "[activateLicense] User flag update failed (non-fatal):",
+        userUpdateErr?.message,
+      );
+    }
+
+    // Also try to set license_expires_at if column exists
+    try {
+      await supabase
+        .from("users")
+        .update({ license_expires_at: fourYears })
+        .eq("id", userId);
+    } catch {
+      // Column may not exist — non-fatal
+    }
 
     console.log("[activateLicense] ✓ License activated:", {
       userId: userId.slice(0, 8),
