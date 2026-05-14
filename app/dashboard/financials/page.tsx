@@ -1,17 +1,18 @@
 "use client";
-// app/dashboard/financials/page.tsx — FINAL FIXED VERSION
+// app/dashboard/financials/page.tsx
 // ─────────────────────────────────────────────────────────────────────────────
-// BUG #3 FIX: GPU mining deposits now visible in Finance — queries node_allocations
-//             AND payment_transactions, merged into a unified deposits view
-// BUG #4 FIX: Profile query now fetches ALL payout fields — WithdrawModal
-//             no longer shows "No payout account" incorrectly
-// BUG #5 FIX: Mining Portfolio tab joins gpu_plans to show plan names not UUIDs
-// BUG #6 FIX: payment_transactions with gateway="gpu_mining" shown as confirmed
-// BUG #9 FIX: Per-second display hidden for amounts < $1 minimum (shows $0.00/s
-//             label instead of confusing micro-amounts)
-// BUG #10 FIX: Withdraw button and alerts use clearer language
-// SYNTAX FIX: Missing `if (loading) return (` before loading spinner JSX
-// CRYPTO FIX: gateway="crypto" with purchaseType="gpu_plan" now treated as GPU deposit
+// KEY FIX: Crypto GPU payments now correctly show as "pending" until admin
+// approves them. Previously ALL GPU payments were forced to "confirmed" status
+// regardless of actual DB value — causing pending crypto payments to falsely
+// appear as confirmed in the deposits list.
+//
+// ROOT CAUSE WAS:
+//   status: isGpuPayment && pt.status !== "failed" ? "confirmed" : ...
+//   ↑ This ignored the real status for any GPU payment that wasn't "failed"
+//
+// FIX:
+//   status: pt.status === "confirmed" ... ? "confirmed" : pt.status === "failed" ... ? "failed" : "pending"
+//   ↑ Always reads the real DB status
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback } from "react";
@@ -174,7 +175,7 @@ type Withdrawal = {
 
 type DepositEntry = {
   id: string;
-  type: "payment" | "gpu_mining" | "gpu_contract";
+  type: "payment" | "gpu_mining" | "gpu_contract" | "license";
   label: string;
   amount: number;
   status: "confirmed" | "pending" | "failed";
@@ -191,12 +192,14 @@ function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     confirmed: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
     confmrmed: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
+    completed: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
     active: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
     queued: "bg-blue-900/30 border-blue-700/40 text-blue-400",
     processing: "bg-violet-900/30 border-violet-700/40 text-violet-400",
     paid: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
     pending: "bg-amber-900/30 border-amber-700/40 text-amber-400",
     failed: "bg-red-900/30 border-red-700/40 text-red-400",
+    declined: "bg-red-900/30 border-red-700/40 text-red-400",
     rejected: "bg-red-900/30 border-red-700/40 text-red-400",
     expired: "bg-slate-800 border-slate-700 text-slate-400",
     flagged: "bg-orange-900/30 border-orange-700/40 text-orange-400",
@@ -247,7 +250,7 @@ function GatewayBadge({ gateway }: { gateway: string }) {
         ₿ Crypto
       </span>
     );
-  if (gateway === "bank_transfer")
+  if (gateway === "bank_transfer" || gateway === "korapay")
     return (
       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-900/30 border border-blue-700/40 text-blue-400">
         🏦 Bank Transfer
@@ -478,7 +481,6 @@ function WithdrawModal({
               </p>
               <p className="text-red-400/70 text-xs mt-1">
                 Complete identity verification in the Verification section.
-                Mining continues unaffected.
               </p>
             </div>
           )}
@@ -880,10 +882,10 @@ export default function FinancialsPage() {
     loadData();
   }, [loadData]);
 
+  // Realtime
   useEffect(() => {
     if (!userId) return;
-
-    const financeChannel = supabase
+    const ch = supabase
       .channel("finance_realtime")
       .on(
         "postgres_changes",
@@ -893,9 +895,7 @@ export default function FinancialsPage() {
           table: "payment_transactions",
           filter: `user_id=eq.${userId}`,
         },
-        () => {
-          loadData();
-        },
+        () => loadData(),
       )
       .on(
         "postgres_changes",
@@ -905,9 +905,7 @@ export default function FinancialsPage() {
           table: "payment_transactions",
           filter: `user_id=eq.${userId}`,
         },
-        () => {
-          loadData();
-        },
+        () => loadData(),
       )
       .on(
         "postgres_changes",
@@ -917,9 +915,7 @@ export default function FinancialsPage() {
           table: "node_allocations",
           filter: `user_id=eq.${userId}`,
         },
-        () => {
-          loadData();
-        },
+        () => loadData(),
       )
       .on(
         "postgres_changes",
@@ -945,13 +941,11 @@ export default function FinancialsPage() {
         },
       )
       .subscribe();
-
     return () => {
-      supabase.removeChannel(financeChannel);
+      supabase.removeChannel(ch);
     };
   }, [userId, loadData]);
 
-  // ── SYNTAX FIX: `if (loading) return (` was missing — caused parse error at line 589 ──
   if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -1005,7 +999,9 @@ export default function FinancialsPage() {
   const effectiveAvail = avail + unclaimedTotal;
   const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
 
-  // ── CRYPTO FIX: explicit GPU payment detection covering gateway="crypto" ──
+  // ─── DEPOSIT ENTRIES ──────────────────────────────────────────────────────
+  // KEY FIX: Status is now read directly from the DB — never overridden.
+  // Pending crypto payments stay "pending" until admin confirms them.
   const depositEntries: DepositEntry[] = [];
 
   for (const pt of paymentTxs) {
@@ -1019,36 +1015,44 @@ export default function FinancialsPage() {
 
     const isGpuPayment =
       pt.gateway === "gpu_mining" ||
-      pt.gateway === "crypto_wallet" ||
       meta.purchaseType === "gpu_plan" ||
       meta.purchaseType === "gpu_contract" ||
-      meta.purchaseType === "gpu_mining" ||
-      (pt.gateway === "crypto" &&
-        (meta.purchaseType === "gpu_plan" ||
-          meta.purchaseType === "gpu_contract" ||
-          meta.purchaseType === "gpu_mining"));
+      meta.purchaseType === "gpu_mining";
+
+    const isLicensePayment = meta.purchaseType === "license";
+
+    const isCryptoPayment =
+      pt.gateway === "crypto" || pt.gateway === "crypto_wallet";
+
+    // FIX: Always use real DB status — never force "confirmed"
+    // Crypto GPU payments start as "pending" and only become "confirmed" after admin approval
+    const resolvedStatus: "confirmed" | "pending" | "failed" =
+      pt.status === "confirmed" ||
+      pt.status === "confmrmed" ||
+      pt.status === "completed"
+        ? "confirmed"
+        : pt.status === "failed" ||
+            pt.status === "declined" ||
+            pt.status === "rejected"
+          ? "failed"
+          : "pending"; // pending = waiting for admin approval (crypto) or processing
 
     depositEntries.push({
       id: `pt-${pt.id}`,
-      type: isGpuPayment
-        ? meta.purchaseType === "gpu_contract"
-          ? "gpu_contract"
-          : "gpu_mining"
-        : "payment",
-      label: isGpuPayment
-        ? `GPU Mining Deposit${meta.planName ? ` — ${meta.planName}` : ""}`
-        : meta.purchaseType === "license"
-          ? "Operator License"
+      type: isLicensePayment
+        ? "license"
+        : isGpuPayment
+          ? meta.purchaseType === "gpu_contract"
+            ? "gpu_contract"
+            : "gpu_mining"
+          : "payment",
+      label: isLicensePayment
+        ? `Operator License${meta.licenseType ? ` — ${LICENSE_LABELS[meta.licenseType] ?? meta.licenseType}` : ""}`
+        : isGpuPayment
+          ? `GPU Mining Deposit${meta.planName ? ` — ${meta.planName}` : ""}`
           : "Payment",
       amount: pt.amount,
-      status:
-        isGpuPayment && pt.status !== "failed"
-          ? "confirmed"
-          : pt.status === "confirmed" || pt.status === "confmrmed"
-            ? "confirmed"
-            : pt.status === "failed"
-              ? "failed"
-              : "pending",
+      status: resolvedStatus,
       gateway: pt.gateway,
       planName: meta.planName,
       miningPeriod: meta.miningPeriod,
@@ -1057,19 +1061,19 @@ export default function FinancialsPage() {
     });
   }
 
+  // Add node_allocations that don't have a matching payment_transactions row
   const ptReferences = new Set(
     paymentTxs.map((pt) => pt.gateway_reference).filter(Boolean),
   );
   for (const alloc of nodeAllocations) {
     if (ptReferences.has(alloc.id)) continue;
-
     const plan = gpuPlans[alloc.plan_id];
     depositEntries.push({
       id: `alloc-${alloc.id}`,
       type: alloc.payment_model === "contract" ? "gpu_contract" : "gpu_mining",
       label: `GPU Mining Deposit${plan ? ` — ${plan.name}` : ""}`,
       amount: alloc.amount_invested,
-      status: "confirmed",
+      status: "confirmed", // node_allocations only exist if payment was confirmed
       gateway: "gpu_mining",
       planName: plan?.name,
       gpuModel: plan?.gpu_model,
@@ -1087,7 +1091,13 @@ export default function FinancialsPage() {
   const confirmedDeposits = depositEntries.filter(
     (d) => d.status === "confirmed",
   );
+  const pendingDeposits = depositEntries.filter((d) => d.status === "pending");
   const totalDeposited = confirmedDeposits.reduce((s, d) => s + d.amount, 0);
+  const totalPendingDeposits = pendingDeposits.reduce(
+    (s, d) => s + d.amount,
+    0,
+  );
+
   const canWithdraw =
     !isFrozen && effectiveAvail >= 10 && !!profile?.payout_registered && kycOk;
 
@@ -1193,6 +1203,21 @@ export default function FinancialsPage() {
             </div>
           )}
 
+          {/* Pending crypto deposits banner */}
+          {pendingDeposits.length > 0 && (
+            <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3 flex items-center gap-3">
+              <Clock size={14} className="text-amber-400 shrink-0" />
+              <p className="text-amber-300 text-sm">
+                <strong>
+                  {pendingDeposits.length} payment
+                  {pendingDeposits.length > 1 ? "s" : ""} pending admin approval
+                </strong>{" "}
+                — ${totalPendingDeposits.toFixed(2)} total. GPU mining starts
+                once admin confirms your crypto payment.
+              </p>
+            </div>
+          )}
+
           {unclaimedMatured.length > 0 && (
             <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -1203,7 +1228,7 @@ export default function FinancialsPage() {
                     {unclaimedMatured.length > 1 ? "s" : ""} completed
                   </strong>{" "}
                   — ${unclaimedTotal.toFixed(2)} (capital + earnings) pending
-                  credit to your wallet.
+                  credit.
                 </p>
               </div>
               <button
@@ -1273,7 +1298,7 @@ export default function FinancialsPage() {
               sub={`${activeNodes.length} active`}
             />
             <StatBox
-              label="Total Deposited"
+              label="Confirmed Deposits"
               value={`$${totalDeposited.toFixed(2)}`}
               color="text-cyan-400"
               icon={CreditCard}
@@ -1300,6 +1325,11 @@ export default function FinancialsPage() {
                 {id === "withdrawals" && pendingWDs.length > 0 && (
                   <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 text-blue-400">
                     {pendingWDs.length}
+                  </span>
+                )}
+                {id === "deposits" && pendingDeposits.length > 0 && (
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/30 text-amber-400">
+                    {pendingDeposits.length}
                   </span>
                 )}
               </button>
@@ -1376,7 +1406,7 @@ export default function FinancialsPage() {
                     </span>{" "}
                     available.{" "}
                     {!kycOk
-                      ? "Complete KYC to enable withdrawals (mining is unaffected)."
+                      ? "Complete KYC to enable withdrawals."
                       : !profile?.payout_registered
                         ? "Set up your payout account first."
                         : avail < 10
@@ -1516,33 +1546,37 @@ export default function FinancialsPage() {
           {/* ── DEPOSITS TAB ── */}
           {tab === "deposits" && (
             <div className="space-y-4">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-2">
                 <p className="text-white font-bold">
                   {depositEntries.length} total deposits
                 </p>
-                <p className="text-emerald-400 text-xs font-bold">
-                  ${totalDeposited.toFixed(2)} confirmed
-                </p>
+                <div className="flex gap-3 text-xs">
+                  <span className="text-emerald-400 font-bold">
+                    ${totalDeposited.toFixed(2)} confirmed
+                  </span>
+                  {totalPendingDeposits > 0 && (
+                    <span className="text-amber-400 font-bold">
+                      ${totalPendingDeposits.toFixed(2)} pending
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
                   <p className="text-slate-500 text-[10px] uppercase">
-                    GPU Mining
+                    Confirmed
                   </p>
                   <p className="text-emerald-400 font-black text-base">
-                    {
-                      depositEntries.filter(
-                        (d) =>
-                          d.type === "gpu_mining" || d.type === "gpu_contract",
-                      ).length
-                    }
+                    {confirmedDeposits.length}
                   </p>
                 </div>
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">Other</p>
-                  <p className="text-cyan-400 font-black text-base">
-                    {depositEntries.filter((d) => d.type === "payment").length}
+                  <p className="text-slate-500 text-[10px] uppercase">
+                    Pending
+                  </p>
+                  <p className="text-amber-400 font-black text-base">
+                    {pendingDeposits.length}
                   </p>
                 </div>
                 <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
@@ -1592,15 +1626,22 @@ export default function FinancialsPage() {
                               </p>
                               <GatewayBadge gateway={dep.gateway} />
                               <StatusBadge status={dep.status} />
-                            </div>
-                            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                              {dep.miningPeriod && dep.type !== "payment" && (
-                                <span className="text-[10px] text-emerald-400/70">
-                                  {PERIOD_LABELS[dep.miningPeriod] ??
-                                    dep.miningPeriod}{" "}
-                                  session
+                              {dep.status === "pending" && (
+                                <span className="text-[10px] text-amber-400/70">
+                                  Awaiting admin approval
                                 </span>
                               )}
+                            </div>
+                            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                              {dep.miningPeriod &&
+                                dep.type !== "payment" &&
+                                dep.type !== "license" && (
+                                  <span className="text-[10px] text-emerald-400/70">
+                                    {PERIOD_LABELS[dep.miningPeriod] ??
+                                      dep.miningPeriod}{" "}
+                                    session
+                                  </span>
+                                )}
                               <span className="text-slate-500 text-[10px]">
                                 {new Date(dep.created_at).toLocaleString()}
                               </span>
@@ -1627,39 +1668,46 @@ export default function FinancialsPage() {
                         {isOpen && (
                           <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/20">
                             <div className="bg-slate-800/40 rounded-xl p-3 space-y-1.5 text-xs mt-3">
-                              {[
-                                ["Type", dep.type.replace(/_/g, " ")],
-                                ["Amount", `$${dep.amount.toFixed(2)} USD`],
-                                ["Status", dep.status],
-                                ["Gateway", dep.gateway],
-                                ...(dep.planName
-                                  ? [["Plan", dep.planName]]
-                                  : []),
-                                ...(dep.gpuModel
-                                  ? [["GPU", dep.gpuModel]]
-                                  : []),
-                                ...(dep.miningPeriod
-                                  ? [
-                                      [
-                                        "Session Duration",
-                                        PERIOD_LABELS[dep.miningPeriod] ??
-                                          dep.miningPeriod,
-                                      ],
-                                    ]
-                                  : []),
-                                ...(dep.reference
-                                  ? [
-                                      [
-                                        "Reference ID",
-                                        dep.reference.slice(0, 20) + "...",
-                                      ],
-                                    ]
-                                  : []),
+                              {(
                                 [
-                                  "Date",
-                                  new Date(dep.created_at).toLocaleString(),
-                                ],
-                              ].map(([l, v]) => (
+                                  ["Type", dep.type.replace(/_/g, " ")],
+                                  ["Amount", `$${dep.amount.toFixed(2)} USD`],
+                                  [
+                                    "Status",
+                                    dep.status === "pending"
+                                      ? "Pending admin approval"
+                                      : dep.status,
+                                  ],
+                                  ["Gateway", dep.gateway],
+                                  ...(dep.planName
+                                    ? [["Plan", dep.planName]]
+                                    : []),
+                                  ...(dep.gpuModel
+                                    ? [["GPU", dep.gpuModel]]
+                                    : []),
+                                  ...(dep.miningPeriod
+                                    ? [
+                                        [
+                                          "Session Duration",
+                                          PERIOD_LABELS[dep.miningPeriod] ??
+                                            dep.miningPeriod,
+                                        ],
+                                      ]
+                                    : []),
+                                  ...(dep.reference
+                                    ? [
+                                        [
+                                          "Reference ID",
+                                          dep.reference.slice(0, 20) + "...",
+                                        ],
+                                      ]
+                                    : []),
+                                  [
+                                    "Date",
+                                    new Date(dep.created_at).toLocaleString(),
+                                  ],
+                                ] as [string, string][]
+                              ).map(([l, v]) => (
                                 <div
                                   key={l}
                                   className="flex justify-between gap-4"
@@ -1694,7 +1742,6 @@ export default function FinancialsPage() {
                   ${totalInvested.toFixed(2)} total committed
                 </p>
               </div>
-
               {nodeAllocations.length === 0 ? (
                 <div className="text-center py-14 border border-dashed border-slate-800 rounded-2xl text-slate-500">
                   <Cpu size={28} className="mx-auto mb-2 opacity-30" />
@@ -1754,7 +1801,7 @@ export default function FinancialsPage() {
                                   />
                                   {!isComplete && (
                                     <span className="text-[10px] text-emerald-400 font-bold flex items-center gap-1">
-                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />{" "}
                                       LIVE
                                     </span>
                                   )}
@@ -1795,50 +1842,52 @@ export default function FinancialsPage() {
                         {isOpen && (
                           <div className="px-4 pb-4 border-t border-slate-800 bg-slate-900/20">
                             <div className="bg-slate-800/40 rounded-xl p-3 space-y-1.5 text-xs mt-3">
-                              {[
-                                ["Plan", planName],
-                                ["GPU", gpuModel || "—"],
+                              {(
                                 [
-                                  "Capital Staked",
-                                  `$${node.amount_invested.toFixed(2)}`,
-                                ],
-                                [
-                                  "Coins Mined",
-                                  `$${(node.total_earned ?? 0).toFixed(6)}`,
-                                ],
-                                [
-                                  "Payment Model",
-                                  isContract
-                                    ? `Contract — ${node.contract_label ?? ""}`
-                                    : "Pay-As-You-Go",
-                                ],
-                                [
-                                  "Session Duration",
-                                  PERIOD_LABELS[period] ?? period,
-                                ],
-                                [
-                                  "Status",
-                                  isComplete ? "Complete ✓" : "Active ⛏️",
-                                ],
-                                ...(endsAt && !isContract
-                                  ? [["Ends At", endsAt.toLocaleString()]]
-                                  : []),
-                                ...(maturesAt && isContract
-                                  ? [["Matures", maturesAt.toLocaleString()]]
-                                  : []),
-                                [
-                                  "Started",
-                                  new Date(node.created_at).toLocaleString(),
-                                ],
-                                ...(node.final_profit != null
-                                  ? [
-                                      [
-                                        "Final Profit",
-                                        `$${node.final_profit.toFixed(6)}`,
-                                      ],
-                                    ]
-                                  : []),
-                              ].map(([l, v]) => (
+                                  ["Plan", planName],
+                                  ["GPU", gpuModel || "—"],
+                                  [
+                                    "Capital Staked",
+                                    `$${node.amount_invested.toFixed(2)}`,
+                                  ],
+                                  [
+                                    "Coins Mined",
+                                    `$${(node.total_earned ?? 0).toFixed(6)}`,
+                                  ],
+                                  [
+                                    "Payment Model",
+                                    isContract
+                                      ? `Contract — ${node.contract_label ?? ""}`
+                                      : "Pay-As-You-Go",
+                                  ],
+                                  [
+                                    "Session Duration",
+                                    PERIOD_LABELS[period] ?? period,
+                                  ],
+                                  [
+                                    "Status",
+                                    isComplete ? "Complete ✓" : "Active ⛏️",
+                                  ],
+                                  ...(endsAt && !isContract
+                                    ? [["Ends At", endsAt.toLocaleString()]]
+                                    : []),
+                                  ...(maturesAt && isContract
+                                    ? [["Matures", maturesAt.toLocaleString()]]
+                                    : []),
+                                  [
+                                    "Started",
+                                    new Date(node.created_at).toLocaleString(),
+                                  ],
+                                  ...(node.final_profit != null
+                                    ? [
+                                        [
+                                          "Final Profit",
+                                          `$${node.final_profit.toFixed(6)}`,
+                                        ],
+                                      ]
+                                    : []),
+                                ] as [string, string][]
+                              ).map(([l, v]) => (
                                 <div
                                   key={l}
                                   className="flex justify-between gap-4"
@@ -1904,7 +1953,7 @@ export default function FinancialsPage() {
                 {isFrozen
                   ? "Withdrawals Frozen"
                   : !kycOk
-                    ? "KYC Verification Required (Mining still active)"
+                    ? "KYC Verification Required"
                     : !profile?.payout_registered
                       ? "Setup Payout Account First"
                       : avail < 10

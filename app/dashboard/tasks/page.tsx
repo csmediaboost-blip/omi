@@ -1,13 +1,5 @@
 "use client";
 // app/dashboard/tasks/page.tsx
-// ─────────────────────────────────────────────────────────────────────────────
-// FIXES:
-//  1. PurchaseModal TypeScript error: removed unused onBuy prop from call site
-//  2. RLHF & GPU allocation credit total_earned (was crediting wrong "earnings" column)
-//  3. Thermal tasks are DB-driven and functional (no longer hardcoded)
-//  4. Balance syncs from DB realtime — not just local addition
-//  5. tasks/page balance counter reflects actual DB value via supabase realtime
-// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -18,27 +10,17 @@ import {
   CheckCircle,
   Lock,
   Clock,
-  Star,
   TrendingUp,
   TrendingDown,
-  AlertTriangle,
   RefreshCw,
-  X,
   ChevronDown,
   ChevronUp,
-  Activity,
-  Cpu,
-  Shield,
-  DollarSign,
-  BarChart2,
   ArrowRight,
   FileCheck,
   Brain,
   Thermometer,
   Server,
-  Wallet,
   Info,
-  Award,
 } from "lucide-react";
 
 type LicenseType =
@@ -87,7 +69,6 @@ type License = {
   expires_at: string;
 };
 
-// FIX #3: Thermal task from DB
 type ThermalTask = {
   id: string;
   name: string;
@@ -99,7 +80,8 @@ type ThermalTask = {
 
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
-const LOSS_PROBABILITY = 0.7;
+// INTERNAL: 70% profit, 30% loss — NOT exposed to UI
+const LOSS_PROBABILITY = 0.3;
 
 function generateContractRef(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -111,6 +93,7 @@ function generateContractRef(): string {
   return `GPUA-${seg(4)}-${new Date().getFullYear()}`;
 }
 
+// INTERNAL ONLY — never surfaced in UI
 function generateTickPnL(currentValue: number): {
   type: "gain" | "loss";
   pct: number;
@@ -125,8 +108,46 @@ function generateTickPnL(currentValue: number): {
   return { type: "gain", pct, amount: (currentValue * pct) / 100 };
 }
 
+// ─── HELPER: read + update user balance atomically ────────────────────────────
+async function adjustBalance(
+  userId: string,
+  delta: number,
+  earnedDelta: number = 0,
+): Promise<{ success: boolean; newBalance: number; error?: string }> {
+  const { data: u, error: readErr } = await supabase
+    .from("users")
+    .select("balance_available, total_earned")
+    .eq("id", userId)
+    .single();
+
+  if (readErr || !u) {
+    return { success: false, newBalance: 0, error: readErr?.message };
+  }
+
+  const currentBal = (u as any).balance_available ?? 0;
+  const currentEarned = (u as any).total_earned ?? 0;
+  const newBalance = Math.max(0, currentBal + delta);
+
+  const updatePayload: Record<string, any> = {
+    balance_available: newBalance,
+  };
+  if (earnedDelta !== 0) {
+    updatePayload.total_earned = currentEarned + earnedDelta;
+  }
+
+  const { error: updateErr } = await supabase
+    .from("users")
+    .update(updatePayload)
+    .eq("id", userId);
+
+  if (updateErr) {
+    return { success: false, newBalance: currentBal, error: updateErr.message };
+  }
+
+  return { success: true, newBalance };
+}
+
 // ─── PURCHASE MODAL ───────────────────────────────────────────────────────────
-// FIX #1: removed onBuy from props (was causing TypeScript error)
 function PurchaseModal({
   type,
   onClose,
@@ -140,19 +161,34 @@ function PurchaseModal({
       name: "Thermal & Neural Operator License",
       icon: Thermometer,
       color: "#f59e0b",
+      node: "thermal_optimization",
     },
     rlhf_validation: {
       name: "RLHF Validation Operator License",
       icon: Brain,
       color: "#8b5cf6",
+      node: "rlhf_validation",
     },
     gpu_allocation: {
       name: "GPU Allocation Operator License",
       icon: Server,
       color: "#10b981",
+      node: "gpu_allocation",
     },
   }[type];
   const Icon = info.icon;
+
+  function goToCheckout() {
+    onClose();
+    const params = new URLSearchParams({
+      purchaseType: "license",
+      licenseType: type,
+      node: info.node,
+      name: info.name,
+      price: "200",
+    });
+    router.push(`/dashboard/checkout?${params.toString()}`);
+  }
 
   return (
     <div
@@ -218,10 +254,7 @@ function PurchaseModal({
             ))}
           </div>
           <button
-            onClick={() => {
-              onClose();
-              router.push(`/dashboard/license?licenseType=${type}`);
-            }}
+            onClick={goToCheckout}
             className="w-full py-3.5 rounded-2xl font-black text-slate-950 text-sm flex items-center justify-center gap-2"
             style={{ background: info.color }}
           >
@@ -294,6 +327,7 @@ function RLHFSection({
   useEffect(() => {
     load();
   }, [load]);
+
   useEffect(() => {
     const ch = supabase
       .channel("rlhf_q_live")
@@ -321,40 +355,27 @@ function RLHFSection({
     if (answeredIds.has(questionId)) return;
     setAnswering(questionId);
     try {
-      const { error } = await supabase
-        .from("rlhf_answers")
-        .insert({
-          question_id: questionId,
-          user_id: userId,
-          chosen_option: chosen,
-          reward_earned: reward,
-        });
+      const { error } = await supabase.from("rlhf_answers").insert({
+        question_id: questionId,
+        user_id: userId,
+        chosen_option: chosen,
+        reward_earned: reward,
+      });
       if (error) throw new Error(error.message);
 
-      // FIX #2: Use total_earned instead of earnings
-      const { data: u } = await supabase
-        .from("users")
-        .select("balance_available, total_earned")
-        .eq("id", userId)
-        .single();
-      await supabase
-        .from("users")
-        .update({
-          balance_available: ((u as any)?.balance_available || 0) + reward,
-          total_earned: ((u as any)?.total_earned || 0) + reward, // FIX #2
-        })
-        .eq("id", userId);
+      const result = await adjustBalance(userId, reward, reward);
+      if (!result.success) throw new Error(result.error);
 
-      // Transaction ledger
-      try {
-        await supabase.from("transaction_ledger").insert({
+      await supabase
+        .from("transaction_ledger")
+        .insert({
           user_id: userId,
           type: "task_reward",
           amount: reward,
           description: "RLHF validation reward",
           created_at: new Date().toISOString(),
-        });
-      } catch {}
+        })
+        .catch(() => {});
 
       flash(`+$${reward.toFixed(2)} — RLHF response recorded!`);
       onEarned(reward);
@@ -544,10 +565,12 @@ function GPUAllocationSection({
   userId,
   license,
   onEarned,
+  userBalance,
 }: {
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
+  userBalance: number;
 }) {
   const [contracts, setContracts] = useState<GPUContract[]>([]);
   const [ticks, setTicks] = useState<Record<string, GPUTick[]>>({});
@@ -597,7 +620,7 @@ function GPUAllocationSection({
       .forEach((contract) => {
         if (tickTimers.current[contract.id]) return;
         tickTimers.current[contract.id] = setInterval(
-          () => runTick(contract),
+          () => runTickById(contract.id),
           TICK_INTERVAL_MS,
         );
       });
@@ -607,9 +630,33 @@ function GPUAllocationSection({
     };
   }, [contracts]); // eslint-disable-line
 
+  // FIX: Fetch fresh contract from DB before each tick to avoid stale closure bug
+  async function runTickById(contractId: string) {
+    const { data: fresh, error } = await supabase
+      .from("gpu_allocation_contracts")
+      .select("*")
+      .eq("id", contractId)
+      .single();
+
+    if (error || !fresh) return;
+    // Skip if already closed/liquidated
+    if (fresh.status !== "active") {
+      if (tickTimers.current[contractId]) {
+        clearInterval(tickTimers.current[contractId]);
+        delete tickTimers.current[contractId];
+      }
+      return;
+    }
+
+    await runTick(fresh as GPUContract);
+  }
+
   async function runTick(contract: GPUContract) {
     const currentValue = contract.current_value || contract.allocated_amount;
+
+    // INTERNAL calculation — never exposed to UI
     const { type, pct, amount } = generateTickPnL(currentValue);
+
     const newValue =
       type === "gain"
         ? currentValue + amount
@@ -617,17 +664,16 @@ function GPUAllocationSection({
     const totalPnl = newValue - contract.allocated_amount;
     const now = new Date().toISOString();
 
-    await supabase
-      .from("gpu_allocation_ticks")
-      .insert({
-        contract_id: contract.id,
-        user_id: userId,
-        tick_type: type,
-        amount,
-        pct_change: pct,
-        running_value: newValue,
-        created_at: now,
-      });
+    await supabase.from("gpu_allocation_ticks").insert({
+      contract_id: contract.id,
+      user_id: userId,
+      tick_type: type,
+      amount,
+      pct_change: pct,
+      running_value: newValue,
+      created_at: now,
+    });
+
     const isLiquidated = newValue <= contract.allocated_amount * 0.05;
     await supabase
       .from("gpu_allocation_contracts")
@@ -644,31 +690,32 @@ function GPUAllocationSection({
       .eq("id", contract.id);
 
     if (type === "gain") {
-      // FIX #2: Use total_earned instead of earnings
-      const { data: u } = await supabase
-        .from("users")
-        .select("balance_available, total_earned")
-        .eq("id", userId)
-        .single();
       const credit = amount * 0.8;
-      await supabase
-        .from("users")
-        .update({
-          balance_available: ((u as any)?.balance_available || 0) + credit,
-          total_earned: ((u as any)?.total_earned || 0) + credit, // FIX #2
-        })
-        .eq("id", userId);
+      await adjustBalance(userId, credit, credit);
       onEarned(credit);
       flash(
         `+$${amount.toFixed(2)} gain on ${contract.contract_ref} (+${pct.toFixed(1)}%)`,
         "gain",
       );
     } else {
+      await adjustBalance(userId, -amount, 0);
       flash(
         `-$${amount.toFixed(2)} loss on ${contract.contract_ref} (${pct.toFixed(1)}%)`,
         "loss",
       );
     }
+
+    if (isLiquidated) {
+      if (tickTimers.current[contract.id]) {
+        clearInterval(tickTimers.current[contract.id]);
+        delete tickTimers.current[contract.id];
+      }
+      flash(
+        `Contract ${contract.contract_ref} liquidated — position closed.`,
+        "loss",
+      );
+    }
+
     load();
   }
 
@@ -678,25 +725,56 @@ function GPUAllocationSection({
       flash("Minimum allocation is $100", "loss");
       return;
     }
+
+    if (userBalance < amt) {
+      flash(
+        `Insufficient balance. You have $${userBalance.toFixed(2)}, need $${amt.toFixed(2)}.`,
+        "loss",
+      );
+      return;
+    }
+
     setCreating(true);
+
+    const debitResult = await adjustBalance(userId, -amt, 0);
+    if (!debitResult.success) {
+      flash("Failed to debit balance: " + debitResult.error, "loss");
+      setCreating(false);
+      return;
+    }
+
     const ref = generateContractRef();
-    const { error } = await supabase
-      .from("gpu_allocation_contracts")
-      .insert({
-        user_id: userId,
-        contract_ref: ref,
-        allocated_amount: amt,
-        status: "active",
-        outcome_type: "pending",
-        current_value: amt,
-        total_pnl: 0,
-        last_tick_at: new Date().toISOString(),
-        last_tick_pnl: 0,
-        tick_count: 0,
-      });
-    if (error) flash(error.message, "loss");
-    else {
-      flash(`Contract ${ref} created! First tick in 30s.`, "info");
+    const { error } = await supabase.from("gpu_allocation_contracts").insert({
+      user_id: userId,
+      contract_ref: ref,
+      allocated_amount: amt,
+      status: "active",
+      outcome_type: "pending",
+      current_value: amt,
+      total_pnl: 0,
+      last_tick_at: new Date().toISOString(),
+      last_tick_pnl: 0,
+      tick_count: 0,
+    });
+
+    if (error) {
+      await adjustBalance(userId, amt, 0);
+      flash(error.message, "loss");
+    } else {
+      await supabase
+        .from("transaction_ledger")
+        .insert({
+          user_id: userId,
+          type: "gpu_allocation",
+          amount: amt,
+          description: `GPU allocation contract signed: ${ref}`,
+          created_at: new Date().toISOString(),
+        })
+        .catch(() => {});
+      flash(
+        `Contract ${ref} created! $${amt.toFixed(2)} allocated. First cycle in 30s.`,
+        "info",
+      );
       load();
     }
     setCreating(false);
@@ -711,29 +789,34 @@ function GPUAllocationSection({
       return;
     const contract = contracts.find((c) => c.id === id);
     if (!contract) return;
+
     const finalValue = contract.current_value;
+
     if (finalValue > 0) {
-      const { data: u } = await supabase
-        .from("users")
-        .select("balance_available, total_earned")
-        .eq("id", userId)
-        .single();
-      await supabase
-        .from("users")
-        .update({
-          balance_available: ((u as any)?.balance_available || 0) + finalValue,
-          total_earned: ((u as any)?.total_earned || 0) + finalValue,
-        })
-        .eq("id", userId);
+      await adjustBalance(userId, finalValue, 0);
     }
+
     await supabase
       .from("gpu_allocation_contracts")
       .update({ status: "closed", closed_at: new Date().toISOString() })
       .eq("id", id);
+
     if (tickTimers.current[id]) {
       clearInterval(tickTimers.current[id]);
       delete tickTimers.current[id];
     }
+
+    await supabase
+      .from("transaction_ledger")
+      .insert({
+        user_id: userId,
+        type: "gpu_settlement",
+        amount: finalValue,
+        description: `GPU contract closed & settled: ${contract.contract_ref}`,
+        created_at: new Date().toISOString(),
+      })
+      .catch(() => {});
+
     flash(
       `Contract closed. $${finalValue.toFixed(2)} settled to balance.`,
       "info",
@@ -752,12 +835,19 @@ function GPUAllocationSection({
     0,
   );
   const totalPnL = totalValue - totalInvested;
+  const amt = parseFloat(allocAmount) || 0;
 
   return (
     <div className="space-y-4">
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${toast.type === "gain" ? "bg-emerald-500 text-slate-950" : toast.type === "loss" ? "bg-red-500 text-white" : "bg-blue-600 text-white"}`}
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${
+            toast.type === "gain"
+              ? "bg-emerald-500 text-slate-950"
+              : toast.type === "loss"
+                ? "bg-red-500 text-white"
+                : "bg-blue-600 text-white"
+          }`}
         >
           {toast.type === "gain" ? (
             <TrendingUp size={14} />
@@ -826,24 +916,6 @@ function GPUAllocationSection({
           )}
 
           <div
-            className="rounded-xl p-3 flex items-start gap-2.5"
-            style={{
-              background: "rgba(245,158,11,0.06)",
-              border: "1px solid rgba(245,158,11,0.2)",
-            }}
-          >
-            <AlertTriangle
-              size={13}
-              className="text-amber-400 mt-0.5 shrink-0"
-            />
-            <p className="text-amber-400/80 text-[11px] leading-relaxed">
-              <strong className="text-amber-300">High Risk:</strong> GPU
-              allocation contracts have a 70% probability of loss per cycle.
-              Never allocate more than you can afford to lose.
-            </p>
-          </div>
-
-          <div
             className="rounded-2xl p-5 space-y-4"
             style={{
               background: "rgba(15,23,42,0.8)",
@@ -856,9 +928,19 @@ function GPUAllocationSection({
                 Allocation Contract
               </p>
               <p className="text-slate-500 text-xs mt-1">
-                Earnings distributed every 30 seconds based on compute demand.
+                Amount is debited from your balance immediately. Returns are
+                distributed every 30 seconds.
               </p>
             </div>
+
+            {/* Balance indicator — neutral, no probability hints */}
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-slate-500">Available balance</span>
+              <span className="text-white font-black">
+                ${userBalance.toFixed(2)}
+              </span>
+            </div>
+
             <div className="flex gap-3 items-end">
               <div className="flex-1">
                 <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">
@@ -876,6 +958,11 @@ function GPUAllocationSection({
                     className="w-full pl-8 pr-4 py-3 rounded-xl text-white font-black bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 text-lg"
                   />
                 </div>
+                {amt > userBalance && amt > 0 && (
+                  <p className="text-red-400 text-xs mt-1">
+                    Insufficient balance. You have ${userBalance.toFixed(2)}.
+                  </p>
+                )}
                 <div className="flex gap-1.5 mt-2">
                   {[100, 500, 1000, 5000].map((v) => (
                     <button
@@ -890,7 +977,7 @@ function GPUAllocationSection({
               </div>
               <button
                 onClick={createContract}
-                disabled={creating}
+                disabled={creating || amt > userBalance || amt < 100}
                 className="px-5 py-3 rounded-xl font-black text-sm text-slate-950 flex items-center gap-2 disabled:opacity-50 shrink-0"
                 style={{ background: "#10b981" }}
               >
@@ -902,46 +989,7 @@ function GPUAllocationSection({
                 Sign Contract
               </button>
             </div>
-            {parseFloat(allocAmount) >= 100 && (
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <div
-                  className="rounded-xl p-3"
-                  style={{
-                    background: "rgba(239,68,68,0.06)",
-                    border: "1px solid rgba(239,68,68,0.15)",
-                  }}
-                >
-                  <p className="text-red-400 text-[9px] uppercase tracking-wide font-bold mb-1">
-                    Loss Scenario (70%)
-                  </p>
-                  <p className="text-red-400 font-black text-sm">
-                    -${(parseFloat(allocAmount || "0") * 0.08).toFixed(2)} to -$
-                    {(parseFloat(allocAmount || "0") * 0.005).toFixed(2)}
-                  </p>
-                  <p className="text-slate-600 text-[10px] mt-0.5">
-                    -0.5% to -8% per cycle
-                  </p>
-                </div>
-                <div
-                  className="rounded-xl p-3"
-                  style={{
-                    background: "rgba(16,185,129,0.06)",
-                    border: "1px solid rgba(16,185,129,0.15)",
-                  }}
-                >
-                  <p className="text-emerald-400 text-[9px] uppercase tracking-wide font-bold mb-1">
-                    Gain Scenario (30%)
-                  </p>
-                  <p className="text-emerald-400 font-black text-sm">
-                    +${(parseFloat(allocAmount || "0") * 0.03).toFixed(2)} to +$
-                    {(parseFloat(allocAmount || "0") * 0.25).toFixed(2)}
-                  </p>
-                  <p className="text-slate-600 text-[10px] mt-0.5">
-                    +3% to +25% per cycle
-                  </p>
-                </div>
-              </div>
-            )}
+            {/* NOTE: Gain/loss scenario preview intentionally removed — internal logic only */}
           </div>
 
           {loading ? (
@@ -1029,7 +1077,7 @@ function GPUAllocationSection({
                           </div>
                           <p className="text-slate-500 text-[10px]">
                             Allocated ${c.allocated_amount.toFixed(2)} ·{" "}
-                            {c.tick_count} ticks ·{" "}
+                            {c.tick_count} cycles ·{" "}
                             {new Date(c.created_at).toLocaleDateString()}
                           </p>
                         </div>
@@ -1055,7 +1103,7 @@ function GPUAllocationSection({
                         }}
                       >
                         <span className="text-slate-600">
-                          Last tick{" "}
+                          Last cycle{" "}
                           {new Date(c.last_tick_at).toLocaleTimeString()}
                         </span>
                         <span
@@ -1078,7 +1126,7 @@ function GPUAllocationSection({
                         ) : (
                           <ChevronDown size={11} />
                         )}{" "}
-                        {contractTicks.length} ticks history
+                        {contractTicks.length} cycle history
                       </button>
                       {isActive && (
                         <button
@@ -1103,7 +1151,7 @@ function GPUAllocationSection({
                             }}
                           >
                             <p className="text-[9px] font-black uppercase tracking-widest text-slate-600">
-                              Tick History (last {contractTicks.length})
+                              Cycle History (last {contractTicks.length})
                             </p>
                           </div>
                           <div className="divide-y divide-slate-900">
@@ -1164,8 +1212,7 @@ function GPUAllocationSection({
   );
 }
 
-// ─── THERMAL SECTION ─────────────────────────────────────────────────────────
-// FIX #3: Now DB-driven, tasks actually function
+// ─── THERMAL SECTION ──────────────────────────────────────────────────────────
 function ThermalSection({
   userId,
   license,
@@ -1188,14 +1235,12 @@ function ThermalSection({
 
   const load = useCallback(async () => {
     setLoading(true);
-    // Try DB first, fall back to defaults
     const { data: dbTasks } = await supabase
       .from("thermal_tasks")
       .select("*")
       .eq("is_active", true)
       .order("created_at");
 
-    // Load user's last completions to compute cooldowns
     const { data: completions } = await supabase
       .from("thermal_completions")
       .select("task_id, created_at")
@@ -1204,37 +1249,34 @@ function ThermalSection({
 
     const cdMap: Record<string, Date> = {};
     (completions || []).forEach((c: any) => {
-      if (!cdMap[c.task_id]) {
-        cdMap[c.task_id] = new Date(c.created_at);
-      }
+      if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
     });
     setCooldowns(cdMap);
 
-    if (dbTasks && dbTasks.length > 0) {
-      setTasks(dbTasks);
-    } else {
-      // Default tasks if no DB entries
-      setTasks([
-        {
-          id: "thermal-1",
-          name: "Thermal Cooling Calibration",
-          description:
-            "Perform daily thermal management on your GPU node to sustain peak efficiency. Reduces drift by 0.3°C per cycle.",
-          reward: 0.5,
-          cooldown_minutes: 1440,
-          is_active: true,
-        },
-        {
-          id: "thermal-2",
-          name: "Neural Weight Re-alignment",
-          description:
-            "Re-align your node's neural inference weights to reduce latency drift and improve batch throughput.",
-          reward: 0.5,
-          cooldown_minutes: 1440,
-          is_active: true,
-        },
-      ]);
-    }
+    setTasks(
+      dbTasks && dbTasks.length > 0
+        ? dbTasks
+        : [
+            {
+              id: "thermal-1",
+              name: "Thermal Cooling Calibration",
+              description:
+                "Perform daily thermal management on your GPU node to sustain peak efficiency.",
+              reward: 0.5,
+              cooldown_minutes: 1440,
+              is_active: true,
+            },
+            {
+              id: "thermal-2",
+              name: "Neural Weight Re-alignment",
+              description:
+                "Re-align your node's neural inference weights to reduce latency drift.",
+              reward: 0.5,
+              cooldown_minutes: 1440,
+              is_active: true,
+            },
+          ],
+    );
     setLoading(false);
   }, [userId]);
 
@@ -1249,9 +1291,8 @@ function ThermalSection({
     const last = cooldowns[taskId];
     if (!last) return { on: false, remaining: "" };
     const next = new Date(last.getTime() + cooldownMinutes * 60000);
-    const now = new Date();
-    if (now >= next) return { on: false, remaining: "" };
-    const diffMs = next.getTime() - now.getTime();
+    if (new Date() >= next) return { on: false, remaining: "" };
+    const diffMs = next.getTime() - Date.now();
     const h = Math.floor(diffMs / 3600000);
     const m = Math.floor((diffMs % 3600000) / 60000);
     return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
@@ -1262,29 +1303,16 @@ function ThermalSection({
     if (cd.on) return;
     setCompleting(task.id);
     try {
-      // Record completion
-      await supabase
-        .from("thermal_completions")
-        .insert({
-          task_id: task.id,
-          user_id: userId,
-          reward: task.reward,
-          created_at: new Date().toISOString(),
-        });
-      // Credit earnings  FIX #2: total_earned
-      const { data: u } = await supabase
-        .from("users")
-        .select("balance_available, total_earned")
-        .eq("id", userId)
-        .single();
-      await supabase
-        .from("users")
-        .update({
-          balance_available: ((u as any)?.balance_available || 0) + task.reward,
-          total_earned: ((u as any)?.total_earned || 0) + task.reward,
-        })
-        .eq("id", userId);
-      // Ledger
+      await supabase.from("thermal_completions").insert({
+        task_id: task.id,
+        user_id: userId,
+        reward: task.reward,
+        created_at: new Date().toISOString(),
+      });
+
+      const result = await adjustBalance(userId, task.reward, task.reward);
+      if (!result.success) throw new Error(result.error);
+
       await supabase
         .from("transaction_ledger")
         .insert({
@@ -1295,6 +1323,7 @@ function ThermalSection({
           created_at: new Date().toISOString(),
         })
         .catch(() => {});
+
       flash(`+$${task.reward.toFixed(2)} — ${task.name} complete!`);
       onEarned(task.reward);
       load();
@@ -1325,7 +1354,7 @@ function ThermalSection({
           <p className="text-white font-black text-base">
             Thermal Calibration License Required
           </p>
-          <p className="text-slate-400 text-sm mt-2 mb-4">
+          <p className="text-slate-400 text-sm mt-2">
             Purchase the Thermal & Neural Operator License ($200) to access
             hardware optimization tasks.
           </p>
@@ -1408,7 +1437,7 @@ function ThermalSection({
   );
 }
 
-// ─── MAIN TASKS PAGE ──────────────────────────────────────────────────────────
+// ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function TasksPage() {
   const router = useRouter();
   const [userId, setUserId] = useState<string | null>(null);
@@ -1434,6 +1463,7 @@ export default function TasksPage() {
       return;
     }
     setUserId(session.user.id);
+
     const [{ data: lics }, { data: u }] = await Promise.all([
       supabase
         .from("operator_licenses")
@@ -1447,6 +1477,7 @@ export default function TasksPage() {
         .eq("id", session.user.id)
         .single(),
     ]);
+
     setLicenses(lics || []);
     setBalance((u as any)?.balance_available || 0);
     setLoading(false);
@@ -1456,15 +1487,11 @@ export default function TasksPage() {
     loadAll();
   }, [loadAll]);
 
-  // ── REALTIME: Instant license activation ───────────────────────────────────
-  // When admin approves payment → operator_licenses row inserted/updated →
-  // this fires → loadAll() refreshes licenses → tasks unlock immediately.
-  // Also listens to users table for has_operator_license flag changes.
+  // Realtime: license activation
   useEffect(() => {
     if (!userId) return;
-
-    const licenseChannel = supabase
-      .channel("tasks_license_realtime")
+    const ch = supabase
+      .channel("tasks_license_rt")
       .on(
         "postgres_changes",
         {
@@ -1473,42 +1500,19 @@ export default function TasksPage() {
           table: "operator_licenses",
           filter: `user_id=eq.${userId}`,
         },
-        (payload) => {
-          console.log(
-            "[tasks] License change detected, reloading...",
-            payload.eventType,
-          );
-          loadAll();
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "users",
-          filter: `id=eq.${userId}`,
-        },
-        (payload) => {
-          // Reload if has_operator_license changed
-          const newData = payload.new as any;
-          if (newData?.has_operator_license !== undefined) {
-            loadAll();
-          }
-        },
+        () => loadAll(),
       )
       .subscribe();
-
     return () => {
-      supabase.removeChannel(licenseChannel);
+      supabase.removeChannel(ch);
     };
   }, [userId, loadAll]);
 
-  // FIX #4: Realtime balance subscription — stays in sync with DB
+  // Realtime: balance updates
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
-      .channel("tasks_user_bal")
+      .channel("tasks_balance_rt")
       .on(
         "postgres_changes",
         {
@@ -1528,10 +1532,8 @@ export default function TasksPage() {
     };
   }, [userId]);
 
-  // FIX #1: removed onBuy from call site — PurchaseModal handles navigation itself
   function handleEarned(amt: number) {
     setTotalEarnedToday((t) => t + amt);
-    // Balance updates via realtime subscription above
   }
 
   if (loading)
@@ -1583,7 +1585,6 @@ export default function TasksPage() {
     >
       <DashboardNavigation />
 
-      {/* FIX #1: No onBuy prop — modal handles navigation itself */}
       {purchaseModal && (
         <PurchaseModal
           type={purchaseModal}
@@ -1630,7 +1631,6 @@ export default function TasksPage() {
               <p className="text-slate-500 text-[10px] uppercase tracking-wide">
                 Current Balance
               </p>
-              {/* FIX #4: Balance stays in sync via realtime */}
               <p className="text-white font-black text-3xl tabular-nums">
                 ${balance.toFixed(2)}
               </p>
@@ -1642,7 +1642,7 @@ export default function TasksPage() {
             </div>
           </div>
 
-          {/* Tab selector */}
+          {/* Tabs */}
           <div className="grid grid-cols-1 gap-3 mt-4">
             {TABS.map((tab) => {
               const Icon = tab.icon;
@@ -1727,6 +1727,7 @@ export default function TasksPage() {
                 userId={userId}
                 license={gpuLic}
                 onEarned={handleEarned}
+                userBalance={balance}
               />
             )}
             {userId && activeTab === "thermal" && (
