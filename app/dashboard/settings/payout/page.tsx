@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import {
@@ -19,8 +19,32 @@ import {
 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 
+// ── withTimeout — same helper used in verification page ─────────────────────
+// Supabase JS uses fetch() internally. On mobile (Android Chrome, iOS Safari)
+// fetch() can stall indefinitely. withTimeout() guarantees every DB/auth call
+// either resolves or rejects within the given milliseconds.
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${label} timed out — check your connection and try again`,
+            ),
+          ),
+        ms,
+      ),
+    ),
+  ]);
+}
+
 // ── Country → payout method routing ─────────────────────────────────────────
-// These countries use Korapay (local currency transfers)
 const KORAPAY_COUNTRIES: Record<
   string,
   { currency: string; methods: string[]; label: string }
@@ -62,7 +86,6 @@ const KORAPAY_COUNTRIES: Record<
   },
 };
 
-// Mobile money label by country
 const MOBILE_MONEY_LABEL: Record<string, string> = {
   Kenya: "M-Pesa number",
   Ghana: "MoMo number (MTN / Vodafone / AirtelTigo)",
@@ -188,8 +211,19 @@ type Profile = {
 
 export default function PayoutSettingsPage() {
   const router = useRouter();
+
+  // ── FIX: mountedRef prevents state updates on unmounted component ──────────
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadErr, setLoadErr] = useState("");
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
@@ -200,69 +234,98 @@ export default function PayoutSettingsPage() {
   const [accountNumber, setAccountNumber] = useState("");
   const [bankName, setBankName] = useState("");
   const [bankCode, setBankCode] = useState("");
-  // Crypto specific
   const [cryptoNetwork, setCryptoNetwork] = useState("USDT_TRC20");
   const [cryptoWallet, setCryptoWallet] = useState("");
   const [cryptoName, setCryptoName] = useState("");
 
   function showToast(msg: string, ok = true) {
+    if (!mountedRef.current) return;
     setToast({ msg, ok });
-    setTimeout(() => setToast(null), 4500);
+    setTimeout(() => {
+      if (mountedRef.current) setToast(null);
+    }, 4500);
   }
+
+  // ── FIX: load() now wraps every Supabase call in withTimeout() ────────────
+  const load = useCallback(async () => {
+    if (!mountedRef.current) return;
+    setLoading(true);
+    setLoadErr("");
+
+    try {
+      // FIX: getUser() stalls forever on mobile without timeout
+      const {
+        data: { user },
+        error: userErr,
+      } = await withTimeout(supabase.auth.getUser(), 12000, "Session check");
+
+      if (userErr || !user) {
+        router.push("/auth/signin");
+        return;
+      }
+
+      // FIX: DB select also wrapped in timeout
+      const { data, error } = await withTimeout(
+        supabase
+          .from("users")
+          .select(
+            "id,full_name,kyc_full_name,kyc_verified,payout_registered,payout_account_name,payout_account_number,payout_bank_name,payout_account_type,payout_kyc_match,payout_locked,payout_change_requested,kyc_status,country",
+          )
+          .eq("id", user.id)
+          .single(),
+        12000,
+        "Profile load",
+      );
+
+      if (!mountedRef.current) return;
+
+      if (error) {
+        setLoadErr(`Failed to load profile: ${error.message}`);
+        return;
+      }
+
+      setProfile(data);
+
+      // Pre-fill from existing data
+      if (data?.payout_account_name) setAccountName(data.payout_account_name);
+      if (data?.payout_account_number)
+        setAccountNumber(data.payout_account_number);
+      if (data?.payout_bank_name) setBankName(data.payout_bank_name);
+      if (data?.country) setCountry(data.country);
+
+      // Auto-fill name from KYC
+      const kycName = data?.kyc_full_name || data?.full_name || "";
+      if (!data?.payout_account_name && kycName) setAccountName(kycName);
+      if (kycName) setCryptoName(kycName);
+    } catch (err: unknown) {
+      // FIX: Timeout errors land here and show retry UI
+      if (mountedRef.current)
+        setLoadErr(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [router]);
 
   useEffect(() => {
     load();
-  }, []);
-
-  async function load() {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    if (!user) {
-      router.push("/auth/signin");
-      return;
-    }
-
-    const { data } = await supabase
-      .from("users")
-      .select(
-        "id,full_name,kyc_full_name,kyc_verified,payout_registered,payout_account_name,payout_account_number,payout_bank_name,payout_account_type,payout_kyc_match,payout_locked,payout_change_requested,kyc_status,country",
-      )
-      .eq("id", user.id)
-      .single();
-
-    setProfile(data);
-
-    // Pre-fill from existing data
-    if (data?.payout_account_name) setAccountName(data.payout_account_name);
-    if (data?.payout_account_number)
-      setAccountNumber(data.payout_account_number);
-    if (data?.payout_bank_name) setBankName(data.payout_bank_name);
-    if (data?.country) setCountry(data.country);
-    // Auto-fill name from KYC
-    const kycName = data?.kyc_full_name || data?.full_name || "";
-    if (!data?.payout_account_name && kycName) setAccountName(kycName);
-    if (kycName) setCryptoName(kycName);
-
-    setLoading(false);
-  }
+  }, [load]);
 
   const korapayInfo = KORAPAY_COUNTRIES[country];
   const isKorapay = !!korapayInfo;
   const kycName = profile?.kyc_full_name || profile?.full_name || "";
   const isLocked = profile?.payout_locked && profile?.payout_registered;
   const reKycPending = profile?.kyc_status === "pending_rekyc";
-
-  // Name match check
   const nameMatches =
     accountName.trim().toLowerCase() === kycName.trim().toLowerCase();
 
+  // ── FIX: register() uses withTimeout on RPC + always resets saving in finally
   async function register() {
     if (!profile) return;
     if (!country) {
       showToast("Select your country first", false);
       return;
     }
+
     if (method === "crypto") {
       if (!cryptoWallet.trim()) {
         showToast("Enter your wallet address", false);
@@ -296,21 +359,28 @@ export default function PayoutSettingsPage() {
 
     setSaving(true);
     try {
-      const { data, error } = await supabase.rpc("register_payout_account", {
-        p_user_id: profile.id,
-        p_account_name:
-          method === "crypto" ? cryptoName.trim() : accountName.trim(),
-        p_account_number:
-          method === "crypto" ? cryptoWallet.trim() : accountNumber.trim(),
-        p_bank_name:
-          method === "crypto" ? `Crypto — ${cryptoNetwork}` : bankName.trim(),
-        p_account_type:
-          method === "crypto"
-            ? `crypto_${cryptoNetwork.toLowerCase()}`
-            : isKorapay && korapayInfo.methods[0] === "mobile_money"
-              ? "mobile_money"
-              : "bank",
-      });
+      // FIX: RPC call wrapped in withTimeout — was hanging forever on mobile
+      const { data, error } = await withTimeout(
+        supabase.rpc("register_payout_account", {
+          p_user_id: profile.id,
+          p_account_name:
+            method === "crypto" ? cryptoName.trim() : accountName.trim(),
+          p_account_number:
+            method === "crypto" ? cryptoWallet.trim() : accountNumber.trim(),
+          p_bank_name:
+            method === "crypto" ? `Crypto — ${cryptoNetwork}` : bankName.trim(),
+          p_account_type:
+            method === "crypto"
+              ? `crypto_${cryptoNetwork.toLowerCase()}`
+              : isKorapay && korapayInfo.methods[0] === "mobile_money"
+                ? "mobile_money"
+                : "bank",
+        }),
+        20000, // RPC can be slower than a plain select — give it 20s
+        "Register payout account",
+      );
+
+      if (!mountedRef.current) return;
 
       if (error || !data?.allowed) {
         showToast(
@@ -318,15 +388,21 @@ export default function PayoutSettingsPage() {
           false,
         );
       } else {
-        showToast("Payout account registered successfully");
+        showToast("Payout account registered successfully ✓");
         load();
       }
     } catch (err: any) {
-      showToast(err.message || "Failed", false);
+      // FIX: Timeout errors show a clear message instead of hanging forever
+      if (mountedRef.current)
+        showToast(err.message || "Failed — please retry", false);
+    } finally {
+      // FIX: saving ALWAYS resets — previously missing finally meant
+      // the button stayed disabled forever on timeout/network error
+      if (mountedRef.current) setSaving(false);
     }
-    setSaving(false);
   }
 
+  // ── FIX: requestChange() also wrapped in timeout ───────────────────────────
   async function requestChange() {
     if (!profile) return;
     const confirmed = window.confirm(
@@ -334,23 +410,69 @@ export default function PayoutSettingsPage() {
         "Your current payout account will be suspended during the review period. Continue?",
     );
     if (!confirmed) return;
-    const { data, error } = await supabase.rpc("request_payout_change", {
-      p_user_id: profile.id,
-    });
-    if (error) {
-      showToast(error.message, false);
-      return;
+
+    setSaving(true);
+    try {
+      const { data, error } = await withTimeout(
+        supabase.rpc("request_payout_change", { p_user_id: profile.id }),
+        15000,
+        "Request payout change",
+      );
+
+      if (!mountedRef.current) return;
+
+      if (error) {
+        showToast(error.message, false);
+      } else {
+        showToast(
+          data?.message ||
+            "Change request submitted. Complete new KYC to proceed.",
+        );
+        load();
+      }
+    } catch (err: any) {
+      if (mountedRef.current)
+        showToast(err.message || "Request failed — please retry", false);
+    } finally {
+      if (mountedRef.current) setSaving(false);
     }
-    showToast(
-      data?.message || "Change request submitted. Complete new KYC to proceed.",
-    );
-    load();
   }
 
+  // ── Loading state with retry button ───────────────────────────────────────
   if (loading)
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
-        <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+        <div className="flex flex-col items-center gap-4 px-6 text-center">
+          <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
+          <p className="text-slate-400 text-sm">Loading your profile...</p>
+          {/* FIX: Retry button visible during load for slow connections */}
+          <button
+            onClick={load}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
+          >
+            Tap to retry
+          </button>
+        </div>
+      </div>
+    );
+
+  // ── Error state with retry ─────────────────────────────────────────────────
+  if (loadErr)
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4 px-6 text-center max-w-sm">
+          <AlertTriangle size={32} className="text-red-400" />
+          <p className="text-slate-300 font-bold text-sm">{loadErr}</p>
+          <button
+            onClick={() => {
+              setLoadErr("");
+              load();
+            }}
+            className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-6 py-2.5 rounded-xl text-sm"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
 
@@ -394,8 +516,7 @@ export default function PayoutSettingsPage() {
               </p>
               <p className="text-amber-400/70 text-xs mt-1 leading-relaxed">
                 Complete your KYC identity verification before registering a
-                payout account. Your account holder name will be validated
-                against your verified identity.
+                payout account.
               </p>
               <button
                 onClick={() => router.push("/dashboard/verification")}
@@ -486,7 +607,6 @@ export default function PayoutSettingsPage() {
                 : "Register Payout Account"}
             </h2>
 
-            {/* KYC name info */}
             {kycName && (
               <div className="flex items-start gap-2 bg-slate-800/60 p-3 rounded-xl">
                 <Shield
@@ -542,7 +662,6 @@ export default function PayoutSettingsPage() {
                   Payment Method <span className="text-red-400">*</span>
                 </label>
                 <div className="grid grid-cols-2 gap-2">
-                  {/* Bank / Mobile Money — always shown */}
                   <label
                     className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${method === "bank" || method === "mobile_money" ? "border-emerald-500/40 bg-emerald-500/5" : "border-slate-700 hover:border-slate-600"}`}
                     onClick={() =>
@@ -575,7 +694,6 @@ export default function PayoutSettingsPage() {
                     </div>
                   </label>
 
-                  {/* Crypto — always available */}
                   <label
                     className={`flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition-all ${method === "crypto" ? "border-amber-500/40 bg-amber-500/5" : "border-slate-700 hover:border-slate-600"}`}
                     onClick={() => setMethod("crypto")}
@@ -601,7 +719,7 @@ export default function PayoutSettingsPage() {
               </div>
             )}
 
-            {/* STEP 3 — Account details */}
+            {/* STEP 3 — Bank / Mobile Money fields */}
             {country && (method === "bank" || method === "mobile_money") && (
               <div className="space-y-3">
                 <p className="text-slate-500 text-xs font-semibold uppercase tracking-wide">
@@ -610,7 +728,6 @@ export default function PayoutSettingsPage() {
                     : "Bank Account Details"}
                 </p>
 
-                {/* Account holder name */}
                 <div>
                   <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                     Account Holder Name <span className="text-red-400">*</span>
@@ -633,7 +750,7 @@ export default function PayoutSettingsPage() {
                   {accountName && kycName && !nameMatches && (
                     <p className="text-red-400 text-xs mt-1 flex items-center gap-1">
                       <AlertTriangle size={11} /> Name doesn't match your KYC
-                      name — this will be rejected
+                      name
                     </p>
                   )}
                   {accountName && kycName && nameMatches && (
@@ -644,7 +761,6 @@ export default function PayoutSettingsPage() {
                   )}
                 </div>
 
-                {/* Account number / mobile number */}
                 <div>
                   <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                     {method === "mobile_money"
@@ -664,7 +780,6 @@ export default function PayoutSettingsPage() {
                   />
                 </div>
 
-                {/* Bank / platform name */}
                 <div>
                   <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
                     {method === "mobile_money"
@@ -687,7 +802,6 @@ export default function PayoutSettingsPage() {
                   />
                 </div>
 
-                {/* Bank code — only for bank accounts */}
                 {method === "bank" && (
                   <div>
                     <label className="text-slate-400 text-xs mb-1.5 block font-semibold">
@@ -702,7 +816,6 @@ export default function PayoutSettingsPage() {
                   </div>
                 )}
 
-                {/* Payout info box */}
                 <div className="flex items-start gap-2 bg-slate-800/40 p-3 rounded-xl">
                   <Info size={12} className="text-slate-500 shrink-0 mt-0.5" />
                   <p className="text-slate-500 text-xs leading-relaxed">
@@ -714,7 +827,7 @@ export default function PayoutSettingsPage() {
               </div>
             )}
 
-            {/* Crypto fields */}
+            {/* STEP 3 — Crypto fields */}
             {country && method === "crypto" && (
               <div className="space-y-3">
                 <p className="text-slate-500 text-xs font-semibold uppercase tracking-wide">
@@ -779,9 +892,8 @@ export default function PayoutSettingsPage() {
                   />
                   <p className="text-amber-300 text-xs leading-relaxed">
                     Always double-check your wallet address and network. Sending
-                    to the wrong address is irreversible. USDT TRC20 is
-                    recommended — lowest fees. A 5% crypto discount applies to
-                    license purchases.
+                    to the wrong address is irreversible. USDT TRC20 recommended
+                    — lowest fees.
                   </p>
                 </div>
               </div>
@@ -792,11 +904,16 @@ export default function PayoutSettingsPage() {
               <button
                 onClick={register}
                 disabled={saving}
-                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-3 rounded-xl transition-all disabled:opacity-50 text-sm"
+                className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black py-3 rounded-xl transition-all disabled:opacity-50 text-sm flex items-center justify-center gap-2"
               >
-                {saving
-                  ? "Verifying & Registering..."
-                  : "Register Payout Account"}
+                {saving ? (
+                  <>
+                    <RefreshCw size={14} className="animate-spin" />
+                    Verifying &amp; Registering...
+                  </>
+                ) : (
+                  "Register Payout Account"
+                )}
               </button>
             )}
 
@@ -827,16 +944,19 @@ export default function PayoutSettingsPage() {
                 size={13}
                 className="text-red-400 shrink-0 mt-0.5"
               />
-              <p className="text-red-400/70  text-white">
+              <p className="text-red-400/70 text-xs">
                 Withdrawals will be temporarily suspended until the new KYC is
                 approved.
               </p>
             </div>
             <button
               onClick={requestChange}
-              className="w-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 font-bold py-2.5 rounded-xl transition-all text-sm"
+              disabled={saving}
+              className="w-full bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-400 font-bold py-2.5 rounded-xl transition-all text-sm disabled:opacity-50"
             >
-              Request Account Change (Requires New KYC)
+              {saving
+                ? "Submitting..."
+                : "Request Account Change (Requires New KYC)"}
             </button>
           </Card>
         )}

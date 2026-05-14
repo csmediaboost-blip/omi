@@ -1,17 +1,15 @@
 // app/api/korapay/webhook/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// COMPLETE REPLACEMENT of the broken duplicate-export version (doc 16).
+// CRITICAL FIX: Removed duplicate `export async function POST` that was
+// running admin-approval logic on every KoraPay webhook ping — marking ALL
+// crypto payments as "confirmed" immediately without admin review.
 //
-// FIXES vs broken version:
-//  1. No duplicate POST export (was causing TypeScript compile failure)
-//  2. Queries gateway_reference column (was using wrong transaction_id column)
-//  3. Uses createNodeAllocation helper — all mining fields correctly set
-//  4. miningPeriod correctly read from metadata and saved to allocation
-//  5. mining_ends_at computed from actual period duration (was null before)
-//  6. Idempotency check — skip if already processed
-//  7. No queries against nonexistent user_balances table
-//  8. Signature verification with proper fallback
-//  9. Handles license + gpu_plan + gpu_contract purchase types
+// The old v0 block also had these bugs:
+//  - Queried `transaction_id` column (doesn't exist; correct: gateway_reference)
+//  - Inserted into `user_balances` table (doesn't exist in schema)
+//  - Set lock_in_months: 6 for all plans including flexible ones
+//
+// Now only ONE POST handler exists — the correct webhook processor.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -94,7 +92,7 @@ export async function POST(req: NextRequest) {
 
   if (event === "charge.success") {
     try {
-      // FIX #2: Query by gateway_reference (was wrong column in old version)
+      // Query by gateway_reference — the correct column
       const { data: txData, error: txErr } = await supabaseAdmin
         .from("payment_transactions")
         .select("*")
@@ -111,7 +109,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, note: "tx_not_found" });
       }
 
-      // FIX #6: Idempotency — skip if already processed
+      // Idempotency — skip if already processed
       if (txData.status === "confirmed" || txData.status === "completed") {
         console.log("[korapay/webhook] Already processed:", reference);
         return NextResponse.json({ success: true });
@@ -138,7 +136,6 @@ export async function POST(req: NextRequest) {
         .eq("gateway_reference", reference);
 
       if (purchaseType === "license") {
-        // Activate license
         const licenseType =
           metadata.licenseType || txData.node_key || "operator_license";
         const result = await activateLicense(
@@ -155,13 +152,13 @@ export async function POST(req: NextRequest) {
           );
         }
       } else {
-        // FIX #3 & #4: Create GPU node allocation with ALL mining fields
-        // miningPeriod now correctly read from metadata (was missing in old version)
+        // GPU plan — create allocation with all mining fields
+        // miningPeriod correctly read from metadata
         const result = await createNodeAllocation(supabaseAdmin, {
           userId,
           planId: txData.node_key,
           amount: txData.amount,
-          metadata, // contains miningPeriod, paymentModel, etc.
+          metadata,
           transactionRef: reference,
         });
 
@@ -174,7 +171,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Write ledger entry for audit trail
+      // Write ledger entry
       await writeLedgerEntry(supabaseAdmin, {
         userId,
         type: purchaseType === "license" ? "license_purchase" : "investment",
@@ -224,7 +221,6 @@ export async function POST(req: NextRequest) {
   }
 
   if (event === "charge.failed" || event === "charge.declined") {
-    // FIX #2: Use correct column
     await supabaseAdmin
       .from("payment_transactions")
       .update({ status: "declined", updated_at: new Date().toISOString() })
