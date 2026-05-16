@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import {
   Download,
   Shield,
@@ -12,57 +11,59 @@ import {
   Clock,
   Printer,
   ArrowLeft,
+  Cpu,
+  Server,
 } from "lucide-react";
 
 type IDData = {
   memberId: string;
   fullName: string;
   email: string;
+  country: string | null;
   tier: string;
+  tierLabel: string;
+  licenseLabel: string | null;
+  nodeDetails: Array<{ name: string; model: string }>;
+  primaryNode: string;
   activatedAt: string;
   expiryDate: string;
   kycVerified: boolean;
+  kycStatus: string;
   joinedAt: string;
   issuedAt: string;
   passportPhotoUrl?: string | null;
-  country?: string | null;
   kycDocumentType?: string | null;
+  totalNodes: number;
+  hasLicense: boolean;
 };
 
-const TIER_ACCENT: Record<string, { from: string; to: string; badge: string }> =
-  {
-    observer: { from: "#334155", to: "#1e293b", badge: "#94a3b8" },
-    compute: { from: "#1e3a5f", to: "#0f172a", badge: "#60a5fa" },
-    neural: { from: "#14432a", to: "#0f172a", badge: "#34d399" },
-    intelligence: { from: "#2e1b5e", to: "#0f172a", badge: "#a78bfa" },
-    cognitive: { from: "#4a2800", to: "#0f172a", badge: "#fbbf24" },
-    research: { from: "#4a0e1a", to: "#0f172a", badge: "#fb7185" },
-    // GPU tiers
-    micro_test: { from: "#1a2e1a", to: "#0f172a", badge: "#34d399" },
-    rtx3060: { from: "#1e3a5f", to: "#0f172a", badge: "#60a5fa" },
-    rtx3090: { from: "#2e1b5e", to: "#0f172a", badge: "#a78bfa" },
-    a40: { from: "#4a2800", to: "#0f172a", badge: "#fbbf24" },
-    rtx4090: { from: "#14432a", to: "#0f172a", badge: "#10b981" },
-    a100: { from: "#4a0e1a", to: "#0f172a", badge: "#fb7185" },
-    h100: { from: "#1a1a4a", to: "#0f172a", badge: "#818cf8" },
+// ── Dynamic accent based on node/license tier ─────────────────────────────
+function getAccent(tierKey: string) {
+  const map: Record<string, { from: string; to: string; badge: string }> = {
+    // GPU plans by common keywords
+    foundation:   { from: "#1a2e1a", to: "#0f172a", badge: "#34d399" },
+    micro:        { from: "#1a2e1a", to: "#0f172a", badge: "#34d399" },
+    rtx3060:      { from: "#1e3a5f", to: "#0f172a", badge: "#60a5fa" },
+    rtx3090:      { from: "#2e1b5e", to: "#0f172a", badge: "#a78bfa" },
+    rtx4090:      { from: "#14432a", to: "#0f172a", badge: "#10b981" },
+    a40:          { from: "#4a2800", to: "#0f172a", badge: "#fbbf24" },
+    a100:         { from: "#4a0e1a", to: "#0f172a", badge: "#fb7185" },
+    h100:         { from: "#1a1a4a", to: "#0f172a", badge: "#818cf8" },
+    // Licenses
+    thermal_optimization: { from: "#1e3a5f", to: "#0f172a", badge: "#60a5fa" },
+    rlhf_validation:      { from: "#2e1b5e", to: "#0f172a", badge: "#a78bfa" },
+    gpu_allocation:       { from: "#14432a", to: "#0f172a", badge: "#10b981" },
+    operator_license:     { from: "#4a2800", to: "#0f172a", badge: "#fbbf24" },
+    gpu_contributor:      { from: "#14432a", to: "#0f172a", badge: "#34d399" },
   };
 
-const GPU_TIER_NAMES: Record<string, string> = {
-  micro_test: "Foundation Allocation",
-  rtx3060: "RTX 3060 Node",
-  rtx3090: "RTX 3090 Node",
-  a40: "A40 Enterprise Node",
-  rtx4090: "RTX 4090 Node",
-  a100: "A100 Data Center Node",
-  h100: "H100 Cluster Node",
-  // legacy
-  observer: "Observer Node",
-  compute: "Compute Node",
-  neural: "Neural Node",
-  intelligence: "Intelligence Node",
-  cognitive: "Cognitive Node",
-  research: "Research Node",
-};
+  // Match by substring for plan IDs that contain GPU model names
+  const lower = tierKey.toLowerCase();
+  for (const [key, val] of Object.entries(map)) {
+    if (lower.includes(key)) return val;
+  }
+  return { from: "#1e293b", to: "#0f172a", badge: "#94a3b8" };
+}
 
 function fmt(iso: string) {
   return new Date(iso).toLocaleDateString("en", {
@@ -79,11 +80,6 @@ function daysLeft(iso: string) {
   );
 }
 
-/* ── Face extractor using canvas crop ─────────────────────────────────────────
-   Attempts to show the uploaded ID/passport photo in a passport-style frame.
-   For a full face-detection solution, a backend ML service would be needed.
-   Here we display the photo cropped to the upper-center (where faces typically appear).
-*/
 function PassportPhoto({
   url,
   name,
@@ -99,11 +95,10 @@ function PassportPhoto({
         className="w-20 h-20 rounded-2xl overflow-hidden shrink-0 border-2"
         style={{ borderColor: `${badge}44` }}
       >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={url}
           alt="ID photo"
-          className="w-full h-full object-cover object-top"
+          className="w-full h-full object-cover"
           style={{ objectPosition: "center 15%" }}
         />
       </div>
@@ -132,7 +127,6 @@ export default function ContributorIDPage() {
   useEffect(() => {
     async function load() {
       try {
-        // Fetch contributor ID data
         const res = await fetch("/api/contributor-id");
         if (!res.ok) {
           const d = await res.json();
@@ -140,12 +134,10 @@ export default function ContributorIDPage() {
         }
         const base = await res.json();
 
-        // Also fetch the KYC document photo from supabase directly
-        const {
-          data: { user },
-        } = await supabase.auth.getUser();
+        // Fetch KYC photo and document type client-side
+        const { data: { user } } = await supabase.auth.getUser();
         if (user) {
-          const { data: kycDocs } = await supabase
+          const { data: kycDoc } = await supabase
             .from("kyc_documents")
             .select("document_url, document_type")
             .eq("user_id", user.id)
@@ -153,15 +145,8 @@ export default function ContributorIDPage() {
             .limit(1)
             .maybeSingle();
 
-          const { data: userData } = await supabase
-            .from("users")
-            .select("country")
-            .eq("id", user.id)
-            .single();
-
-          base.passportPhotoUrl = kycDocs?.document_url || null;
-          base.kycDocumentType = kycDocs?.document_type || null;
-          base.country = userData?.country || null;
+          base.passportPhotoUrl = kycDoc?.document_url || null;
+          base.kycDocumentType = kycDoc?.document_type || null;
         }
 
         setData(base);
@@ -192,7 +177,7 @@ export default function ContributorIDPage() {
           <h2 className="text-white font-black text-lg">ID Card Unavailable</h2>
           <p className="text-slate-400 text-sm">
             {error === "No active license"
-              ? "Your Contributor ID card will be available after you activate a GPU Node License."
+              ? "Your Contributor ID card is available after your first GPU node deposit or license purchase."
               : error || "Something went wrong."}
           </p>
           <button
@@ -206,9 +191,7 @@ export default function ContributorIDPage() {
     );
   }
 
-  const tierKey = data.tier?.toLowerCase() || "observer";
-  const accent = TIER_ACCENT[tierKey] || TIER_ACCENT.observer;
-  const tierName = GPU_TIER_NAMES[tierKey] || data.tier;
+  const accent = getAccent(data.tier);
   const days = daysLeft(data.expiryDate);
   const expired = days === 0;
 
@@ -255,7 +238,7 @@ export default function ContributorIDPage() {
               OmniTask Pro GPU Compute Network.
               {data.passportPhotoUrl
                 ? " Your ID photo has been extracted from your submitted KYC document."
-                : " Upload a passport photo or ID via Verification to display your photo here."}
+                : " Upload your ID via Verification to display your photo here."}
             </p>
           </div>
         </div>
@@ -267,7 +250,7 @@ export default function ContributorIDPage() {
             style={{
               background: `linear-gradient(135deg, ${accent.from} 0%, ${accent.to} 100%)`,
               border: `1px solid ${accent.badge}22`,
-              minHeight: 280,
+              minHeight: 300,
             }}
           >
             {/* Grid overlay */}
@@ -313,7 +296,7 @@ export default function ContributorIDPage() {
                     className="w-1.5 h-1.5 rounded-full"
                     style={{ background: accent.badge }}
                   />
-                  {tierName}
+                  {data.tierLabel}
                 </div>
               </div>
 
@@ -330,9 +313,7 @@ export default function ContributorIDPage() {
                   </h2>
                   <p className="text-white/50 text-sm">{data.email}</p>
                   {data.country && (
-                    <p className="text-white/40 text-xs mt-0.5">
-                      {data.country}
-                    </p>
+                    <p className="text-white/40 text-xs mt-0.5">{data.country}</p>
                   )}
                   <div className="flex items-center gap-1.5 mt-2">
                     {data.kycVerified ? (
@@ -354,11 +335,55 @@ export default function ContributorIDPage() {
                 </div>
               </div>
 
+              {/* Node details — show active nodes */}
+              {data.nodeDetails.length > 0 && (
+                <div className="mb-5 space-y-1.5">
+                  <p
+                    className="text-[9px] uppercase tracking-widest mb-2"
+                    style={{ color: `${accent.badge}88` }}
+                  >
+                    Active GPU Nodes ({data.totalNodes})
+                  </p>
+                  {data.nodeDetails.slice(0, 3).map((n, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 text-xs"
+                      style={{ color: `${accent.badge}cc` }}
+                    >
+                      <Cpu size={10} />
+                      <span className="font-semibold">{n.name}</span>
+                      {n.model && (
+                        <span className="opacity-50">· {n.model}</span>
+                      )}
+                    </div>
+                  ))}
+                  {data.nodeDetails.length > 3 && (
+                    <p className="text-[10px] opacity-40">
+                      +{data.nodeDetails.length - 3} more nodes
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* License badge if present */}
+              {data.licenseLabel && (
+                <div
+                  className="mb-4 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-bold"
+                  style={{
+                    background: `${accent.badge}15`,
+                    border: `1px solid ${accent.badge}30`,
+                    color: `${accent.badge}cc`,
+                  }}
+                >
+                  <Shield size={9} /> {data.licenseLabel}
+                </div>
+              )}
+
               {/* Details grid */}
               <div className="grid grid-cols-3 gap-3 mb-5">
                 {[
                   { label: "Member ID", value: data.memberId },
-                  { label: "GPU Tier", value: tierName },
+                  { label: "Primary Node", value: data.primaryNode },
                   {
                     label: "Document",
                     value: data.kycDocumentType?.replace(/_/g, " ") || "—",
@@ -375,10 +400,12 @@ export default function ContributorIDPage() {
                       {label}
                     </p>
                     <p
-                      className="text-white font-bold text-xs"
+                      className="text-white font-bold text-xs truncate"
                       style={{
                         color:
-                          label === "Expires" && expired ? "#f87171" : "white",
+                          label === "Expires" && expired
+                            ? "#f87171"
+                            : "white",
                       }}
                     >
                       {value}
@@ -444,7 +471,11 @@ export default function ContributorIDPage() {
                 { label: "Contributor Name", value: data.fullName },
                 { label: "Email Address", value: data.email },
                 { label: "Country", value: data.country || "—" },
-                { label: "GPU Node Tier", value: tierName },
+                { label: "Primary GPU Node", value: data.primaryNode },
+                { label: "Total Active Nodes", value: String(data.totalNodes) },
+                ...(data.licenseLabel
+                  ? [{ label: "Operator License", value: data.licenseLabel }]
+                  : []),
                 { label: "Network", value: "OmniTask Pro GPU Compute Network" },
                 { label: "License Type", value: "Certified AI Operator" },
                 { label: "Valid From", value: fmt(data.activatedAt) },
@@ -465,12 +496,35 @@ export default function ContributorIDPage() {
                   className="flex justify-between items-center py-1.5 border-b border-slate-800/60 last:border-0"
                 >
                   <span className="text-slate-500 text-xs">{label}</span>
-                  <span className="text-white text-xs font-semibold">
+                  <span className="text-white text-xs font-semibold text-right max-w-[60%]">
                     {value}
                   </span>
                 </div>
               ))}
             </div>
+
+            {/* Node list on receipt */}
+            {data.nodeDetails.length > 0 && (
+              <div className="pt-2">
+                <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-2">
+                  Active GPU Nodes
+                </p>
+                <div className="space-y-1">
+                  {data.nodeDetails.map((n, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 text-xs text-slate-400"
+                    >
+                      <Server size={10} className="text-emerald-500 shrink-0" />
+                      <span>{n.name}</span>
+                      {n.model && (
+                        <span className="text-slate-600">· {n.model}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="pt-3 space-y-2">
               <div className="h-px bg-gradient-to-r from-transparent via-slate-700 to-transparent" />
@@ -479,9 +533,7 @@ export default function ContributorIDPage() {
                 AI GPU Infrastructure Network.
                 <br />
                 Member ID:{" "}
-                <span className="text-slate-400 font-mono">
-                  {data.memberId}
-                </span>{" "}
+                <span className="text-slate-400 font-mono">{data.memberId}</span>{" "}
                 · omnitaskpro.com
               </p>
               <div className="flex justify-center">

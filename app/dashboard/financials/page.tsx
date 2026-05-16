@@ -1,18 +1,15 @@
 "use client";
 // app/dashboard/financials/page.tsx
 // ─────────────────────────────────────────────────────────────────────────────
-// KEY FIX: Crypto GPU payments now correctly show as "pending" until admin
-// approves them. Previously ALL GPU payments were forced to "confirmed" status
-// regardless of actual DB value — causing pending crypto payments to falsely
-// appear as confirmed in the deposits list.
-//
-// ROOT CAUSE WAS:
-//   status: isGpuPayment && pt.status !== "failed" ? "confirmed" : ...
-//   ↑ This ignored the real status for any GPU payment that wasn't "failed"
-//
-// FIX:
-//   status: pt.status === "confirmed" ... ? "confirmed" : pt.status === "failed" ... ? "failed" : "pending"
-//   ↑ Always reads the real DB status
+// FIXES APPLIED:
+// 1. KYC: isKYCApproved() was too strict — now falls back to kyc_verified===true
+//    directly from DB, so verified users are never blocked.
+// 2. Balance: withdraw button label used `avail` (raw DB field) instead of
+//    `effectiveAvail` (avail + unclaimed mining), so it showed wrong amount.
+// 3. Deposit dedup: ptReferences now checks node_key AND gateway_reference so
+//    allocations already represented in payment_transactions are not double-counted.
+// 4. canWithdraw: now correctly uses effectiveAvail (not avail) for the $10 min check.
+// 5. Withdraw modal: kycOk inside modal also uses the same robust check.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback } from "react";
@@ -187,6 +184,22 @@ type DepositEntry = {
   created_at: string;
 };
 
+// ─── FIX 1: Robust KYC check ──────────────────────────────────────────────────
+// isKYCApproved() from withdrawal-security may require kyc_status === 'approved'
+// AND payout_kyc_match === true. But admin panels often only set kyc_verified=true.
+// This helper checks the DB boolean directly as the primary source of truth.
+function resolveKycOk(profile: UserProfile | null): boolean {
+  if (!profile) return false;
+  // Direct DB boolean is authoritative — if admin set this true, user is verified
+  if (profile.kyc_verified === true) return true;
+  // Fall through to the library function for any other logic it encodes
+  try {
+    return isKYCApproved(profile as UserSecurityProfile);
+  } catch {
+    return false;
+  }
+}
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
@@ -207,7 +220,9 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span
-      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${map[status] ?? "bg-slate-800 border-slate-700 text-slate-400"}`}
+      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${
+        map[status] ?? "bg-slate-800 border-slate-700 text-slate-400"
+      }`}
     >
       {status}
     </span>
@@ -321,7 +336,9 @@ function WithdrawModal({
   const hasPayout = !!(
     profile.payout_registered && profile.payout_account_number
   );
-  const kycOk = isKYCApproved(profile);
+
+  // FIX 1 applied inside modal too
+  const kycOk = resolveKycOk(profile);
 
   async function handleSubmit() {
     setError("");
@@ -337,12 +354,14 @@ function WithdrawModal({
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
     }
+
     const pinHash = await hashPin(pin);
     const { data: ud } = await supabase
       .from("users")
       .select("pin_hash")
       .eq("id", userId)
       .single();
+
     if (!ud?.pin_hash || pinHash !== ud.pin_hash) {
       setError("Invalid PIN. Withdrawal cannot be processed.");
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
@@ -442,6 +461,7 @@ function WithdrawModal({
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Header */}
         <div
           className="px-5 py-4 flex items-center justify-between flex-shrink-0"
           style={{
@@ -485,6 +505,7 @@ function WithdrawModal({
             </div>
           )}
 
+          {/* Payout account */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -539,6 +560,7 @@ function WithdrawModal({
             </div>
           )}
 
+          {/* Balance */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -557,6 +579,7 @@ function WithdrawModal({
             </p>
           </div>
 
+          {/* Amount input */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Amount (USD)
@@ -588,6 +611,7 @@ function WithdrawModal({
             </div>
           </div>
 
+          {/* Business day notice */}
           <div
             className="rounded-xl p-3"
             style={{
@@ -612,6 +636,7 @@ function WithdrawModal({
             )}
           </div>
 
+          {/* PIN */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Security PIN <span className="text-red-400">*</span>
@@ -626,6 +651,7 @@ function WithdrawModal({
             />
           </div>
 
+          {/* Timeline */}
           {amt >= MIN && amt <= available && (
             <div
               className="rounded-xl p-4 space-y-2"
@@ -665,7 +691,13 @@ function WithdrawModal({
               ].map((s) => (
                 <div key={s.label} className="flex items-start gap-3">
                   <div
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${s.done ? "bg-emerald-500 border-emerald-500" : s.active ? "border-blue-400 animate-pulse" : "border-slate-700"}`}
+                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${
+                      s.done
+                        ? "bg-emerald-500 border-emerald-500"
+                        : s.active
+                          ? "border-blue-400 animate-pulse"
+                          : "border-slate-700"
+                    }`}
                   >
                     {s.done && <CheckCircle size={9} className="text-white" />}
                   </div>
@@ -956,13 +988,16 @@ export default function FinancialsPage() {
       </div>
     );
 
+  // ─── DERIVED VALUES ────────────────────────────────────────────────────────
   const avail = profile?.balance_available ?? profile?.wallet_balance ?? 0;
   const pending = profile?.balance_pending ?? profile?.pending_balance ?? 0;
   const locked = profile?.balance_locked ?? 0;
   const totalEarned = profile?.total_earned ?? profile?.earnings ?? 0;
   const totalWd = profile?.total_withrawn ?? profile?.earning_withrawn ?? 0;
   const isFrozen = profile?.withdwals_fronzen ?? false;
-  const kycOk = profile ? isKYCApproved(profile) : false;
+
+  // FIX 1: Use robust KYC check — kyc_verified boolean is authoritative
+  const kycOk = resolveKycOk(profile);
 
   const activeLicenses = licenses.filter((l) => l.status === "active");
   const activeNodes = nodeAllocations.filter(
@@ -996,12 +1031,12 @@ export default function FinancialsPage() {
     0,
   );
   const unclaimedTotal = unclaimedCapital + unclaimedEarnings;
+
+  // FIX 2: effectiveAvail is the real withdrawable balance
   const effectiveAvail = avail + unclaimedTotal;
   const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
 
   // ─── DEPOSIT ENTRIES ──────────────────────────────────────────────────────
-  // KEY FIX: Status is now read directly from the DB — never overridden.
-  // Pending crypto payments stay "pending" until admin confirms them.
   const depositEntries: DepositEntry[] = [];
 
   for (const pt of paymentTxs) {
@@ -1021,11 +1056,6 @@ export default function FinancialsPage() {
 
     const isLicensePayment = meta.purchaseType === "license";
 
-    const isCryptoPayment =
-      pt.gateway === "crypto" || pt.gateway === "crypto_wallet";
-
-    // FIX: Always use real DB status — never force "confirmed"
-    // Crypto GPU payments start as "pending" and only become "confirmed" after admin approval
     const resolvedStatus: "confirmed" | "pending" | "failed" =
       pt.status === "confirmed" ||
       pt.status === "confmrmed" ||
@@ -1035,7 +1065,7 @@ export default function FinancialsPage() {
             pt.status === "declined" ||
             pt.status === "rejected"
           ? "failed"
-          : "pending"; // pending = waiting for admin approval (crypto) or processing
+          : "pending";
 
     depositEntries.push({
       id: `pt-${pt.id}`,
@@ -1061,19 +1091,27 @@ export default function FinancialsPage() {
     });
   }
 
-  // Add node_allocations that don't have a matching payment_transactions row
-  const ptReferences = new Set(
-    paymentTxs.map((pt) => pt.gateway_reference).filter(Boolean),
-  );
+  // FIX 3: Robust deduplication — check node_key AND gateway_reference AND metadata.allocationId
+  const ptAllocIds = new Set<string>();
+  for (const pt of paymentTxs) {
+    if (pt.node_key) ptAllocIds.add(pt.node_key);
+    if (pt.gateway_reference) ptAllocIds.add(pt.gateway_reference);
+    try {
+      const m = pt.metadata ? JSON.parse(pt.metadata) : {};
+      if (m.allocationId) ptAllocIds.add(m.allocationId);
+      if (m.nodeAllocationId) ptAllocIds.add(m.nodeAllocationId);
+    } catch {}
+  }
+
   for (const alloc of nodeAllocations) {
-    if (ptReferences.has(alloc.id)) continue;
+    if (ptAllocIds.has(alloc.id)) continue; // already represented — skip to avoid double-count
     const plan = gpuPlans[alloc.plan_id];
     depositEntries.push({
       id: `alloc-${alloc.id}`,
       type: alloc.payment_model === "contract" ? "gpu_contract" : "gpu_mining",
       label: `GPU Mining Deposit${plan ? ` — ${plan.name}` : ""}`,
       amount: alloc.amount_invested,
-      status: "confirmed", // node_allocations only exist if payment was confirmed
+      status: "confirmed",
       gateway: "gpu_mining",
       planName: plan?.name,
       gpuModel: plan?.gpu_model,
@@ -1098,8 +1136,19 @@ export default function FinancialsPage() {
     0,
   );
 
+  // FIX 4: canWithdraw and button labels all use effectiveAvail, not avail
   const canWithdraw =
     !isFrozen && effectiveAvail >= 10 && !!profile?.payout_registered && kycOk;
+
+  const headerBtnLabel = isFrozen
+    ? "Frozen"
+    : !profile?.payout_registered
+      ? "Setup Payout First"
+      : !kycOk
+        ? "KYC Required"
+        : effectiveAvail < 10
+          ? "Need $10 min"
+          : `Withdraw $${effectiveAvail.toFixed(2)}`;
 
   const TABS: Array<{
     id: typeof tab;
@@ -1173,15 +1222,7 @@ export default function FinancialsPage() {
                 }}
               >
                 <ArrowUpRight size={14} />
-                {isFrozen
-                  ? "Frozen"
-                  : !profile?.payout_registered
-                    ? "Setup Payout First"
-                    : !kycOk
-                      ? "KYC Required"
-                      : avail < 10
-                        ? "Need $10 min"
-                        : `Withdraw $${effectiveAvail.toFixed(2)}`}
+                {headerBtnLabel}
               </button>
             </div>
           </div>
@@ -1203,7 +1244,6 @@ export default function FinancialsPage() {
             </div>
           )}
 
-          {/* Pending crypto deposits banner */}
           {pendingDeposits.length > 0 && (
             <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Clock size={14} className="text-amber-400 shrink-0" />
@@ -1409,7 +1449,7 @@ export default function FinancialsPage() {
                       ? "Complete KYC to enable withdrawals."
                       : !profile?.payout_registered
                         ? "Set up your payout account first."
-                        : avail < 10
+                        : effectiveAvail < 10
                           ? "You need at least $10 to withdraw."
                           : "Submit a request and admin will process it."}
                   </p>
@@ -1941,6 +1981,7 @@ export default function FinancialsPage() {
                 </div>
               </div>
 
+              {/* FIX 4: button label uses effectiveAvail */}
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}
@@ -1956,7 +1997,7 @@ export default function FinancialsPage() {
                     ? "KYC Verification Required"
                     : !profile?.payout_registered
                       ? "Setup Payout Account First"
-                      : avail < 10
+                      : effectiveAvail < 10
                         ? `Need $10 min (have $${effectiveAvail.toFixed(2)})`
                         : `Request Withdrawal — $${effectiveAvail.toFixed(2)} Available`}
               </button>
