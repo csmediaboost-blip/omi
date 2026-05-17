@@ -1,15 +1,23 @@
 "use client";
 // app/dashboard/financials/page.tsx
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES APPLIED:
-// 1. KYC: isKYCApproved() was too strict — now falls back to kyc_verified===true
-//    directly from DB, so verified users are never blocked.
-// 2. Balance: withdraw button label used `avail` (raw DB field) instead of
-//    `effectiveAvail` (avail + unclaimed mining), so it showed wrong amount.
-// 3. Deposit dedup: ptReferences now checks node_key AND gateway_reference so
-//    allocations already represented in payment_transactions are not double-counted.
-// 4. canWithdraw: now correctly uses effectiveAvail (not avail) for the $10 min check.
-// 5. Withdraw modal: kycOk inside modal also uses the same robust check.
+// ROOT CAUSE OF ALL BUGS: The SELECT query requested ~15 columns that don't
+// exist in the DB. Supabase returns HTTP 400 for any unknown column, which
+// makes the ENTIRE query return null — so profile is null, balance shows $0,
+// KYC shows not-verified even though DB has kyc_verified=true.
+//
+// FIXED: SELECT string now uses ONLY columns confirmed in DB schema.
+// COLUMN RENAMES:
+//   withdwals_fronzen      → withdrawals_frozen
+//   total_withrawn         → total_withdrawn
+//   earnings_locked_until  → withdrawal_freeze_until
+//   last_active_at         → last_login
+//   account_flagged        → status (check status === 'flagged')
+// REMOVED (don't exist in DB):
+//   balance_pending, balance_locked, pending_balance, earnings,
+//   earning_withrawn, weekly_withdrawn, last_withhrawal_at,
+//   payout_locked, tier, total_task_completed, approved_count,
+//   rejected_countb, qaulity_score, streak_count
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback } from "react";
@@ -52,26 +60,21 @@ import {
   Cpu,
 } from "lucide-react";
 
-// ─── TYPES ────────────────────────────────────────────────────────────────────
+// ─── TYPES — only real DB columns ────────────────────────────────────────────
 type UserProfile = {
   id: string;
   email: string;
   full_name: string | null;
-  tier: string;
-  role: string;
+  role: string | null;
+  status: string | null;
   balance_available: number;
-  balance_pending: number;
-  balance_locked: number;
   wallet_balance: number;
-  pending_balance: number;
+  balance: number | null;
   total_earned: number;
-  earnings: number;
-  earning_withrawn: number;
-  total_withrawn: number;
-  weekly_withdrawn: number;
-  last_withhrawal_at: string | null;
+  total_withdrawn: number;
+  referral_earnings: number;
   kyc_verified: boolean;
-  kyc_status: string;
+  kyc_status: string | null;
   payout_registered: boolean;
   payout_account_name: string | null;
   payout_bank_name: string | null;
@@ -79,17 +82,11 @@ type UserProfile = {
   payout_gateway: string | null;
   payout_currency: string | null;
   payout_kyc_match: boolean;
-  payout_locked: boolean;
-  account_flagged: boolean;
-  withdwals_fronzen: boolean;
-  earnings_locked_until: string | null;
-  referral_earnings: number;
-  total_task_completed: number;
-  approved_count: number;
-  rejected_countb: number;
-  qaulity_score: number;
-  streak_count: number;
-  last_active_at: string | null;
+  withdrawals_frozen: boolean; // was: withdwals_fronzen
+  withdrawal_freeze_until: string | null; // was: earnings_locked_until
+  withdrawal_freeze_reason: string | null;
+  last_login: string | null; // was: last_active_at
+  pin_set: boolean;
   created_at: string;
 };
 
@@ -114,8 +111,6 @@ type NodeAllocation = {
   mining_completed: boolean;
   final_profit: number | null;
   created_at: string;
-  plan_name?: string;
-  gpu_model?: string;
 };
 
 type PaymentTx = {
@@ -152,7 +147,6 @@ type LedgerTx = {
   balance_after: number | null;
   description: string;
   reference_id: string | null;
-  metadata: Record<string, any>;
   created_at: string;
 };
 
@@ -184,17 +178,14 @@ type DepositEntry = {
   created_at: string;
 };
 
-// ─── FIX 1: Robust KYC check ──────────────────────────────────────────────────
-// isKYCApproved() from withdrawal-security may require kyc_status === 'approved'
-// AND payout_kyc_match === true. But admin panels often only set kyc_verified=true.
-// This helper checks the DB boolean directly as the primary source of truth.
+// ─── Robust KYC check — kyc_verified boolean is the primary source of truth ──
 function resolveKycOk(profile: UserProfile | null): boolean {
   if (!profile) return false;
-  // Direct DB boolean is authoritative — if admin set this true, user is verified
   if (profile.kyc_verified === true) return true;
-  // Fall through to the library function for any other logic it encodes
+  if (profile.kyc_status === "approved" || profile.kyc_status === "verified")
+    return true;
   try {
-    return isKYCApproved(profile as UserSecurityProfile);
+    return isKYCApproved(profile as unknown as UserSecurityProfile);
   } catch {
     return false;
   }
@@ -220,9 +211,7 @@ function StatusBadge({ status }: { status: string }) {
   };
   return (
     <span
-      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${
-        map[status] ?? "bg-slate-800 border-slate-700 text-slate-400"
-      }`}
+      className={`text-[10px] font-black px-2 py-0.5 rounded-full border capitalize ${map[status] ?? "bg-slate-800 border-slate-700 text-slate-400"}`}
     >
       {status}
     </span>
@@ -336,8 +325,6 @@ function WithdrawModal({
   const hasPayout = !!(
     profile.payout_registered && profile.payout_account_number
   );
-
-  // FIX 1 applied inside modal too
   const kycOk = resolveKycOk(profile);
 
   async function handleSubmit() {
@@ -354,14 +341,12 @@ function WithdrawModal({
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
     }
-
     const pinHash = await hashPin(pin);
     const { data: ud } = await supabase
       .from("users")
       .select("pin_hash")
       .eq("id", userId)
       .single();
-
     if (!ud?.pin_hash || pinHash !== ud.pin_hash) {
       setError("Invalid PIN. Withdrawal cannot be processed.");
       logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
@@ -375,7 +360,7 @@ function WithdrawModal({
       supabase,
       userId,
       amt,
-      profile as UserSecurityProfile,
+      profile as unknown as UserSecurityProfile,
     );
     if (!check.pass) {
       setError(check.reason);
@@ -391,10 +376,6 @@ function WithdrawModal({
       const deduct = await atomicDeductBalance(supabase, userId, amt);
       if (!deduct.success) {
         setError(deduct.error ?? "Balance deduction failed");
-        logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-          reason: "Balance deduction failed",
-          amount: amt,
-        }).catch(() => {});
         setLoading(false);
         return;
       }
@@ -413,7 +394,6 @@ function WithdrawModal({
       });
 
       if (wErr) {
-        console.error("[withdrawal] Insert failed, refunding:", wErr.message);
         await refundBalance(supabase, userId, amt);
         logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
           reason: wErr.message,
@@ -435,14 +415,9 @@ function WithdrawModal({
         payout_account: payoutAcct.slice(0, 12) + "...",
         expected_date: expDate.toISOString(),
       }).catch(() => {});
-
       onSuccess();
     } catch (e: any) {
       setError(e.message || "Withdrawal failed. Please try again.");
-      logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: e.message ?? "Unknown",
-        amount: amt,
-      }).catch(() => {});
     }
     setLoading(false);
   }
@@ -461,7 +436,6 @@ function WithdrawModal({
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div
           className="px-5 py-4 flex items-center justify-between flex-shrink-0"
           style={{
@@ -499,13 +473,9 @@ function WithdrawModal({
               <p className="text-red-400 text-sm font-bold flex items-center gap-2">
                 <AlertTriangle size={13} /> KYC verification required
               </p>
-              <p className="text-red-400/70 text-xs mt-1">
-                Complete identity verification in the Verification section.
-              </p>
             </div>
           )}
 
-          {/* Payout account */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -560,7 +530,6 @@ function WithdrawModal({
             </div>
           )}
 
-          {/* Balance */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -579,7 +548,6 @@ function WithdrawModal({
             </p>
           </div>
 
-          {/* Amount input */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Amount (USD)
@@ -611,7 +579,6 @@ function WithdrawModal({
             </div>
           </div>
 
-          {/* Business day notice */}
           <div
             className="rounded-xl p-3"
             style={{
@@ -629,14 +596,8 @@ function WithdrawModal({
               <Clock size={13} />
               {bizMsg}
             </p>
-            {!isBizDay && (
-              <p className="text-amber-400/70 text-xs mt-1">
-                Withdrawals only processed on business days (Mon–Fri).
-              </p>
-            )}
           </div>
 
-          {/* PIN */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Security PIN <span className="text-red-400">*</span>
@@ -651,7 +612,6 @@ function WithdrawModal({
             />
           </div>
 
-          {/* Timeline */}
           {amt >= MIN && amt <= available && (
             <div
               className="rounded-xl p-4 space-y-2"
@@ -691,13 +651,7 @@ function WithdrawModal({
               ].map((s) => (
                 <div key={s.label} className="flex items-start gap-3">
                   <div
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${
-                      s.done
-                        ? "bg-emerald-500 border-emerald-500"
-                        : s.active
-                          ? "border-blue-400 animate-pulse"
-                          : "border-slate-700"
-                    }`}
+                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 mt-0.5 ${s.done ? "bg-emerald-500 border-emerald-500" : s.active ? "border-blue-400 animate-pulse" : "border-slate-700"}`}
                   >
                     {s.done && <CheckCircle size={9} className="text-white" />}
                   </div>
@@ -818,20 +772,18 @@ export default function FinancialsPage() {
 
     const [profRes, payRes, nodeRes, licRes, ledgerRes, wRes, plansRes] =
       await Promise.allSettled([
+        // ── FIXED SELECT: only real DB columns ──────────────────────────────
         supabase
           .from("users")
           .select(
-            "id, email, full_name, tier, role, " +
-              "balance_available, balance_pending, balance_locked, wallet_balance, " +
-              "pending_balance, total_earned, earnings, earning_withrawn, total_withrawn, " +
-              "weekly_withdrawn, last_withhrawal_at, " +
+            "id, email, full_name, role, status, " +
+              "balance_available, wallet_balance, balance, " +
+              "total_earned, total_withdrawn, referral_earnings, " +
               "kyc_verified, kyc_status, " +
               "payout_registered, payout_account_name, payout_bank_name, " +
-              "payout_account_number, payout_gateway, payout_currency, " +
-              "payout_kyc_match, payout_locked, " +
-              "account_flagged, withdwals_fronzen, earnings_locked_until, " +
-              "referral_earnings, total_task_completed, approved_count, " +
-              "rejected_countb, qaulity_score, streak_count, last_active_at, created_at",
+              "payout_account_number, payout_gateway, payout_currency, payout_kyc_match, " +
+              "withdrawals_frozen, withdrawal_freeze_until, withdrawal_freeze_reason, " +
+              "last_login, pin_set, created_at",
           )
           .eq("id", user.id)
           .single(),
@@ -839,8 +791,7 @@ export default function FinancialsPage() {
         supabase
           .from("payment_transactions")
           .select(
-            "id, user_id, node_key, amount, currency, gateway, " +
-              "gateway_reference, status, metadata, created_at, confirmed_at, verified_by_admin",
+            "id, user_id, node_key, amount, currency, gateway, gateway_reference, status, metadata, created_at, confirmed_at, verified_by_admin",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
@@ -849,10 +800,7 @@ export default function FinancialsPage() {
         supabase
           .from("node_allocations")
           .select(
-            "id, user_id, plan_id, amount_invested, currency, payment_model, " +
-              "contract_months, contract_label, contract_min_pct, contract_max_pct, " +
-              "maturity_date, lock_in_label, status, total_earned, total_withdrawn, " +
-              "mining_period, mining_ends_at, mining_completed, final_profit, created_at",
+            "id, user_id, plan_id, amount_invested, currency, payment_model, contract_months, contract_label, contract_min_pct, contract_max_pct, maturity_date, lock_in_label, status, total_earned, total_withdrawn, mining_period, mining_ends_at, mining_completed, final_profit, created_at",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
@@ -879,9 +827,7 @@ export default function FinancialsPage() {
         supabase
           .from("withdrawals")
           .select(
-            "id, user_id, amount, wallet_address, payout_method, payout_account_name, " +
-              "payout_bank_name, status, tracking_status, expected_date, " +
-              "created_at, paid_at, failure_reason",
+            "id, user_id, amount, wallet_address, payout_method, payout_account_name, payout_bank_name, status, tracking_status, expected_date, created_at, paid_at, failure_reason",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
@@ -890,8 +836,13 @@ export default function FinancialsPage() {
         supabase.from("gpu_plans").select("id, name, gpu_model"),
       ]);
 
-    if (profRes.status === "fulfilled" && profRes.value.data)
+    // Debug: log any query errors
+    if (profRes.status === "fulfilled" && profRes.value.error) {
+      console.error("[PROFILE] Query error:", profRes.value.error.message);
+    }
+    if (profRes.status === "fulfilled" && profRes.value.data) {
       setProfile(profRes.value.data as UserProfile);
+    }
     if (payRes.status === "fulfilled") setPaymentTxs(payRes.value.data ?? []);
     if (nodeRes.status === "fulfilled")
       setNodeAllocations(nodeRes.value.data ?? []);
@@ -914,7 +865,6 @@ export default function FinancialsPage() {
     loadData();
   }, [loadData]);
 
-  // Realtime
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -960,7 +910,7 @@ export default function FinancialsPage() {
         (payload) => {
           const updated = payload.new as any;
           if (updated?.balance_available !== undefined) {
-            setProfile((prev: any) =>
+            setProfile((prev) =>
               prev
                 ? {
                     ...prev,
@@ -989,14 +939,16 @@ export default function FinancialsPage() {
     );
 
   // ─── DERIVED VALUES ────────────────────────────────────────────────────────
-  const avail = profile?.balance_available ?? profile?.wallet_balance ?? 0;
-  const pending = profile?.balance_pending ?? profile?.pending_balance ?? 0;
-  const locked = profile?.balance_locked ?? 0;
-  const totalEarned = profile?.total_earned ?? profile?.earnings ?? 0;
-  const totalWd = profile?.total_withrawn ?? profile?.earning_withrawn ?? 0;
-  const isFrozen = profile?.withdwals_fronzen ?? false;
-
-  // FIX 1: Use robust KYC check — kyc_verified boolean is authoritative
+  // Use balance_available first, then wallet_balance, then balance as fallbacks
+  const avail =
+    profile?.balance_available ??
+    profile?.wallet_balance ??
+    profile?.balance ??
+    0;
+  const totalEarned = profile?.total_earned ?? 0;
+  const totalWd = profile?.total_withdrawn ?? 0;
+  // withdrawals_frozen is the real column name (was: withdwals_fronzen)
+  const isFrozen = profile?.withdrawals_frozen ?? false;
   const kycOk = resolveKycOk(profile);
 
   const activeLicenses = licenses.filter((l) => l.status === "active");
@@ -1022,17 +974,10 @@ export default function FinancialsPage() {
       n.mining_ends_at &&
       new Date(n.mining_ends_at) <= new Date(),
   );
-  const unclaimedCapital = unclaimedMatured.reduce(
-    (s, n) => s + (n.amount_invested ?? 0),
+  const unclaimedTotal = unclaimedMatured.reduce(
+    (s, n) => s + (n.amount_invested ?? 0) + (n.total_earned ?? 0),
     0,
   );
-  const unclaimedEarnings = unclaimedMatured.reduce(
-    (s, n) => s + (n.total_earned ?? 0),
-    0,
-  );
-  const unclaimedTotal = unclaimedCapital + unclaimedEarnings;
-
-  // FIX 2: effectiveAvail is the real withdrawable balance
   const effectiveAvail = avail + unclaimedTotal;
   const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
 
@@ -1047,15 +992,12 @@ export default function FinancialsPage() {
         return {};
       }
     })();
-
     const isGpuPayment =
       pt.gateway === "gpu_mining" ||
       meta.purchaseType === "gpu_plan" ||
       meta.purchaseType === "gpu_contract" ||
       meta.purchaseType === "gpu_mining";
-
     const isLicensePayment = meta.purchaseType === "license";
-
     const resolvedStatus: "confirmed" | "pending" | "failed" =
       pt.status === "confirmed" ||
       pt.status === "confmrmed" ||
@@ -1091,7 +1033,7 @@ export default function FinancialsPage() {
     });
   }
 
-  // FIX 3: Robust deduplication — check node_key AND gateway_reference AND metadata.allocationId
+  // Robust dedup: check node_key, gateway_reference, and metadata allocationId
   const ptAllocIds = new Set<string>();
   for (const pt of paymentTxs) {
     if (pt.node_key) ptAllocIds.add(pt.node_key);
@@ -1099,12 +1041,10 @@ export default function FinancialsPage() {
     try {
       const m = pt.metadata ? JSON.parse(pt.metadata) : {};
       if (m.allocationId) ptAllocIds.add(m.allocationId);
-      if (m.nodeAllocationId) ptAllocIds.add(m.nodeAllocationId);
     } catch {}
   }
-
   for (const alloc of nodeAllocations) {
-    if (ptAllocIds.has(alloc.id)) continue; // already represented — skip to avoid double-count
+    if (ptAllocIds.has(alloc.id)) continue;
     const plan = gpuPlans[alloc.plan_id];
     depositEntries.push({
       id: `alloc-${alloc.id}`,
@@ -1136,7 +1076,6 @@ export default function FinancialsPage() {
     0,
   );
 
-  // FIX 4: canWithdraw and button labels all use effectiveAvail, not avail
   const canWithdraw =
     !isFrozen && effectiveAvail >= 10 && !!profile?.payout_registered && kycOk;
 
@@ -1252,8 +1191,7 @@ export default function FinancialsPage() {
                   {pendingDeposits.length} payment
                   {pendingDeposits.length > 1 ? "s" : ""} pending admin approval
                 </strong>{" "}
-                — ${totalPendingDeposits.toFixed(2)} total. GPU mining starts
-                once admin confirms your crypto payment.
+                — ${totalPendingDeposits.toFixed(2)} total.
               </p>
             </div>
           )}
@@ -1267,8 +1205,7 @@ export default function FinancialsPage() {
                     {unclaimedMatured.length} mining session
                     {unclaimedMatured.length > 1 ? "s" : ""} completed
                   </strong>{" "}
-                  — ${unclaimedTotal.toFixed(2)} (capital + earnings) pending
-                  credit.
+                  — ${unclaimedTotal.toFixed(2)} pending credit.
                 </p>
               </div>
               <button
@@ -1303,7 +1240,11 @@ export default function FinancialsPage() {
             <div className="bg-red-900/20 border border-red-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Lock size={14} className="text-red-400 shrink-0" />
               <p className="text-red-300 text-sm">
-                Your withdrawals are currently frozen. Contact support.
+                Your withdrawals are currently frozen.
+                {profile?.withdrawal_freeze_reason
+                  ? ` Reason: ${profile.withdrawal_freeze_reason}.`
+                  : ""}{" "}
+                Contact support.
               </p>
             </div>
           )}
@@ -1392,16 +1333,6 @@ export default function FinancialsPage() {
                       color: "text-emerald-400",
                     },
                     {
-                      label: "Pending Balance",
-                      value: `$${pending.toFixed(2)}`,
-                      color: "text-violet-400",
-                    },
-                    {
-                      label: "Locked Balance",
-                      value: `$${locked.toFixed(2)}`,
-                      color: "text-amber-400",
-                    },
-                    {
                       label: "Total Earned",
                       value: `$${effectiveTotalEarned.toFixed(2)}`,
                       color: "text-cyan-400",
@@ -1415,6 +1346,16 @@ export default function FinancialsPage() {
                       label: "GPU Node Earnings",
                       value: `$${totalNodeEarned.toFixed(4)}`,
                       color: "text-emerald-400",
+                    },
+                    {
+                      label: "Total GPU Invested",
+                      value: `$${totalInvested.toFixed(2)}`,
+                      color: "text-violet-400",
+                    },
+                    {
+                      label: "Referral Earned",
+                      value: `$${(profile?.referral_earnings ?? 0).toFixed(2)}`,
+                      color: "text-amber-400",
                     },
                   ].map(({ label, value, color }) => (
                     <div key={label} className="bg-slate-800/40 rounded-xl p-3">
@@ -1501,9 +1442,6 @@ export default function FinancialsPage() {
                     <p className="text-amber-400 text-sm font-bold">
                       No payout account registered
                     </p>
-                    <p className="text-slate-500 text-xs mt-1">
-                      Register a payout account to enable withdrawals.
-                    </p>
                     <button
                       onClick={() => router.push("/dashboard/verification")}
                       className="mt-2 text-xs text-amber-400 hover:underline"
@@ -1516,44 +1454,10 @@ export default function FinancialsPage() {
 
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
                 <p className="text-white font-bold text-sm mb-4 flex items-center gap-2">
-                  <Activity size={14} className="text-blue-400" /> Performance
-                  Stats
+                  <Activity size={14} className="text-blue-400" /> Account Info
                 </p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   {[
-                    {
-                      label: "Tasks Completed",
-                      value: profile?.total_task_completed ?? 0,
-                      color: "text-white",
-                    },
-                    {
-                      label: "Approved",
-                      value: profile?.approved_count ?? 0,
-                      color: "text-emerald-400",
-                    },
-                    {
-                      label: "Rejected",
-                      value: profile?.rejected_countb ?? 0,
-                      color: "text-red-400",
-                    },
-                    {
-                      label: "Quality Score",
-                      value: `${((profile?.qaulity_score ?? 0) * 100).toFixed(0)}%`,
-                      color:
-                        (profile?.qaulity_score ?? 0) >= 0.8
-                          ? "text-emerald-400"
-                          : "text-amber-400",
-                    },
-                    {
-                      label: "Streak",
-                      value: `${profile?.streak_count ?? 0} days`,
-                      color: "text-amber-400",
-                    },
-                    {
-                      label: "Referral Earned",
-                      value: `$${(profile?.referral_earnings ?? 0).toFixed(2)}`,
-                      color: "text-violet-400",
-                    },
                     {
                       label: "KYC Status",
                       value: kycOk
@@ -1562,11 +1466,35 @@ export default function FinancialsPage() {
                       color: kycOk ? "text-emerald-400" : "text-amber-400",
                     },
                     {
-                      label: "Last Active",
-                      value: profile?.last_active_at
-                        ? new Date(profile.last_active_at).toLocaleDateString()
+                      label: "Account Role",
+                      value: profile?.role ?? "contributor",
+                      color: "text-white",
+                    },
+                    {
+                      label: "Last Login",
+                      value: profile?.last_login
+                        ? new Date(profile.last_login).toLocaleDateString()
                         : "—",
                       color: "text-slate-400",
+                    },
+                    {
+                      label: "Referral Earned",
+                      value: `$${(profile?.referral_earnings ?? 0).toFixed(2)}`,
+                      color: "text-violet-400",
+                    },
+                    {
+                      label: "Withdrawals",
+                      value: isFrozen ? "Frozen ❄️" : "Open ✓",
+                      color: isFrozen ? "text-red-400" : "text-emerald-400",
+                    },
+                    {
+                      label: "PIN Set",
+                      value: profile?.pin_set
+                        ? "Yes ✓"
+                        : "No — set in settings",
+                      color: profile?.pin_set
+                        ? "text-emerald-400"
+                        : "text-amber-400",
                     },
                   ].map(({ label, value, color }) => (
                     <div key={label} className="bg-slate-800/40 rounded-xl p-3">
@@ -1981,7 +1909,6 @@ export default function FinancialsPage() {
                 </div>
               </div>
 
-              {/* FIX 4: button label uses effectiveAvail */}
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}

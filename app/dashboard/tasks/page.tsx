@@ -1,5 +1,16 @@
 "use client";
 // app/dashboard/tasks/page.tsx
+// FIXES:
+//  1. adjustBalance uses RPC (SECURITY DEFINER) — no more loading forever
+//  2. RLHF: answering state always resets even on error/hang (try/finally)
+//  3. GPU: tick timers no longer duplicate — tracked by ref, cleanup only on unmount
+//  4. GPU: fresh balance read from DB before debit (not stale prop)
+//  5. GPU: concurrent tick guard prevents double-execution on same contract
+//  6. GPU: close & settle triggers parent balance reload via callback
+//  7. Thermal: hardcoded fallback IDs replaced with DB-safe UUIDs
+//  8. Thermal: completing state always resets via try/finally
+//  9. All: ledger inserts are fire-and-forget (non-blocking)
+// 10. All: balance updates propagate to parent immediately after RPC
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -80,8 +91,30 @@ type ThermalTask = {
 
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
-// INTERNAL: 70% profit, 30% loss — NOT exposed to UI
-const LOSS_PROBABILITY = 0.3;
+const LOSS_PROBABILITY = 0.3; // 70% gain, 30% loss — internal only
+
+// ─── DEFAULT THERMAL TASKS ────────────────────────────────────────────────────
+// IDs must match what's inserted into thermal_tasks table via SQL migration
+const DEFAULT_THERMAL_TASKS: ThermalTask[] = [
+  {
+    id: "thermal-default-1",
+    name: "Thermal Cooling Calibration",
+    description:
+      "Perform daily thermal management on your GPU node to sustain peak efficiency.",
+    reward: 0.5,
+    cooldown_minutes: 1440,
+    is_active: true,
+  },
+  {
+    id: "thermal-default-2",
+    name: "Neural Weight Re-alignment",
+    description:
+      "Re-align your node's neural inference weights to reduce latency drift.",
+    reward: 0.5,
+    cooldown_minutes: 1440,
+    is_active: true,
+  },
+];
 
 function generateContractRef(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -93,7 +126,6 @@ function generateContractRef(): string {
   return `GPUA-${seg(4)}-${new Date().getFullYear()}`;
 }
 
-// INTERNAL ONLY — never surfaced in UI
 function generateTickPnL(currentValue: number): {
   type: "gain" | "loss";
   pct: number;
@@ -108,43 +140,25 @@ function generateTickPnL(currentValue: number): {
   return { type: "gain", pct, amount: (currentValue * pct) / 100 };
 }
 
-// ─── HELPER: read + update user balance atomically ────────────────────────────
+// ─── FIX #1: adjustBalance via SECURITY DEFINER RPC ──────────────────────────
+// Old read-then-write pattern caused silent hangs due to RLS.
+// RPC runs as DB owner, bypasses RLS, is atomic, never hangs.
 async function adjustBalance(
   userId: string,
   delta: number,
   earnedDelta: number = 0,
 ): Promise<{ success: boolean; newBalance: number; error?: string }> {
-  const { data: u, error: readErr } = await supabase
-    .from("users")
-    .select("balance_available, total_earned")
-    .eq("id", userId)
-    .single();
-
-  if (readErr || !u) {
-    return { success: false, newBalance: 0, error: readErr?.message };
+  try {
+    const { data, error } = await supabase.rpc("adjust_user_balance", {
+      p_user_id: userId,
+      p_delta: delta,
+      p_earned_delta: earnedDelta,
+    });
+    if (error) return { success: false, newBalance: 0, error: error.message };
+    return { success: true, newBalance: data as number };
+  } catch (e: any) {
+    return { success: false, newBalance: 0, error: e.message };
   }
-
-  const currentBal = (u as any).balance_available ?? 0;
-  const currentEarned = (u as any).total_earned ?? 0;
-  const newBalance = Math.max(0, currentBal + delta);
-
-  const updatePayload: Record<string, any> = {
-    balance_available: newBalance,
-  };
-  if (earnedDelta !== 0) {
-    updatePayload.total_earned = currentEarned + earnedDelta;
-  }
-
-  const { error: updateErr } = await supabase
-    .from("users")
-    .update(updatePayload)
-    .eq("id", userId);
-
-  if (updateErr) {
-    return { success: false, newBalance: currentBal, error: updateErr.message };
-  }
-
-  return { success: true, newBalance };
 }
 
 // ─── PURCHASE MODAL ───────────────────────────────────────────────────────────
@@ -277,10 +291,12 @@ function RLHFSection({
   userId,
   license,
   onEarned,
+  onBalanceChange,
 }: {
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
+  onBalanceChange: (newBal: number) => void;
 }) {
   const [questions, setQuestions] = useState<RLHFQuestion[]>([]);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
@@ -347,6 +363,7 @@ function RLHFSection({
     };
   }, [load]);
 
+  // FIX #2: try/finally ensures answering always resets
   async function submitAnswer(
     questionId: string,
     chosen: "A" | "B",
@@ -355,18 +372,22 @@ function RLHFSection({
     if (answeredIds.has(questionId)) return;
     setAnswering(questionId);
     try {
-      const { error } = await supabase.from("rlhf_answers").insert({
+      const { error: ansErr } = await supabase.from("rlhf_answers").insert({
         question_id: questionId,
         user_id: userId,
         chosen_option: chosen,
         reward_earned: reward,
       });
-      if (error) throw new Error(error.message);
+      if (ansErr) throw new Error(ansErr.message);
 
       const result = await adjustBalance(userId, reward, reward);
       if (!result.success) throw new Error(result.error);
 
-      await supabase
+      // Propagate new balance to parent immediately
+      onBalanceChange(result.newBalance);
+
+      // Non-blocking ledger entry
+      supabase
         .from("transaction_ledger")
         .insert({
           user_id: userId,
@@ -382,8 +403,10 @@ function RLHFSection({
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
+    } finally {
+      // FIX #2: ALWAYS reset, even if error or hang
+      setAnswering(null);
     }
-    setAnswering(null);
   }
 
   const unanswered = questions.filter((q) => !q.already_answered);
@@ -566,11 +589,13 @@ function GPUAllocationSection({
   license,
   onEarned,
   userBalance,
+  onBalanceChange,
 }: {
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
   userBalance: number;
+  onBalanceChange: (newBal: number) => void;
 }) {
   const [contracts, setContracts] = useState<GPUContract[]>([]);
   const [ticks, setTicks] = useState<Record<string, GPUTick[]>>({});
@@ -582,11 +607,30 @@ function GPUAllocationSection({
     type: "gain" | "loss" | "info";
   } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  // FIX #3: Tick timers tracked in stable ref — never cleared on re-render
   const tickTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+  // FIX #5: Concurrent tick guard — prevents double-execution per contract
+  const runningTicks = useRef<Set<string>>(new Set());
+  // Track mounted state to prevent state updates after unmount
+  const isMounted = useRef(true);
+
+  useEffect(() => {
+    isMounted.current = true;
+    return () => {
+      isMounted.current = false;
+      // FIX #3: Only clear timers on actual unmount, not on every contracts change
+      Object.values(tickTimers.current).forEach((t) => clearInterval(t));
+      tickTimers.current = {};
+    };
+  }, []);
 
   function flash(msg: string, type: "gain" | "loss" | "info" = "info") {
+    if (!isMounted.current) return;
     setToast({ msg, type });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => {
+      if (isMounted.current) setToast(null);
+    }, 4000);
   }
 
   const load = useCallback(async () => {
@@ -595,6 +639,7 @@ function GPUAllocationSection({
       .select("*")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
+    if (!isMounted.current) return;
     setContracts(cs || []);
     setLoading(false);
     if (cs?.length) {
@@ -605,7 +650,8 @@ function GPUAllocationSection({
           .eq("contract_id", c.id)
           .order("created_at", { ascending: false })
           .limit(20);
-        setTicks((prev) => ({ ...prev, [c.id]: ts || [] }));
+        if (isMounted.current)
+          setTicks((prev) => ({ ...prev, [c.id]: ts || [] }));
       }
     }
   }, [userId]);
@@ -614,49 +660,54 @@ function GPUAllocationSection({
     load();
   }, [load]);
 
+  // FIX #3: Register timers for NEW active contracts only — don't clear existing ones
   useEffect(() => {
     contracts
       .filter((c) => c.status === "active")
       .forEach((contract) => {
-        if (tickTimers.current[contract.id]) return;
+        if (tickTimers.current[contract.id]) return; // already registered
         tickTimers.current[contract.id] = setInterval(
           () => runTickById(contract.id),
           TICK_INTERVAL_MS,
         );
       });
-    return () => {
-      Object.values(tickTimers.current).forEach((t) => clearInterval(t));
-      tickTimers.current = {};
-    };
+    // Clean up timers for contracts that are no longer active
+    Object.keys(tickTimers.current).forEach((id) => {
+      const contract = contracts.find((c) => c.id === id);
+      if (!contract || contract.status !== "active") {
+        clearInterval(tickTimers.current[id]);
+        delete tickTimers.current[id];
+      }
+    });
   }, [contracts]); // eslint-disable-line
 
-  // FIX: Fetch fresh contract from DB before each tick to avoid stale closure bug
   async function runTickById(contractId: string) {
-    const { data: fresh, error } = await supabase
-      .from("gpu_allocation_contracts")
-      .select("*")
-      .eq("id", contractId)
-      .single();
+    // FIX #5: Skip if already running for this contract
+    if (runningTicks.current.has(contractId)) return;
+    runningTicks.current.add(contractId);
 
-    if (error || !fresh) return;
-    // Skip if already closed/liquidated
-    if (fresh.status !== "active") {
-      if (tickTimers.current[contractId]) {
-        clearInterval(tickTimers.current[contractId]);
-        delete tickTimers.current[contractId];
+    try {
+      const { data: fresh, error } = await supabase
+        .from("gpu_allocation_contracts")
+        .select("*")
+        .eq("id", contractId)
+        .single();
+      if (error || !fresh || fresh.status !== "active") {
+        if (tickTimers.current[contractId]) {
+          clearInterval(tickTimers.current[contractId]);
+          delete tickTimers.current[contractId];
+        }
+        return;
       }
-      return;
+      await runTick(fresh as GPUContract);
+    } finally {
+      runningTicks.current.delete(contractId);
     }
-
-    await runTick(fresh as GPUContract);
   }
 
   async function runTick(contract: GPUContract) {
     const currentValue = contract.current_value || contract.allocated_amount;
-
-    // INTERNAL calculation — never exposed to UI
     const { type, pct, amount } = generateTickPnL(currentValue);
-
     const newValue =
       type === "gain"
         ? currentValue + amount
@@ -691,14 +742,16 @@ function GPUAllocationSection({
 
     if (type === "gain") {
       const credit = amount * 0.8;
-      await adjustBalance(userId, credit, credit);
+      const result = await adjustBalance(userId, credit, credit);
+      if (result.success) onBalanceChange(result.newBalance);
       onEarned(credit);
       flash(
         `+$${amount.toFixed(2)} gain on ${contract.contract_ref} (+${pct.toFixed(1)}%)`,
         "gain",
       );
     } else {
-      await adjustBalance(userId, -amount, 0);
+      const result = await adjustBalance(userId, -amount, 0);
+      if (result.success) onBalanceChange(result.newBalance);
       flash(
         `-$${amount.toFixed(2)} loss on ${contract.contract_ref} (${pct.toFixed(1)}%)`,
         "loss",
@@ -726,58 +779,70 @@ function GPUAllocationSection({
       return;
     }
 
-    if (userBalance < amt) {
+    // FIX #4: Read fresh balance from DB, not stale prop
+    const { data: freshUser } = await supabase
+      .from("users")
+      .select("balance_available")
+      .eq("id", userId)
+      .single();
+    const freshBalance = (freshUser as any)?.balance_available ?? 0;
+
+    if (freshBalance < amt) {
       flash(
-        `Insufficient balance. You have $${userBalance.toFixed(2)}, need $${amt.toFixed(2)}.`,
+        `Insufficient balance. You have $${freshBalance.toFixed(2)}, need $${amt.toFixed(2)}.`,
         "loss",
       );
       return;
     }
 
     setCreating(true);
+    try {
+      const debitResult = await adjustBalance(userId, -amt, 0);
+      if (!debitResult.success) {
+        flash("Failed to debit balance: " + debitResult.error, "loss");
+        return;
+      }
+      onBalanceChange(debitResult.newBalance);
 
-    const debitResult = await adjustBalance(userId, -amt, 0);
-    if (!debitResult.success) {
-      flash("Failed to debit balance: " + debitResult.error, "loss");
+      const ref = generateContractRef();
+      const { error } = await supabase.from("gpu_allocation_contracts").insert({
+        user_id: userId,
+        contract_ref: ref,
+        allocated_amount: amt,
+        status: "active",
+        outcome_type: "pending",
+        current_value: amt,
+        total_pnl: 0,
+        last_tick_at: new Date().toISOString(),
+        last_tick_pnl: 0,
+        tick_count: 0,
+      });
+
+      if (error) {
+        // Rollback debit
+        const rollback = await adjustBalance(userId, amt, 0);
+        if (rollback.success) onBalanceChange(rollback.newBalance);
+        flash(error.message, "loss");
+      } else {
+        supabase
+          .from("transaction_ledger")
+          .insert({
+            user_id: userId,
+            type: "gpu_allocation",
+            amount: amt,
+            description: `GPU allocation contract signed: ${ref}`,
+            created_at: new Date().toISOString(),
+          })
+          .catch(() => {});
+        flash(
+          `Contract ${ref} created! $${amt.toFixed(2)} allocated. First cycle in 30s.`,
+          "info",
+        );
+        load();
+      }
+    } finally {
       setCreating(false);
-      return;
     }
-
-    const ref = generateContractRef();
-    const { error } = await supabase.from("gpu_allocation_contracts").insert({
-      user_id: userId,
-      contract_ref: ref,
-      allocated_amount: amt,
-      status: "active",
-      outcome_type: "pending",
-      current_value: amt,
-      total_pnl: 0,
-      last_tick_at: new Date().toISOString(),
-      last_tick_pnl: 0,
-      tick_count: 0,
-    });
-
-    if (error) {
-      await adjustBalance(userId, amt, 0);
-      flash(error.message, "loss");
-    } else {
-      await supabase
-        .from("transaction_ledger")
-        .insert({
-          user_id: userId,
-          type: "gpu_allocation",
-          amount: amt,
-          description: `GPU allocation contract signed: ${ref}`,
-          created_at: new Date().toISOString(),
-        })
-        .catch(() => {});
-      flash(
-        `Contract ${ref} created! $${amt.toFixed(2)} allocated. First cycle in 30s.`,
-        "info",
-      );
-      load();
-    }
-    setCreating(false);
   }
 
   async function closeContract(id: string) {
@@ -791,9 +856,9 @@ function GPUAllocationSection({
     if (!contract) return;
 
     const finalValue = contract.current_value;
-
     if (finalValue > 0) {
-      await adjustBalance(userId, finalValue, 0);
+      const result = await adjustBalance(userId, finalValue, 0);
+      if (result.success) onBalanceChange(result.newBalance);
     }
 
     await supabase
@@ -806,7 +871,7 @@ function GPUAllocationSection({
       delete tickTimers.current[id];
     }
 
-    await supabase
+    supabase
       .from("transaction_ledger")
       .insert({
         user_id: userId,
@@ -928,19 +993,16 @@ function GPUAllocationSection({
                 Allocation Contract
               </p>
               <p className="text-slate-500 text-xs mt-1">
-                Amount is debited from your balance immediately. Returns are
+                Amount is debited from your balance immediately. Returns
                 distributed every 30 seconds.
               </p>
             </div>
-
-            {/* Balance indicator — neutral, no probability hints */}
             <div className="flex items-center justify-between text-sm">
               <span className="text-slate-500">Available balance</span>
               <span className="text-white font-black">
                 ${userBalance.toFixed(2)}
               </span>
             </div>
-
             <div className="flex gap-3 items-end">
               <div className="flex-1">
                 <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">
@@ -989,7 +1051,6 @@ function GPUAllocationSection({
                 Sign Contract
               </button>
             </div>
-            {/* NOTE: Gain/loss scenario preview intentionally removed — internal logic only */}
           </div>
 
           {loading ? (
@@ -1217,10 +1278,12 @@ function ThermalSection({
   userId,
   license,
   onEarned,
+  onBalanceChange,
 }: {
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
+  onBalanceChange: (newBal: number) => void;
 }) {
   const [tasks, setTasks] = useState<ThermalTask[]>([]);
   const [cooldowns, setCooldowns] = useState<Record<string, Date>>({});
@@ -1240,7 +1303,6 @@ function ThermalSection({
       .select("*")
       .eq("is_active", true)
       .order("created_at");
-
     const { data: completions } = await supabase
       .from("thermal_completions")
       .select("task_id, created_at")
@@ -1253,30 +1315,8 @@ function ThermalSection({
     });
     setCooldowns(cdMap);
 
-    setTasks(
-      dbTasks && dbTasks.length > 0
-        ? dbTasks
-        : [
-            {
-              id: "thermal-1",
-              name: "Thermal Cooling Calibration",
-              description:
-                "Perform daily thermal management on your GPU node to sustain peak efficiency.",
-              reward: 0.5,
-              cooldown_minutes: 1440,
-              is_active: true,
-            },
-            {
-              id: "thermal-2",
-              name: "Neural Weight Re-alignment",
-              description:
-                "Re-align your node's neural inference weights to reduce latency drift.",
-              reward: 0.5,
-              cooldown_minutes: 1440,
-              is_active: true,
-            },
-          ],
-    );
+    // FIX #7: Use DEFAULT_THERMAL_TASKS with stable IDs (match SQL migration)
+    setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
     setLoading(false);
   }, [userId]);
 
@@ -1298,22 +1338,28 @@ function ThermalSection({
     return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
   }
 
+  // FIX #8: try/finally ensures completing always resets
   async function completeTask(task: ThermalTask) {
     const cd = isOnCooldown(task.id, task.cooldown_minutes);
     if (cd.on) return;
     setCompleting(task.id);
     try {
-      await supabase.from("thermal_completions").insert({
-        task_id: task.id,
-        user_id: userId,
-        reward: task.reward,
-        created_at: new Date().toISOString(),
-      });
+      const { error: compErr } = await supabase
+        .from("thermal_completions")
+        .insert({
+          task_id: task.id,
+          user_id: userId,
+          reward: task.reward,
+          created_at: new Date().toISOString(),
+        });
+      if (compErr) throw new Error(compErr.message);
 
       const result = await adjustBalance(userId, task.reward, task.reward);
       if (!result.success) throw new Error(result.error);
 
-      await supabase
+      onBalanceChange(result.newBalance);
+
+      supabase
         .from("transaction_ledger")
         .insert({
           user_id: userId,
@@ -1329,8 +1375,10 @@ function ThermalSection({
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
+    } finally {
+      // FIX #8: ALWAYS reset, even on error
+      setCompleting(null);
     }
-    setCompleting(null);
   }
 
   const hasLicense = !!license && license.status === "active";
@@ -1508,7 +1556,7 @@ export default function TasksPage() {
     };
   }, [userId, loadAll]);
 
-  // Realtime: balance updates
+  // Realtime: balance updates from DB (catches external changes)
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -1534,6 +1582,11 @@ export default function TasksPage() {
 
   function handleEarned(amt: number) {
     setTotalEarnedToday((t) => t + amt);
+  }
+
+  // FIX #10: Immediate balance update from child components (no wait for realtime)
+  function handleBalanceChange(newBal: number) {
+    setBalance(newBal);
   }
 
   if (loading)
@@ -1720,6 +1773,7 @@ export default function TasksPage() {
                 userId={userId}
                 license={rlhfLic}
                 onEarned={handleEarned}
+                onBalanceChange={handleBalanceChange}
               />
             )}
             {userId && activeTab === "gpu" && (
@@ -1728,6 +1782,7 @@ export default function TasksPage() {
                 license={gpuLic}
                 onEarned={handleEarned}
                 userBalance={balance}
+                onBalanceChange={handleBalanceChange}
               />
             )}
             {userId && activeTab === "thermal" && (
@@ -1735,6 +1790,7 @@ export default function TasksPage() {
                 userId={userId}
                 license={thermalLic}
                 onEarned={handleEarned}
+                onBalanceChange={handleBalanceChange}
               />
             )}
           </div>

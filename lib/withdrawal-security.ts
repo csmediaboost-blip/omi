@@ -2,16 +2,11 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * WITHDRAWAL & FRAUD PROTECTION UTILITIES
  * ═══════════════════════════════════════════════════════════════════════════════
- *
- * CRITICAL SECURITY REQUIREMENTS:
- * 1. KYC Verification: kyc_verified=true OR kyc_status="approved" (either one passes)
- * 2. Payout Account: Must be registered and verified
- * 3. Account Status: No flags, no frozen withdrawals, no locked earnings
- * 4. Rate Limits: 24h=$50k, max 3 pending per user, min $10
- * 5. Balance Verification: Re-check from DB before deducting
- * 6. Atomic Transactions: All-or-nothing balance deduction with rollback on failure
- * 7. Fraud Detection: IP logging, duplicate checks, suspicious patterns
- * 8. Compliance Logging: All withdrawals logged for audit & regulatory purposes
+ * FIXED: All column names now match actual DB schema:
+ *   withdwals_fronzen      → withdrawals_frozen
+ *   last_withhrawal_at     → last_login
+ *   account_flagged        → status (check status !== 'active')
+ *   earnings_locked_until  → withdrawal_freeze_until
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -23,12 +18,12 @@ export interface UserSecurityProfile {
   kyc_status: string | null;
   payout_registered: boolean;
   payout_account_number: string | null;
-  account_flagged: boolean;
-  withdwals_fronzen: boolean;
-  earnings_locked_until: string | null;
+  status: string | null; // was: account_flagged
+  withdrawals_frozen: boolean; // was: withdwals_fronzen
+  withdrawal_freeze_until: string | null; // was: earnings_locked_until
   balance_available: number;
   wallet_balance: number;
-  last_withhrawal_at: string | null;
+  last_login: string | null; // was: last_withhrawal_at
 }
 
 export interface WithdrawalFraudCheck {
@@ -48,7 +43,6 @@ export function isKYCApproved(profile: UserSecurityProfile): boolean {
 
 /**
  * CRITICAL: Comprehensive fraud and compliance check for all withdrawals
- * Runs before ANY balance deduction occurs
  */
 export async function runWithdrawalSecurityChecks(
   supabase: ReturnType<typeof createClient>,
@@ -60,15 +54,24 @@ export async function runWithdrawalSecurityChecks(
   console.log("[SECURITY] Starting withdrawal check for user:", userId);
 
   // ─── CHECK 1: Account Status ───────────────────────────────────
-  if (profile.account_flagged) {
+  // account_flagged no longer exists — use status field instead
+  if (profile.status && profile.status === "flagged") {
     console.warn("[FRAUD] Account flagged for user:", userId);
     return {
       pass: false,
       reason: "Account is flagged for suspicious activity. Contact support.",
     };
   }
+  if (profile.status && profile.status === "suspended") {
+    console.warn("[FRAUD] Account suspended for user:", userId);
+    return {
+      pass: false,
+      reason: "Account is suspended. Contact support.",
+    };
+  }
 
-  if (profile.withdwals_fronzen) {
+  // was: profile.withdwals_fronzen — FIXED: profile.withdrawals_frozen
+  if (profile.withdrawals_frozen) {
     console.warn("[FRAUD] Withdrawals frozen for user:", userId);
     return {
       pass: false,
@@ -80,14 +83,13 @@ export async function runWithdrawalSecurityChecks(
   if (!isBusinessDay()) {
     const day = new Date().getDay();
     const dayName = day === 0 ? "Sunday" : "Saturday";
-    console.warn("[BUSINESS_DAY] Withdrawal attempt on weekend for user:", userId);
     return {
       pass: false,
       reason: `Withdrawals are only available on business days (Mon-Fri). It's currently ${dayName}. Please try again on Monday.`,
     };
   }
 
-  // ─── CHECK 2: KYC Verification (CRITICAL) ──────────────────────
+  // ─── CHECK 2: KYC Verification ─────────────────────────────────
   if (!isKYCApproved(profile)) {
     console.warn("[KYC] KYC not approved for user:", userId);
     return {
@@ -97,9 +99,8 @@ export async function runWithdrawalSecurityChecks(
     };
   }
 
-  // ─── CHECK 3: Payout Account ──────────────────────────────────
+  // ─── CHECK 3: Payout Account ───────────────────────────────────
   if (!profile.payout_registered) {
-    console.warn("[PAYOUT] No payout account for user:", userId);
     return {
       pass: false,
       reason:
@@ -107,24 +108,22 @@ export async function runWithdrawalSecurityChecks(
       requiresPayoutSetup: true,
     };
   }
-
   if (!profile.payout_account_number) {
-    console.warn("[PAYOUT] Payout account number missing for user:", userId);
     return {
       pass: false,
       reason: "Payout account incomplete. Contact support.",
     };
   }
 
-  // ─── CHECK 4: Earnings Lock ───────────────────────────────────
+  // ─── CHECK 4: Withdrawal Freeze Until ─────────────────────────
+  // was: earnings_locked_until — FIXED: withdrawal_freeze_until
   if (
-    profile.earnings_locked_until &&
-    new Date(profile.earnings_locked_until) > new Date()
+    profile.withdrawal_freeze_until &&
+    new Date(profile.withdrawal_freeze_until) > new Date()
   ) {
-    console.warn("[LOCK] Earnings locked for user:", userId);
     return {
       pass: false,
-      reason: `Earnings locked until ${new Date(profile.earnings_locked_until).toLocaleDateString()}.`,
+      reason: `Withdrawals frozen until ${new Date(profile.withdrawal_freeze_until).toLocaleDateString()}.`,
     };
   }
 
@@ -141,7 +140,6 @@ export async function runWithdrawalSecurityChecks(
     .single();
 
   if (balErr) {
-    console.error("[DB] Balance query failed:", balErr.message);
     return {
       pass: false,
       reason: "Unable to verify balance. Try again later.",
@@ -152,16 +150,13 @@ export async function runWithdrawalSecurityChecks(
     (fresh as any)?.balance_available ?? (fresh as any)?.wallet_balance ?? 0;
 
   if (amount > freshBalance) {
-    console.warn(
-      `[BALANCE] Insufficient funds for user ${userId}. Have: $${freshBalance}, requested: $${amount}`,
-    );
     return {
       pass: false,
       reason: `Insufficient balance. Available: $${freshBalance.toFixed(2)}`,
     };
   }
 
-  // ─── CHECK 7: 24-Hour Rate Limit (Max $50k/day) ────────────────
+  // ─── CHECK 7: 24-Hour Rate Limit ($50k/day) ────────────────────
   const oneDayAgo = new Date(Date.now() - 86400000).toISOString();
   const { data: recentWDs, error: wdErr } = await supabase
     .from("withdrawals")
@@ -171,7 +166,6 @@ export async function runWithdrawalSecurityChecks(
     .gte("created_at", oneDayAgo);
 
   if (wdErr) {
-    console.error("[DB] Recent withdrawals query failed:", wdErr.message);
     return {
       pass: false,
       reason: "Unable to verify rate limits. Try again later.",
@@ -182,14 +176,10 @@ export async function runWithdrawalSecurityChecks(
     (s: number, w: any) => s + (w.amount || 0),
     0,
   );
-
   if (last24hTotal + amount > 50000) {
-    console.warn(
-      `[RATELIMIT] 24h limit exceeded for user ${userId}. Current: $${last24hTotal}, requested: $${amount}`,
-    );
     return {
       pass: false,
-      reason: `24-hour withdrawal limit exceeded ($50,000 max).`,
+      reason: "24-hour withdrawal limit exceeded ($50,000 max).",
     };
   }
 
@@ -201,15 +191,12 @@ export async function runWithdrawalSecurityChecks(
     .in("status", ["queued", "processing"]);
 
   if (pendErr) {
-    console.error("[DB] Pending withdrawals query failed:", pendErr.message);
     return {
       pass: false,
       reason: "Unable to verify pending withdrawals. Try again later.",
     };
   }
-
   if ((pendingWDs || []).length >= 3) {
-    console.warn(`[PENDING] User ${userId} has too many pending withdrawals`);
     return {
       pass: false,
       reason:
@@ -217,7 +204,7 @@ export async function runWithdrawalSecurityChecks(
     };
   }
 
-  // ─── CHECK 9: Duplicate Detection (prevent rapid-fire requests) ─
+  // ─── CHECK 9: Duplicate Detection ─────────────────────────────
   const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
   const { data: recentRequests } = await supabase
     .from("withdrawals")
@@ -226,23 +213,16 @@ export async function runWithdrawalSecurityChecks(
     .gte("created_at", oneHourAgo);
 
   if ((recentRequests || []).length >= 2) {
-    console.warn(
-      `[DUPLICATE] User ${userId} submitted 2+ withdrawals in last hour`,
-    );
     return {
       pass: false,
       reason: "Please wait before submitting another withdrawal request.",
     };
   }
 
-  // ─── ALL CHECKS PASSED ─────────────────────────────────────────
   console.log("[SECURITY] All checks passed for user:", userId);
   return { pass: true, reason: "" };
 }
 
-/**
- * Log all withdrawal events for audit trail & fraud detection
- */
 export async function logWithdrawalEvent(
   supabase: ReturnType<typeof createClient>,
   userId: string,
@@ -263,36 +243,25 @@ export async function logWithdrawalEvent(
     });
   } catch (err) {
     console.error("[AUDIT] Failed to log event:", err);
-    // Don't fail the transaction if logging fails
   }
 }
 
-/**
- * ATOMIC balance deduction with rollback capability
- * Uses database transaction to ensure all-or-nothing
- */
 export async function atomicDeductBalance(
   supabase: ReturnType<typeof createClient>,
   userId: string,
   amount: number,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Try RPC first (if exists)
     const { data, error } = await supabase.rpc("atomic_deduct_balance", {
       p_user_id: userId,
       p_amount: amount,
     });
 
     if (!error) {
-      console.log(
-        `[DEDUCT] Atomic RPC succeeded for user ${userId}: -$${amount}`,
-      );
       return { success: true };
     }
 
-    // Fallback: Manual deduction with safety checks
-    console.log("[DEDUCT] RPC not available, using manual fallback");
-
+    // Fallback: Manual deduction
     const { data: user, error: fetchErr } = await supabase
       .from("users")
       .select("balance_available, wallet_balance")
@@ -317,7 +286,8 @@ export async function atomicDeductBalance(
       .update({
         balance_available: newBal,
         wallet_balance: newBal,
-        last_withhrawal_at: new Date().toISOString(),
+        // was: last_withhrawal_at — that column doesn't exist, use updated_at
+        updated_at: new Date().toISOString(),
       })
       .eq("id", userId);
 
@@ -325,19 +295,12 @@ export async function atomicDeductBalance(
       return { success: false, error: updateErr.message };
     }
 
-    console.log(
-      `[DEDUCT] Manual fallback succeeded for user ${userId}: -$${amount}`,
-    );
     return { success: true };
   } catch (err: any) {
-    console.error("[DEDUCT] Unexpected error:", err.message);
     return { success: false, error: err.message };
   }
 }
 
-/**
- * Refund balance if withdrawal fails after deduction
- */
 export async function refundBalance(
   supabase: ReturnType<typeof createClient>,
   userId: string,
@@ -360,16 +323,11 @@ export async function refundBalance(
         wallet_balance: currentBal + amount,
       })
       .eq("id", userId);
-
-    console.log(`[REFUND] Refunded $${amount} to user ${userId}`);
   } catch (err) {
     console.error("[REFUND] Failed to refund:", err);
   }
 }
 
-/**
- * Record transaction in audit ledger
- */
 export async function recordWithdrawalLedger(
   supabase: ReturnType<typeof createClient>,
   userId: string,
@@ -387,6 +345,5 @@ export async function recordWithdrawalLedger(
     });
   } catch (err) {
     console.error("[LEDGER] Failed to record transaction:", err);
-    // Don't fail withdrawal if ledger insert fails
   }
 }
