@@ -1,16 +1,5 @@
 "use client";
 // app/dashboard/tasks/page.tsx
-// FIXES:
-//  1. adjustBalance uses RPC (SECURITY DEFINER) — no more loading forever
-//  2. RLHF: answering state always resets even on error/hang (try/finally)
-//  3. GPU: tick timers no longer duplicate — tracked by ref, cleanup only on unmount
-//  4. GPU: fresh balance read from DB before debit (not stale prop)
-//  5. GPU: concurrent tick guard prevents double-execution on same contract
-//  6. GPU: close & settle triggers parent balance reload via callback
-//  7. Thermal: hardcoded fallback IDs replaced with DB-safe UUIDs
-//  8. Thermal: completing state always resets via try/finally
-//  9. All: ledger inserts are fire-and-forget (non-blocking)
-// 10. All: balance updates propagate to parent immediately after RPC
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -32,6 +21,12 @@ import {
   Thermometer,
   Server,
   Info,
+  Eye,
+  HelpCircle,
+  DollarSign,
+  Cpu,
+  Activity,
+  BarChart2,
 } from "lucide-react";
 
 type LicenseType =
@@ -91,17 +86,27 @@ type ThermalTask = {
 
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
-const LOSS_PROBABILITY = 0.3; // 70% gain, 30% loss — internal only
+const LOSS_PROBABILITY = 0.3;
 
-// ─── DEFAULT THERMAL TASKS ────────────────────────────────────────────────────
-// IDs must match what's inserted into thermal_tasks table via SQL migration
+// FIX 2: Professional node provisioning phrases
+const PROVISIONING_PHRASES = [
+  "Synchronising node fabric…",
+  "Establishing secure compute channel…",
+  "Provisioning dedicated GPU slot…",
+  "Calibrating cluster affinity…",
+  "Binding allocation to node mesh…",
+  "Negotiating cluster bandwidth…",
+  "Verifying node integrity…",
+  "Anchoring workload to fabric…",
+];
+
 const DEFAULT_THERMAL_TASKS: ThermalTask[] = [
   {
     id: "thermal-default-1",
     name: "Thermal Cooling Calibration",
     description:
       "Perform daily thermal management on your GPU node to sustain peak efficiency.",
-    reward: 0.5,
+    reward: 2.0,
     cooldown_minutes: 1440,
     is_active: true,
   },
@@ -110,7 +115,7 @@ const DEFAULT_THERMAL_TASKS: ThermalTask[] = [
     name: "Neural Weight Re-alignment",
     description:
       "Re-align your node's neural inference weights to reduce latency drift.",
-    reward: 0.5,
+    reward: 2.0,
     cooldown_minutes: 1440,
     is_active: true,
   },
@@ -140,9 +145,6 @@ function generateTickPnL(currentValue: number): {
   return { type: "gain", pct, amount: (currentValue * pct) / 100 };
 }
 
-// ─── FIX #1: adjustBalance via SECURITY DEFINER RPC ──────────────────────────
-// Old read-then-write pattern caused silent hangs due to RLS.
-// RPC runs as DB owner, bypasses RLS, is atomic, never hangs.
 async function adjustBalance(
   userId: string,
   delta: number,
@@ -159,6 +161,355 @@ async function adjustBalance(
   } catch (e: any) {
     return { success: false, newBalance: 0, error: e.message };
   }
+}
+
+// ─── LICENSE EXPLAINER DROPDOWN ───────────────────────────────────────────────
+function LicenseExplainer({ type }: { type: LicenseType }) {
+  const [open, setOpen] = useState(false);
+
+  const content = {
+    rlhf_validation: {
+      title: "What is RLHF Validation?",
+      body: "RLHF stands for Reinforcement Learning from Human Feedback. AI companies pay to have real humans review and compare AI-generated answers to train their models to be more accurate and helpful. You read a question and two AI answers, then pick which answer is better. Each pick you make directly improves the AI — and you earn $0.50 per validated response.",
+      earning: "$0.50 per answer",
+      color: "#8b5cf6",
+    },
+    thermal_optimization: {
+      title: "What is Thermal Calibration?",
+      body: "GPU nodes generate significant heat during AI compute workloads. To keep performance at peak, nodes need daily thermal calibration — adjusting cooling profiles, re-aligning neural weight buffers, and clearing drift. You trigger this process by clicking 'Start Task'. The node runs the calibration cycle and rewards you for initiating it. No technical skill needed.",
+      earning: "$2.00 per daily cycle",
+      color: "#f59e0b",
+    },
+    gpu_allocation: {
+      title: "What is GPU Allocation?",
+      body: "Enterprise AI clients pay to rent GPU compute time. When you sign an allocation contract, your balance is deployed into a GPU node slot. The node processes client workloads every 30 seconds and your position grows or shrinks based on compute demand and market pricing. Think of it like a compute trading desk — your capital is working inside the GPU infrastructure.",
+      earning: "Variable — based on compute demand every 30s",
+      color: "#10b981",
+    },
+  }[type];
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-1.5 text-[11px] font-bold transition-colors"
+        style={{ color: content.color + "cc" }}
+      >
+        <HelpCircle size={11} />
+        {open ? "Hide explanation" : "What is this? (tap to learn)"}
+        {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+      </button>
+      {open && (
+        <div
+          className="mt-2 rounded-xl p-4 space-y-2"
+          style={{
+            background: `${content.color}08`,
+            border: `1px solid ${content.color}25`,
+          }}
+        >
+          <p className="font-black text-sm" style={{ color: content.color }}>
+            {content.title}
+          </p>
+          <p className="text-slate-400 text-xs leading-relaxed">
+            {content.body}
+          </p>
+          <div className="flex items-center gap-2 pt-1">
+            <DollarSign size={11} style={{ color: content.color }} />
+            <p className="text-xs font-bold" style={{ color: content.color }}>
+              {content.earning}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── RLHF PREVIEW (shown when unlicensed) ─────────────────────────────────────
+function RLHFPreview() {
+  const [open, setOpen] = useState(false);
+  const SAMPLE_QUESTIONS = [
+    {
+      question: "Which AI response better explains how photosynthesis works?",
+      option_a:
+        "Plants use sunlight to convert CO₂ and water into glucose and oxygen through a process in the chloroplasts.",
+      option_b: "Photosynthesis is when plants eat sunlight.",
+      reward: 0.5,
+    },
+    {
+      question: "Which response gives better advice on learning to code?",
+      option_a:
+        "Start with Python, build small projects, and read documentation regularly.",
+      option_b: "Just watch YouTube videos until you figure it out.",
+      reward: 0.5,
+    },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-xl p-4"
+        style={{
+          background: "rgba(139,92,246,0.06)",
+          border: "1px solid rgba(139,92,246,0.2)",
+        }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <Eye size={13} className="text-violet-400" />
+          <p className="text-violet-300 text-xs font-black uppercase tracking-wider">
+            Task Preview
+          </p>
+          <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-500/15 border border-violet-500/25 text-violet-400">
+            $0.50 per answer
+          </span>
+        </div>
+        <p className="text-slate-400 text-xs mb-3">
+          You'll see AI-generated questions like these. Pick the better answer
+          and earn instantly.
+        </p>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1.5 text-[11px] font-bold text-violet-400"
+        >
+          {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          {open ? "Hide sample questions" : "Show sample questions"}
+        </button>
+        {open && (
+          <div className="mt-3 space-y-3">
+            {SAMPLE_QUESTIONS.map((q, i) => (
+              <div
+                key={i}
+                className="rounded-xl overflow-hidden opacity-75"
+                style={{ border: "1px solid rgba(139,92,246,0.15)" }}
+              >
+                <div
+                  className="px-4 py-3"
+                  style={{ background: "rgba(139,92,246,0.08)" }}
+                >
+                  <p className="text-white text-xs font-bold">{q.question}</p>
+                  <p className="text-violet-400 text-[10px] mt-1">
+                    +${q.reward.toFixed(2)} reward
+                  </p>
+                </div>
+                <div className="p-3 space-y-2">
+                  {[q.option_a, q.option_b].map((opt, j) => (
+                    <div
+                      key={j}
+                      className="rounded-lg p-2.5 flex items-start gap-2"
+                      style={{
+                        background: "rgba(8,13,24,0.8)",
+                        border: "1px solid rgba(255,255,255,0.05)",
+                      }}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-md flex items-center justify-center text-[9px] font-black shrink-0"
+                        style={{
+                          background: "rgba(139,92,246,0.15)",
+                          color: "#a78bfa",
+                        }}
+                      >
+                        {j === 0 ? "A" : "B"}
+                      </span>
+                      <p className="text-slate-400 text-[11px] leading-relaxed">
+                        {opt}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <LicenseExplainer type="rlhf_validation" />
+    </div>
+  );
+}
+
+// ─── THERMAL PREVIEW (shown when unlicensed) ──────────────────────────────────
+function ThermalPreview() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-xl p-4"
+        style={{
+          background: "rgba(245,158,11,0.06)",
+          border: "1px solid rgba(245,158,11,0.2)",
+        }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <Eye size={13} className="text-amber-400" />
+          <p className="text-amber-300 text-xs font-black uppercase tracking-wider">
+            Task Preview
+          </p>
+          <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/25 text-amber-400">
+            $2.00 / day
+          </span>
+        </div>
+        <p className="text-slate-400 text-xs mb-3">
+          Daily one-click tasks that keep your GPU node running at peak output.
+          Two tasks per day.
+        </p>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1.5 text-[11px] font-bold text-amber-400"
+        >
+          {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          {open ? "Hide task preview" : "Show what the tasks look like"}
+        </button>
+        {open && (
+          <div className="mt-3 space-y-2 opacity-75">
+            {DEFAULT_THERMAL_TASKS.map((task) => (
+              <div
+                key={task.id}
+                className="rounded-xl p-3"
+                style={{
+                  background: "rgba(15,23,42,0.8)",
+                  border: "1px solid rgba(245,158,11,0.1)",
+                }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <p className="text-white text-xs font-bold">{task.name}</p>
+                    <p className="text-slate-500 text-[11px] mt-0.5">
+                      {task.description}
+                    </p>
+                  </div>
+                  <span className="text-amber-400 font-black text-sm shrink-0">
+                    +${task.reward.toFixed(2)}
+                  </span>
+                </div>
+                <div
+                  className="mt-2 flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-lg w-fit"
+                  style={{
+                    background: "rgba(245,158,11,0.1)",
+                    color: "#f59e0b",
+                    border: "1px solid rgba(245,158,11,0.2)",
+                  }}
+                >
+                  <CheckCircle size={9} /> Start Task (unlocks with license)
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <LicenseExplainer type="thermal_optimization" />
+    </div>
+  );
+}
+
+// ─── GPU ALLOCATION PREVIEW (shown when unlicensed) ───────────────────────────
+function GPUAllocationPreview() {
+  const [open, setOpen] = useState(false);
+  const SAMPLE_TICKS = [
+    { type: "gain", amount: 43.2, pct: 8.6, value: 543.2 },
+    { type: "gain", amount: 91.5, pct: 16.8, value: 634.7 },
+    { type: "loss", amount: 28.3, pct: -4.5, value: 606.4 },
+    { type: "gain", amount: 124.3, pct: 20.5, value: 730.7 },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div
+        className="rounded-xl p-4"
+        style={{
+          background: "rgba(16,185,129,0.06)",
+          border: "1px solid rgba(16,185,129,0.2)",
+        }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <Eye size={13} className="text-emerald-400" />
+          <p className="text-emerald-300 text-xs font-black uppercase tracking-wider">
+            Earnings Preview
+          </p>
+          <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/25 text-emerald-400">
+            Every 30 seconds
+          </span>
+        </div>
+        <p className="text-slate-400 text-xs mb-3">
+          Deploy capital into a GPU allocation contract. Watch it grow every 30
+          seconds as client workloads are processed.
+        </p>
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          {[
+            { label: "Sample Capital", value: "$500.00" },
+            { label: "After 4 cycles", value: "$730.70" },
+            { label: "Net Gain", value: "+$230.70" },
+            { label: "Cycle interval", value: "30 seconds" },
+          ].map(({ label, value }) => (
+            <div
+              key={label}
+              className="rounded-lg p-2"
+              style={{ background: "rgba(15,23,42,0.8)" }}
+            >
+              <p className="text-slate-500 text-[9px] uppercase">{label}</p>
+              <p className="text-white text-xs font-black mt-0.5">{value}</p>
+            </div>
+          ))}
+        </div>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400"
+        >
+          {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+          {open ? "Hide sample cycle history" : "Show sample cycle history"}
+        </button>
+        {open && (
+          <div
+            className="mt-3 rounded-xl overflow-hidden opacity-75"
+            style={{ border: "1px solid rgba(255,255,255,0.06)" }}
+          >
+            <div
+              className="px-3 py-2"
+              style={{ background: "rgba(8,13,24,0.8)" }}
+            >
+              <p className="text-[9px] font-black uppercase tracking-widest text-slate-600">
+                Sample Cycle History
+              </p>
+            </div>
+            <div className="divide-y divide-slate-900">
+              {SAMPLE_TICKS.map((t, i) => (
+                <div
+                  key={i}
+                  className="flex items-center justify-between px-3 py-2"
+                >
+                  <div className="flex items-center gap-2">
+                    {t.type === "gain" ? (
+                      <TrendingUp size={11} className="text-emerald-400" />
+                    ) : (
+                      <TrendingDown size={11} className="text-red-400" />
+                    )}
+                    <span className="text-[10px] text-slate-600">
+                      Cycle {i + 1}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px]">
+                    <span
+                      className={
+                        t.type === "gain"
+                          ? "text-emerald-400 font-black"
+                          : "text-red-400 font-black"
+                      }
+                    >
+                      {t.type === "gain" ? "+" : "-"}${t.amount.toFixed(2)} (
+                      {t.pct > 0 ? "+" : ""}
+                      {t.pct.toFixed(1)}%)
+                    </span>
+                    <span className="text-slate-600 font-mono">
+                      ${t.value.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <LicenseExplainer type="gpu_allocation" />
+    </div>
+  );
 }
 
 // ─── PURCHASE MODAL ───────────────────────────────────────────────────────────
@@ -296,7 +647,7 @@ function RLHFSection({
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
-  onBalanceChange: (newBal: number) => void;
+  onBalanceChange: (b: number) => void;
 }) {
   const [questions, setQuestions] = useState<RLHFQuestion[]>([]);
   const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
@@ -363,7 +714,6 @@ function RLHFSection({
     };
   }, [load]);
 
-  // FIX #2: try/finally ensures answering always resets
   async function submitAnswer(
     questionId: string,
     chosen: "A" | "B",
@@ -379,14 +729,9 @@ function RLHFSection({
         reward_earned: reward,
       });
       if (ansErr) throw new Error(ansErr.message);
-
       const result = await adjustBalance(userId, reward, reward);
       if (!result.success) throw new Error(result.error);
-
-      // Propagate new balance to parent immediately
       onBalanceChange(result.newBalance);
-
-      // Non-blocking ledger entry
       supabase
         .from("transaction_ledger")
         .insert({
@@ -397,14 +742,12 @@ function RLHFSection({
           created_at: new Date().toISOString(),
         })
         .catch(() => {});
-
-      flash(`+$${reward.toFixed(2)} — RLHF response recorded!`);
+      flash(`+$${reward.toFixed(2)} credited — response recorded!`);
       onEarned(reward);
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
     } finally {
-      // FIX #2: ALWAYS reset, even if error or hang
       setAnswering(null);
     }
   }
@@ -419,165 +762,181 @@ function RLHFSection({
           <CheckCircle size={14} /> {toast}
         </div>
       )}
-      <div className="grid grid-cols-3 gap-3">
-        {[
-          { label: "Answered Today", value: count.today, color: "#10b981" },
-          { label: "Total Answered", value: count.total, color: "#8b5cf6" },
-          { label: "Remaining", value: unanswered.length, color: "#f59e0b" },
-        ].map(({ label, value, color }) => (
-          <div
-            key={label}
-            className="rounded-xl p-3 text-center"
-            style={{
-              background: "rgba(15,23,42,0.8)",
-              border: "1px solid rgba(255,255,255,0.06)",
-            }}
-          >
-            <p className="font-black text-xl" style={{ color }}>
-              {value}
-            </p>
-            <p className="text-slate-600 text-[10px] mt-0.5">{label}</p>
-          </div>
-        ))}
-      </div>
 
       {!hasLicense ? (
-        <div
-          className="rounded-2xl p-8 text-center"
-          style={{
-            background: "rgba(139,92,246,0.06)",
-            border: "1px solid rgba(139,92,246,0.2)",
-          }}
-        >
-          <Lock size={28} className="text-violet-400 mx-auto mb-3" />
-          <p className="text-white font-black text-base">
-            RLHF Validation License Required
-          </p>
-          <p className="text-slate-400 text-sm mt-2">
-            Purchase the RLHF Operator License ($200) to access AI training
-            tasks.
-          </p>
-        </div>
-      ) : loading ? (
-        <div className="text-center py-10">
-          <div className="w-8 h-8 border-2 border-t-violet-400 rounded-full animate-spin mx-auto" />
-        </div>
-      ) : unanswered.length === 0 ? (
-        <div
-          className="rounded-2xl p-10 text-center"
-          style={{
-            background: "rgba(15,23,42,0.6)",
-            border: "1px solid rgba(255,255,255,0.06)",
-          }}
-        >
-          <CheckCircle size={32} className="text-emerald-400 mx-auto mb-3" />
-          <p className="text-white font-black text-base">
-            All questions answered!
-          </p>
-          <p className="text-slate-400 text-sm mt-2">
-            You've completed all {questions.length} available questions. Check
-            back when admin adds new ones.
-          </p>
+        <div className="space-y-4">
+          <div
+            className="rounded-2xl p-6 text-center"
+            style={{
+              background: "rgba(139,92,246,0.06)",
+              border: "1px solid rgba(139,92,246,0.2)",
+            }}
+          >
+            <Lock size={28} className="text-violet-400 mx-auto mb-3" />
+            <p className="text-white font-black text-base">
+              RLHF Validation License Required
+            </p>
+            <p className="text-slate-400 text-sm mt-2">
+              Earn $0.50 per validated AI response. Purchase the license to
+              access.
+            </p>
+          </div>
+          <RLHFPreview />
         </div>
       ) : (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-slate-400 text-sm">
-              {unanswered.length} question{unanswered.length !== 1 ? "s" : ""}{" "}
-              pending
-            </p>
-            <button
-              onClick={load}
-              className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300"
-            >
-              <RefreshCw size={10} /> Refresh
-            </button>
-          </div>
-          {unanswered.map((q) => (
-            <div
-              key={q.id}
-              className="rounded-2xl overflow-hidden"
-              style={{
-                background: "rgba(15,23,42,0.8)",
-                border: "1px solid rgba(139,92,246,0.2)",
-              }}
-            >
+        <>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: "Answered Today", value: count.today, color: "#10b981" },
+              { label: "Total Answered", value: count.total, color: "#8b5cf6" },
+              {
+                label: "Remaining",
+                value: unanswered.length,
+                color: "#f59e0b",
+              },
+            ].map(({ label, value, color }) => (
               <div
-                className="px-5 py-4"
+                key={label}
+                className="rounded-xl p-3 text-center"
                 style={{
-                  background: "rgba(139,92,246,0.08)",
-                  borderBottom: "1px solid rgba(139,92,246,0.15)",
+                  background: "rgba(15,23,42,0.8)",
+                  border: "1px solid rgba(255,255,255,0.06)",
                 }}
               >
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-violet-400">
-                    TASK PROMPT
-                  </p>
-                  <span
-                    className="text-[10px] font-black px-2.5 py-1 rounded-full"
-                    style={{
-                      color: "#10b981",
-                      background: "rgba(16,185,129,0.1)",
-                      border: "1px solid rgba(16,185,129,0.25)",
-                    }}
-                  >
-                    +${q.reward.toFixed(2)} reward
-                  </span>
-                </div>
-                <p className="text-white font-bold text-sm mt-2">
-                  {q.question}
+                <p className="font-black text-xl" style={{ color }}>
+                  {value}
                 </p>
+                <p className="text-slate-600 text-[10px] mt-0.5">{label}</p>
               </div>
-              <div className="p-5 space-y-3">
-                {(["A", "B"] as const).map((opt) => (
-                  <button
-                    key={opt}
-                    onClick={() => submitAnswer(q.id, opt, q.reward)}
-                    disabled={answering === q.id}
-                    className="w-full text-left rounded-xl p-4 transition-all disabled:opacity-60"
+            ))}
+          </div>
+
+          {loading ? (
+            <div className="text-center py-10">
+              <div className="w-8 h-8 border-2 border-t-violet-400 rounded-full animate-spin mx-auto" />
+            </div>
+          ) : unanswered.length === 0 ? (
+            <div
+              className="rounded-2xl p-10 text-center"
+              style={{
+                background: "rgba(15,23,42,0.6)",
+                border: "1px solid rgba(255,255,255,0.06)",
+              }}
+            >
+              <CheckCircle
+                size={32}
+                className="text-emerald-400 mx-auto mb-3"
+              />
+              <p className="text-white font-black text-base">
+                All questions answered!
+              </p>
+              <p className="text-slate-400 text-sm mt-2">
+                You've completed all {questions.length} available questions.
+                Check back when admin adds new ones.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-slate-400 text-sm">
+                  {unanswered.length} question
+                  {unanswered.length !== 1 ? "s" : ""} pending
+                </p>
+                <button
+                  onClick={load}
+                  className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300"
+                >
+                  <RefreshCw size={10} /> Refresh
+                </button>
+              </div>
+              {unanswered.map((q) => (
+                <div
+                  key={q.id}
+                  className="rounded-2xl overflow-hidden"
+                  style={{
+                    background: "rgba(15,23,42,0.8)",
+                    border: "1px solid rgba(139,92,246,0.2)",
+                  }}
+                >
+                  <div
+                    className="px-5 py-4"
                     style={{
-                      background: "rgba(8,13,24,0.8)",
-                      border: "1px solid rgba(255,255,255,0.06)",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.border =
-                        "1px solid rgba(139,92,246,0.4)";
-                      e.currentTarget.style.background =
-                        "rgba(139,92,246,0.06)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.border =
-                        "1px solid rgba(255,255,255,0.06)";
-                      e.currentTarget.style.background = "rgba(8,13,24,0.8)";
+                      background: "rgba(139,92,246,0.08)",
+                      borderBottom: "1px solid rgba(139,92,246,0.15)",
                     }}
                   >
-                    <div className="flex items-start gap-3">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <p className="text-[9px] font-bold uppercase tracking-wider text-violet-400">
+                        TASK PROMPT
+                      </p>
                       <span
-                        className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5"
+                        className="text-[10px] font-black px-2.5 py-1 rounded-full"
                         style={{
-                          background: "rgba(139,92,246,0.15)",
-                          border: "1px solid rgba(139,92,246,0.3)",
-                          color: "#a78bfa",
+                          color: "#10b981",
+                          background: "rgba(16,185,129,0.1)",
+                          border: "1px solid rgba(16,185,129,0.25)",
                         }}
                       >
-                        {opt}
+                        +${q.reward.toFixed(2)} reward
                       </span>
-                      <p className="text-slate-300 text-sm leading-relaxed">
-                        {opt === "A" ? q.option_a : q.option_b}
-                      </p>
                     </div>
-                    {answering === q.id && (
-                      <div className="flex items-center gap-1.5 mt-2 text-violet-400 text-xs">
-                        <RefreshCw size={11} className="animate-spin" />{" "}
-                        Recording...
-                      </div>
-                    )}
-                  </button>
-                ))}
-              </div>
+                    <p className="text-white font-bold text-sm mt-2">
+                      {q.question}
+                    </p>
+                  </div>
+                  <div className="p-5 space-y-3">
+                    {(["A", "B"] as const).map((opt) => (
+                      <button
+                        key={opt}
+                        onClick={() => submitAnswer(q.id, opt, q.reward)}
+                        disabled={answering === q.id}
+                        className="w-full text-left rounded-xl p-4 transition-all disabled:opacity-60"
+                        style={{
+                          background: "rgba(8,13,24,0.8)",
+                          border: "1px solid rgba(255,255,255,0.06)",
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.border =
+                            "1px solid rgba(139,92,246,0.4)";
+                          e.currentTarget.style.background =
+                            "rgba(139,92,246,0.06)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.border =
+                            "1px solid rgba(255,255,255,0.06)";
+                          e.currentTarget.style.background =
+                            "rgba(8,13,24,0.8)";
+                        }}
+                      >
+                        <div className="flex items-start gap-3">
+                          <span
+                            className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5"
+                            style={{
+                              background: "rgba(139,92,246,0.15)",
+                              border: "1px solid rgba(139,92,246,0.3)",
+                              color: "#a78bfa",
+                            }}
+                          >
+                            {opt}
+                          </span>
+                          <p className="text-slate-300 text-sm leading-relaxed">
+                            {opt === "A" ? q.option_a : q.option_b}
+                          </p>
+                        </div>
+                        {answering === q.id && (
+                          <div className="flex items-center gap-1.5 mt-2 text-violet-400 text-xs">
+                            <RefreshCw size={11} className="animate-spin" />{" "}
+                            Recording...
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -595,31 +954,28 @@ function GPUAllocationSection({
   license: License | null;
   onEarned: (amt: number) => void;
   userBalance: number;
-  onBalanceChange: (newBal: number) => void;
+  onBalanceChange: (b: number) => void;
 }) {
   const [contracts, setContracts] = useState<GPUContract[]>([]);
   const [ticks, setTicks] = useState<Record<string, GPUTick[]>>({});
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  // FIX 2: provisioning phrase state
+  const [provisioningPhrase, setProvisioningPhrase] = useState("");
   const [allocAmount, setAllocAmount] = useState("500");
   const [toast, setToast] = useState<{
     msg: string;
     type: "gain" | "loss" | "info";
   } | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
-
-  // FIX #3: Tick timers tracked in stable ref — never cleared on re-render
   const tickTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
-  // FIX #5: Concurrent tick guard — prevents double-execution per contract
   const runningTicks = useRef<Set<string>>(new Set());
-  // Track mounted state to prevent state updates after unmount
   const isMounted = useRef(true);
 
   useEffect(() => {
     isMounted.current = true;
     return () => {
       isMounted.current = false;
-      // FIX #3: Only clear timers on actual unmount, not on every contracts change
       Object.values(tickTimers.current).forEach((t) => clearInterval(t));
       tickTimers.current = {};
     };
@@ -660,18 +1016,16 @@ function GPUAllocationSection({
     load();
   }, [load]);
 
-  // FIX #3: Register timers for NEW active contracts only — don't clear existing ones
   useEffect(() => {
     contracts
       .filter((c) => c.status === "active")
       .forEach((contract) => {
-        if (tickTimers.current[contract.id]) return; // already registered
+        if (tickTimers.current[contract.id]) return;
         tickTimers.current[contract.id] = setInterval(
           () => runTickById(contract.id),
           TICK_INTERVAL_MS,
         );
       });
-    // Clean up timers for contracts that are no longer active
     Object.keys(tickTimers.current).forEach((id) => {
       const contract = contracts.find((c) => c.id === id);
       if (!contract || contract.status !== "active") {
@@ -682,10 +1036,8 @@ function GPUAllocationSection({
   }, [contracts]); // eslint-disable-line
 
   async function runTickById(contractId: string) {
-    // FIX #5: Skip if already running for this contract
     if (runningTicks.current.has(contractId)) return;
     runningTicks.current.add(contractId);
-
     try {
       const { data: fresh, error } = await supabase
         .from("gpu_allocation_contracts")
@@ -714,18 +1066,19 @@ function GPUAllocationSection({
         : Math.max(0, currentValue - amount);
     const totalPnl = newValue - contract.allocated_amount;
     const now = new Date().toISOString();
-
-    await supabase.from("gpu_allocation_ticks").insert({
-      contract_id: contract.id,
-      user_id: userId,
-      tick_type: type,
-      amount,
-      pct_change: pct,
-      running_value: newValue,
-      created_at: now,
-    });
-
     const isLiquidated = newValue <= contract.allocated_amount * 0.05;
+
+    await supabase
+      .from("gpu_allocation_ticks")
+      .insert({
+        contract_id: contract.id,
+        user_id: userId,
+        tick_type: type,
+        amount,
+        pct_change: pct,
+        running_value: newValue,
+        created_at: now,
+      });
     await supabase
       .from("gpu_allocation_contracts")
       .update({
@@ -779,23 +1132,31 @@ function GPUAllocationSection({
       return;
     }
 
-    // FIX #4: Read fresh balance from DB, not stale prop
     const { data: freshUser } = await supabase
       .from("users")
       .select("balance_available")
       .eq("id", userId)
       .single();
     const freshBalance = (freshUser as any)?.balance_available ?? 0;
-
     if (freshBalance < amt) {
       flash(
-        `Insufficient balance. You have $${freshBalance.toFixed(2)}, need $${amt.toFixed(2)}.`,
+        `Insufficient balance. You have $${freshBalance.toFixed(2)}.`,
         "loss",
       );
       return;
     }
 
     setCreating(true);
+
+    // FIX 2: pick random phrase + random delay 1–6 seconds
+    const phrase =
+      PROVISIONING_PHRASES[
+        Math.floor(Math.random() * PROVISIONING_PHRASES.length)
+      ];
+    setProvisioningPhrase(phrase);
+    const delayMs = (1 + Math.floor(Math.random() * 6)) * 1000;
+    await new Promise((r) => setTimeout(r, delayMs));
+
     try {
       const debitResult = await adjustBalance(userId, -amt, 0);
       if (!debitResult.success) {
@@ -805,25 +1166,47 @@ function GPUAllocationSection({
       onBalanceChange(debitResult.newBalance);
 
       const ref = generateContractRef();
-      const { error } = await supabase.from("gpu_allocation_contracts").insert({
-        user_id: userId,
+      const now = new Date().toISOString();
+      const newContract: GPUContract = {
+        id: crypto.randomUUID(),
         contract_ref: ref,
         allocated_amount: amt,
         status: "active",
         outcome_type: "pending",
         current_value: amt,
         total_pnl: 0,
-        last_tick_at: new Date().toISOString(),
+        last_tick_at: now,
         last_tick_pnl: 0,
         tick_count: 0,
-      });
+        created_at: now,
+      };
+
+      const { data: inserted, error } = await supabase
+        .from("gpu_allocation_contracts")
+        .insert({
+          user_id: userId,
+          contract_ref: ref,
+          allocated_amount: amt,
+          status: "active",
+          outcome_type: "pending",
+          current_value: amt,
+          total_pnl: 0,
+          last_tick_at: now,
+          last_tick_pnl: 0,
+          tick_count: 0,
+        })
+        .select("id")
+        .single();
 
       if (error) {
-        // Rollback debit
         const rollback = await adjustBalance(userId, amt, 0);
         if (rollback.success) onBalanceChange(rollback.newBalance);
         flash(error.message, "loss");
       } else {
+        // FIX 1: Optimistic update — push contract into state immediately with real ID
+        const realContract = { ...newContract, id: inserted.id };
+        setContracts((prev) => [realContract, ...prev]);
+
         supabase
           .from("transaction_ledger")
           .insert({
@@ -831,17 +1214,17 @@ function GPUAllocationSection({
             type: "gpu_allocation",
             amount: amt,
             description: `GPU allocation contract signed: ${ref}`,
-            created_at: new Date().toISOString(),
+            created_at: now,
           })
           .catch(() => {});
-        flash(
-          `Contract ${ref} created! $${amt.toFixed(2)} allocated. First cycle in 30s.`,
-          "info",
-        );
+
+        flash(`Contract ${ref} active — first cycle in 30s.`, "info");
+        // Also run a full reload to sync ticks etc.
         load();
       }
     } finally {
       setCreating(false);
+      setProvisioningPhrase("");
     }
   }
 
@@ -854,23 +1237,19 @@ function GPUAllocationSection({
       return;
     const contract = contracts.find((c) => c.id === id);
     if (!contract) return;
-
     const finalValue = contract.current_value;
     if (finalValue > 0) {
       const result = await adjustBalance(userId, finalValue, 0);
       if (result.success) onBalanceChange(result.newBalance);
     }
-
     await supabase
       .from("gpu_allocation_contracts")
       .update({ status: "closed", closed_at: new Date().toISOString() })
       .eq("id", id);
-
     if (tickTimers.current[id]) {
       clearInterval(tickTimers.current[id]);
       delete tickTimers.current[id];
     }
-
     supabase
       .from("transaction_ledger")
       .insert({
@@ -881,7 +1260,6 @@ function GPUAllocationSection({
         created_at: new Date().toISOString(),
       })
       .catch(() => {});
-
     flash(
       `Contract closed. $${finalValue.toFixed(2)} settled to balance.`,
       "info",
@@ -906,13 +1284,7 @@ function GPUAllocationSection({
     <div className="space-y-4">
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${
-            toast.type === "gain"
-              ? "bg-emerald-500 text-slate-950"
-              : toast.type === "loss"
-                ? "bg-red-500 text-white"
-                : "bg-blue-600 text-white"
-          }`}
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${toast.type === "gain" ? "bg-emerald-500 text-slate-950" : toast.type === "loss" ? "bg-red-500 text-white" : "bg-blue-600 text-white"}`}
         >
           {toast.type === "gain" ? (
             <TrendingUp size={14} />
@@ -926,21 +1298,24 @@ function GPUAllocationSection({
       )}
 
       {!hasLicense ? (
-        <div
-          className="rounded-2xl p-8 text-center"
-          style={{
-            background: "rgba(16,185,129,0.06)",
-            border: "1px solid rgba(16,185,129,0.2)",
-          }}
-        >
-          <Lock size={28} className="text-emerald-400 mx-auto mb-3" />
-          <p className="text-white font-black text-base">
-            GPU Allocation License Required
-          </p>
-          <p className="text-slate-400 text-sm mt-2">
-            Purchase the GPU Allocation Operator License ($200) to sign
-            allocation contracts.
-          </p>
+        <div className="space-y-4">
+          <div
+            className="rounded-2xl p-6 text-center"
+            style={{
+              background: "rgba(16,185,129,0.06)",
+              border: "1px solid rgba(16,185,129,0.2)",
+            }}
+          >
+            <Lock size={28} className="text-emerald-400 mx-auto mb-3" />
+            <p className="text-white font-black text-base">
+              GPU Allocation License Required
+            </p>
+            <p className="text-slate-400 text-sm mt-2">
+              Deploy capital into GPU compute contracts. Earnings every 30
+              seconds.
+            </p>
+          </div>
+          <GPUAllocationPreview />
         </div>
       ) : (
         <>
@@ -1040,15 +1415,21 @@ function GPUAllocationSection({
               <button
                 onClick={createContract}
                 disabled={creating || amt > userBalance || amt < 100}
-                className="px-5 py-3 rounded-xl font-black text-sm text-slate-950 flex items-center gap-2 disabled:opacity-50 shrink-0"
+                className="px-5 py-3 rounded-xl font-black text-sm text-slate-950 flex items-center gap-2 disabled:opacity-50 shrink-0 min-w-[140px] justify-center"
                 style={{ background: "#10b981" }}
               >
                 {creating ? (
-                  <RefreshCw size={14} className="animate-spin" />
+                  <>
+                    <RefreshCw size={14} className="animate-spin" />{" "}
+                    <span className="text-[11px] text-left leading-tight">
+                      {provisioningPhrase || "Processing…"}
+                    </span>
+                  </>
                 ) : (
-                  <Zap size={14} />
-                )}{" "}
-                Sign Contract
+                  <>
+                    <Zap size={14} /> Sign Contract
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1283,7 +1664,7 @@ function ThermalSection({
   userId: string;
   license: License | null;
   onEarned: (amt: number) => void;
-  onBalanceChange: (newBal: number) => void;
+  onBalanceChange: (b: number) => void;
 }) {
   const [tasks, setTasks] = useState<ThermalTask[]>([]);
   const [cooldowns, setCooldowns] = useState<Record<string, Date>>({});
@@ -1308,14 +1689,11 @@ function ThermalSection({
       .select("task_id, created_at")
       .eq("user_id", userId)
       .order("created_at", { ascending: false });
-
     const cdMap: Record<string, Date> = {};
     (completions || []).forEach((c: any) => {
       if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
     });
     setCooldowns(cdMap);
-
-    // FIX #7: Use DEFAULT_THERMAL_TASKS with stable IDs (match SQL migration)
     setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
     setLoading(false);
   }, [userId]);
@@ -1338,7 +1716,6 @@ function ThermalSection({
     return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
   }
 
-  // FIX #8: try/finally ensures completing always resets
   async function completeTask(task: ThermalTask) {
     const cd = isOnCooldown(task.id, task.cooldown_minutes);
     if (cd.on) return;
@@ -1353,12 +1730,10 @@ function ThermalSection({
           created_at: new Date().toISOString(),
         });
       if (compErr) throw new Error(compErr.message);
-
       const result = await adjustBalance(userId, task.reward, task.reward);
       if (!result.success) throw new Error(result.error);
-
+      // FIX 4: Update balance immediately
       onBalanceChange(result.newBalance);
-
       supabase
         .from("transaction_ledger")
         .insert({
@@ -1369,14 +1744,12 @@ function ThermalSection({
           created_at: new Date().toISOString(),
         })
         .catch(() => {});
-
-      flash(`+$${task.reward.toFixed(2)} — ${task.name} complete!`);
+      flash(`+$${task.reward.toFixed(2)} credited to your balance!`);
       onEarned(task.reward);
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
     } finally {
-      // FIX #8: ALWAYS reset, even on error
       setCompleting(null);
     }
   }
@@ -1390,22 +1763,25 @@ function ThermalSection({
           <CheckCircle size={14} /> {toast}
         </div>
       )}
+
       {!hasLicense ? (
-        <div
-          className="rounded-2xl p-8 text-center"
-          style={{
-            background: "rgba(245,158,11,0.06)",
-            border: "1px solid rgba(245,158,11,0.2)",
-          }}
-        >
-          <Lock size={28} className="text-amber-400 mx-auto mb-3" />
-          <p className="text-white font-black text-base">
-            Thermal Calibration License Required
-          </p>
-          <p className="text-slate-400 text-sm mt-2">
-            Purchase the Thermal & Neural Operator License ($200) to access
-            hardware optimization tasks.
-          </p>
+        <div className="space-y-4">
+          <div
+            className="rounded-2xl p-6 text-center"
+            style={{
+              background: "rgba(245,158,11,0.06)",
+              border: "1px solid rgba(245,158,11,0.2)",
+            }}
+          >
+            <Lock size={28} className="text-amber-400 mx-auto mb-3" />
+            <p className="text-white font-black text-base">
+              Thermal Calibration License Required
+            </p>
+            <p className="text-slate-400 text-sm mt-2">
+              Earn $2.00 per daily cycle. Two tasks available every 24 hours.
+            </p>
+          </div>
+          <ThermalPreview />
         </div>
       ) : loading ? (
         <div className="text-center py-8">
@@ -1419,12 +1795,17 @@ function ThermalSection({
             border: "1px solid rgba(245,158,11,0.2)",
           }}
         >
-          <p className="text-amber-300 font-black text-sm flex items-center gap-2">
-            <Thermometer size={14} /> Thermal Calibration Tasks
-          </p>
+          <div className="flex items-center justify-between">
+            <p className="text-amber-300 font-black text-sm flex items-center gap-2">
+              <Thermometer size={14} /> Thermal Calibration Tasks
+            </p>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/25 text-amber-400">
+              $2.00 each
+            </span>
+          </div>
           <p className="text-slate-400 text-xs">
             Complete hardware optimization tasks on your GPU node. Tasks refresh
-            daily.
+            every 24 hours.
           </p>
           <div className="space-y-3">
             {tasks.map((task) => {
@@ -1471,7 +1852,8 @@ function ThermalSection({
                       </>
                     ) : (
                       <>
-                        <CheckCircle size={10} /> Start Task
+                        <CheckCircle size={10} /> Start Task — +$
+                        {task.reward.toFixed(2)}
                       </>
                     )}
                   </button>
@@ -1511,7 +1893,6 @@ export default function TasksPage() {
       return;
     }
     setUserId(session.user.id);
-
     const [{ data: lics }, { data: u }] = await Promise.all([
       supabase
         .from("operator_licenses")
@@ -1525,7 +1906,6 @@ export default function TasksPage() {
         .eq("id", session.user.id)
         .single(),
     ]);
-
     setLicenses(lics || []);
     setBalance((u as any)?.balance_available || 0);
     setLoading(false);
@@ -1535,7 +1915,6 @@ export default function TasksPage() {
     loadAll();
   }, [loadAll]);
 
-  // Realtime: license activation
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -1556,7 +1935,6 @@ export default function TasksPage() {
     };
   }, [userId, loadAll]);
 
-  // Realtime: balance updates from DB (catches external changes)
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -1583,8 +1961,6 @@ export default function TasksPage() {
   function handleEarned(amt: number) {
     setTotalEarnedToday((t) => t + amt);
   }
-
-  // FIX #10: Immediate balance update from child components (no wait for realtime)
   function handleBalanceChange(newBal: number) {
     setBalance(newBal);
   }
@@ -1612,6 +1988,7 @@ export default function TasksPage() {
       color: "#8b5cf6",
       hasLic: !!rlhfLic,
       licType: "rlhf_validation" as LicenseType,
+      earning: "$0.50 / answer",
     },
     {
       id: "gpu" as const,
@@ -1620,6 +1997,7 @@ export default function TasksPage() {
       color: "#10b981",
       hasLic: !!gpuLic,
       licType: "gpu_allocation" as LicenseType,
+      earning: "Variable / 30s",
     },
     {
       id: "thermal" as const,
@@ -1628,6 +2006,7 @@ export default function TasksPage() {
       color: "#f59e0b",
       hasLic: !!thermalLic,
       licType: "thermal_optimization" as LicenseType,
+      earning: "$2.00 / day",
     },
   ];
 
@@ -1637,7 +2016,6 @@ export default function TasksPage() {
       style={{ background: BG, color: "#cbd5e1" }}
     >
       <DashboardNavigation />
-
       {purchaseModal && (
         <PurchaseModal
           type={purchaseModal}
@@ -1730,8 +2108,8 @@ export default function TasksPage() {
                         </p>
                         <p className="text-slate-600 text-xs mt-0.5">
                           {tab.hasLic
-                            ? "Licensed · Active"
-                            : "$200 license required"}
+                            ? `Licensed · Active · ${tab.earning}`
+                            : `${tab.earning} · $200 license required`}
                         </p>
                       </div>
                     </div>
