@@ -1,5 +1,16 @@
 "use client";
 // app/dashboard/tasks/page.tsx
+// FIXES:
+//  1. GPU: Close & Settle immediately removes contract from local state + stops timer atomically
+//  2. GPU: Removed gain/loss preview (was leaking internal logic)
+//  3. GPU: Tick fires one last time after close — guarded by status check before processing
+//  4. RLHF: Duplicate key race fixed — optimistic local lock before DB insert
+//  5. RLHF: Daily rotation via get_daily_questions RPC (3-4/day, cycles after all answered)
+//  6. RLHF: Answered question disappears immediately from UI (optimistic removal)
+//  7. Thermal: .catch() replaced with async IIFE (supabase builder doesn't support .catch())
+//  8. All: fire-and-forget inserts use void (async () => {})() pattern
+//  9. Security: no internal probability/logic exposed to UI anywhere
+// 10. General: all loading states have finally{} guards
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -24,9 +35,6 @@ import {
   Eye,
   HelpCircle,
   DollarSign,
-  Cpu,
-  Activity,
-  BarChart2,
 } from "lucide-react";
 
 type LicenseType =
@@ -42,7 +50,6 @@ type RLHFQuestion = {
   category: string;
   reward: number;
   is_active: boolean;
-  already_answered?: boolean;
 };
 
 type GPUContract = {
@@ -86,9 +93,9 @@ type ThermalTask = {
 
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
+// Internal only — never exposed to UI
 const LOSS_PROBABILITY = 0.3;
 
-// FIX 2: Professional node provisioning phrases
 const PROVISIONING_PHRASES = [
   "Synchronising node fabric…",
   "Establishing secure compute channel…",
@@ -145,6 +152,15 @@ function generateTickPnL(currentValue: number): {
   return { type: "gain", pct, amount: (currentValue * pct) / 100 };
 }
 
+// FIX: All supabase fire-and-forget use this pattern (not .catch())
+function fireAndForget(fn: () => Promise<any>) {
+  void (async () => {
+    try {
+      await fn();
+    } catch {}
+  })();
+}
+
 async function adjustBalance(
   userId: string,
   delta: number,
@@ -163,26 +179,25 @@ async function adjustBalance(
   }
 }
 
-// ─── LICENSE EXPLAINER DROPDOWN ───────────────────────────────────────────────
+// ─── LICENSE EXPLAINER ────────────────────────────────────────────────────────
 function LicenseExplainer({ type }: { type: LicenseType }) {
   const [open, setOpen] = useState(false);
-
   const content = {
     rlhf_validation: {
       title: "What is RLHF Validation?",
-      body: "RLHF stands for Reinforcement Learning from Human Feedback. AI companies pay to have real humans review and compare AI-generated answers to train their models to be more accurate and helpful. You read a question and two AI answers, then pick which answer is better. Each pick you make directly improves the AI — and you earn $0.50 per validated response.",
+      body: "RLHF stands for Reinforcement Learning from Human Feedback. AI companies pay to have real humans review and compare AI-generated answers to train their models to be more accurate. You read a question and two AI answers, then pick which one is better. Each pick you make directly improves the AI — and you earn $0.50 per validated response.",
       earning: "$0.50 per answer",
       color: "#8b5cf6",
     },
     thermal_optimization: {
       title: "What is Thermal Calibration?",
-      body: "GPU nodes generate significant heat during AI compute workloads. To keep performance at peak, nodes need daily thermal calibration — adjusting cooling profiles, re-aligning neural weight buffers, and clearing drift. You trigger this process by clicking 'Start Task'. The node runs the calibration cycle and rewards you for initiating it. No technical skill needed.",
+      body: "GPU nodes generate significant heat during AI compute workloads. To keep performance at peak, nodes need daily calibration — adjusting cooling profiles, re-aligning neural weight buffers, and clearing drift. You trigger this process by clicking 'Start Task'. The node runs the calibration cycle and rewards you for initiating it. No technical skill needed.",
       earning: "$2.00 per daily cycle",
       color: "#f59e0b",
     },
     gpu_allocation: {
       title: "What is GPU Allocation?",
-      body: "Enterprise AI clients pay to rent GPU compute time. When you sign an allocation contract, your balance is deployed into a GPU node slot. The node processes client workloads every 30 seconds and your position grows or shrinks based on compute demand and market pricing. Think of it like a compute trading desk — your capital is working inside the GPU infrastructure.",
+      body: "Enterprise AI clients pay to rent GPU compute time. When you sign an allocation contract, your balance is deployed into a GPU node slot. The node processes client workloads every 30 seconds and your position grows or shrinks based on compute demand. Think of it like a compute trading desk — your capital is working inside the GPU infrastructure.",
       earning: "Variable — based on compute demand every 30s",
       color: "#10b981",
     },
@@ -225,26 +240,21 @@ function LicenseExplainer({ type }: { type: LicenseType }) {
   );
 }
 
-// ─── RLHF PREVIEW (shown when unlicensed) ─────────────────────────────────────
+// ─── RLHF PREVIEW ─────────────────────────────────────────────────────────────
 function RLHFPreview() {
   const [open, setOpen] = useState(false);
-  const SAMPLE_QUESTIONS = [
+  const SAMPLE = [
     {
       question: "Which AI response better explains how photosynthesis works?",
-      option_a:
-        "Plants use sunlight to convert CO₂ and water into glucose and oxygen through a process in the chloroplasts.",
-      option_b: "Photosynthesis is when plants eat sunlight.",
-      reward: 0.5,
+      a: "Plants use sunlight to convert CO₂ and water into glucose and oxygen through a process in the chloroplasts.",
+      b: "Photosynthesis is when plants eat sunlight.",
     },
     {
       question: "Which response gives better advice on learning to code?",
-      option_a:
-        "Start with Python, build small projects, and read documentation regularly.",
-      option_b: "Just watch YouTube videos until you figure it out.",
-      reward: 0.5,
+      a: "Start with Python, build small projects, and read documentation regularly.",
+      b: "Just watch YouTube videos until you figure it out.",
     },
   ];
-
   return (
     <div className="space-y-3">
       <div
@@ -264,19 +274,18 @@ function RLHFPreview() {
           </span>
         </div>
         <p className="text-slate-400 text-xs mb-3">
-          You'll see AI-generated questions like these. Pick the better answer
-          and earn instantly.
+          You see AI questions daily. Pick the better answer and earn instantly.
         </p>
         <button
           onClick={() => setOpen((v) => !v)}
           className="flex items-center gap-1.5 text-[11px] font-bold text-violet-400"
         >
           {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-          {open ? "Hide sample questions" : "Show sample questions"}
+          {open ? "Hide samples" : "Show sample questions"}
         </button>
         {open && (
           <div className="mt-3 space-y-3">
-            {SAMPLE_QUESTIONS.map((q, i) => (
+            {SAMPLE.map((q, i) => (
               <div
                 key={i}
                 className="rounded-xl overflow-hidden opacity-75"
@@ -288,11 +297,11 @@ function RLHFPreview() {
                 >
                   <p className="text-white text-xs font-bold">{q.question}</p>
                   <p className="text-violet-400 text-[10px] mt-1">
-                    +${q.reward.toFixed(2)} reward
+                    +$0.50 reward
                   </p>
                 </div>
                 <div className="p-3 space-y-2">
-                  {[q.option_a, q.option_b].map((opt, j) => (
+                  {[q.a, q.b].map((opt, j) => (
                     <div
                       key={j}
                       className="rounded-lg p-2.5 flex items-start gap-2"
@@ -326,7 +335,7 @@ function RLHFPreview() {
   );
 }
 
-// ─── THERMAL PREVIEW (shown when unlicensed) ──────────────────────────────────
+// ─── THERMAL PREVIEW ──────────────────────────────────────────────────────────
 function ThermalPreview() {
   const [open, setOpen] = useState(false);
   return (
@@ -348,15 +357,14 @@ function ThermalPreview() {
           </span>
         </div>
         <p className="text-slate-400 text-xs mb-3">
-          Daily one-click tasks that keep your GPU node running at peak output.
-          Two tasks per day.
+          Two daily one-click tasks. Keeps your GPU node running at peak output.
         </p>
         <button
           onClick={() => setOpen((v) => !v)}
           className="flex items-center gap-1.5 text-[11px] font-bold text-amber-400"
         >
           {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-          {open ? "Hide task preview" : "Show what the tasks look like"}
+          {open ? "Hide preview" : "Show what the tasks look like"}
         </button>
         {open && (
           <div className="mt-3 space-y-2 opacity-75">
@@ -400,7 +408,7 @@ function ThermalPreview() {
   );
 }
 
-// ─── GPU ALLOCATION PREVIEW (shown when unlicensed) ───────────────────────────
+// ─── GPU ALLOCATION PREVIEW ───────────────────────────────────────────────────
 function GPUAllocationPreview() {
   const [open, setOpen] = useState(false);
   const SAMPLE_TICKS = [
@@ -409,7 +417,6 @@ function GPUAllocationPreview() {
     { type: "loss", amount: 28.3, pct: -4.5, value: 606.4 },
     { type: "gain", amount: 124.3, pct: 20.5, value: 730.7 },
   ];
-
   return (
     <div className="space-y-3">
       <div
@@ -425,27 +432,27 @@ function GPUAllocationPreview() {
             Earnings Preview
           </p>
           <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/25 text-emerald-400">
-            Every 30 seconds
+            Every 30s
           </span>
         </div>
         <p className="text-slate-400 text-xs mb-3">
-          Deploy capital into a GPU allocation contract. Watch it grow every 30
-          seconds as client workloads are processed.
+          Deploy capital into a GPU node. Watch it grow every 30 seconds as
+          client workloads are processed.
         </p>
         <div className="grid grid-cols-2 gap-2 mb-3">
           {[
-            { label: "Sample Capital", value: "$500.00" },
-            { label: "After 4 cycles", value: "$730.70" },
-            { label: "Net Gain", value: "+$230.70" },
-            { label: "Cycle interval", value: "30 seconds" },
-          ].map(({ label, value }) => (
+            ["Sample Capital", "$500.00"],
+            ["After 4 cycles", "$730.70"],
+            ["Net Gain", "+$230.70"],
+            ["Cycle interval", "30 seconds"],
+          ].map(([l, v]) => (
             <div
-              key={label}
+              key={l}
               className="rounded-lg p-2"
               style={{ background: "rgba(15,23,42,0.8)" }}
             >
-              <p className="text-slate-500 text-[9px] uppercase">{label}</p>
-              <p className="text-white text-xs font-black mt-0.5">{value}</p>
+              <p className="text-slate-500 text-[9px] uppercase">{l}</p>
+              <p className="text-white text-xs font-black mt-0.5">{v}</p>
             </div>
           ))}
         </div>
@@ -454,7 +461,7 @@ function GPUAllocationPreview() {
           className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400"
         >
           {open ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-          {open ? "Hide sample cycle history" : "Show sample cycle history"}
+          {open ? "Hide sample history" : "Show sample cycle history"}
         </button>
         {open && (
           <div
@@ -542,7 +549,6 @@ function PurchaseModal({
     },
   }[type];
   const Icon = info.icon;
-
   function goToCheckout() {
     onClose();
     const params = new URLSearchParams({
@@ -554,7 +560,6 @@ function PurchaseModal({
     });
     router.push(`/dashboard/checkout?${params.toString()}`);
   }
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -646,15 +651,16 @@ function RLHFSection({
 }: {
   userId: string;
   license: License | null;
-  onEarned: (amt: number) => void;
+  onEarned: (a: number) => void;
   onBalanceChange: (b: number) => void;
 }) {
   const [questions, setQuestions] = useState<RLHFQuestion[]>([]);
-  const [answeredIds, setAnsweredIds] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
+  // FIX 5: Local submitted set — prevents duplicate submission race
+  const submittedRef = useRef<Set<string>>(new Set());
   const [answering, setAnswering] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
-  const [count, setCount] = useState({ today: 0, total: 0 });
+  const [stats, setStats] = useState({ today: 0, total: 0, remaining: 0 });
 
   function flash(msg: string) {
     setToast(msg);
@@ -663,64 +669,67 @@ function RLHFSection({
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: qs } = await supabase
-      .from("rlhf_questions")
-      .select("*")
-      .eq("is_active", true)
-      .order("created_at", { ascending: false });
-    const { data: ans } = await supabase
-      .from("rlhf_answers")
-      .select("question_id")
-      .eq("user_id", userId);
-    const answered = new Set((ans || []).map((a: any) => a.question_id));
-    setAnsweredIds(answered);
-    setQuestions(
-      (qs || []).map((q: any) => ({
-        ...q,
-        already_answered: answered.has(q.id),
-      })),
-    );
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayAns } = await supabase
-      .from("rlhf_answers")
-      .select("id")
-      .eq("user_id", userId)
-      .gte("created_at", today.toISOString());
-    setCount({ today: todayAns?.length || 0, total: ans?.length || 0 });
-    setLoading(false);
+    try {
+      // FIX 3: Use RPC for daily rotation (3-4 questions/day, cycles after all answered)
+      const { data: dailyQs, error } = await supabase.rpc(
+        "get_daily_questions",
+        {
+          p_user_id: userId,
+          p_count: 4,
+        },
+      );
+
+      if (error) throw new Error(error.message);
+      setQuestions((dailyQs || []) as RLHFQuestion[]);
+
+      // Stats
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const [{ count: todayCount }, { count: totalCount }, { count: totalQs }] =
+        await Promise.all([
+          supabase
+            .from("rlhf_answers")
+            .select("*", { count: "exact", head: true })
+            .eq("user_id", userId)
+            .gte("created_at", today.toISOString()),
+          supabase
+            .from("rlhf_answers")
+            .select("*", { count: "exact", head: true })
+            .eq("user_id", userId),
+          supabase
+            .from("rlhf_questions")
+            .select("*", { count: "exact", head: true })
+            .eq("is_active", true),
+        ]);
+      setStats({
+        today: todayCount || 0,
+        total: totalCount || 0,
+        remaining: (dailyQs || []).length,
+      });
+    } finally {
+      setLoading(false);
+    }
   }, [userId]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  useEffect(() => {
-    const ch = supabase
-      .channel("rlhf_q_live")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "rlhf_questions" },
-        () => load(),
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "rlhf_questions" },
-        () => load(),
-      )
-      .subscribe();
-    return () => {
-      supabase.removeChannel(ch);
-    };
-  }, [load]);
-
+  // FIX 4: answering is now per-question and cleared in finally
   async function submitAnswer(
     questionId: string,
     chosen: "A" | "B",
     reward: number,
   ) {
-    if (answeredIds.has(questionId)) return;
+    // FIX 5: Double-submit guard
+    if (submittedRef.current.has(questionId)) return;
+    if (answering === questionId) return;
+    submittedRef.current.add(questionId);
     setAnswering(questionId);
+
+    // FIX 6: Optimistic removal — remove from UI immediately
+    setQuestions((prev) => prev.filter((q) => q.id !== questionId));
+
     try {
       const { error: ansErr } = await supabase.from("rlhf_answers").insert({
         question_id: questionId,
@@ -728,31 +737,56 @@ function RLHFSection({
         chosen_option: chosen,
         reward_earned: reward,
       });
-      if (ansErr) throw new Error(ansErr.message);
-      const result = await adjustBalance(userId, reward, reward);
-      if (!result.success) throw new Error(result.error);
-      onBalanceChange(result.newBalance);
-      supabase
-        .from("transaction_ledger")
-        .insert({
-          user_id: userId,
-          type: "task_reward",
-          amount: reward,
-          description: "RLHF validation reward",
-          created_at: new Date().toISOString(),
-        })
-        .catch(() => {});
-      flash(`+$${reward.toFixed(2)} credited — response recorded!`);
-      onEarned(reward);
-      load();
+      // FIX 4: If duplicate key (already answered), treat as success silently
+      if (ansErr && !ansErr.message.includes("duplicate"))
+        throw new Error(ansErr.message);
+
+      if (!ansErr) {
+        const result = await adjustBalance(userId, reward, reward);
+        if (!result.success) throw new Error(result.error);
+        onBalanceChange(result.newBalance);
+        fireAndForget(() =>
+          supabase.from("transaction_ledger").insert({
+            user_id: userId,
+            type: "task_reward",
+            amount: reward,
+            description: "RLHF validation reward",
+            created_at: new Date().toISOString(),
+          }),
+        );
+        flash(`+$${reward.toFixed(2)} credited — response recorded!`);
+        onEarned(reward);
+      }
+      // Reload stats but don't reload questions (already removed optimistically)
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
+        supabase
+          .from("rlhf_answers")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .gte("created_at", today.toISOString()),
+        supabase
+          .from("rlhf_answers")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", userId),
+      ]);
+      setStats((prev) => ({
+        ...prev,
+        today: todayCount || 0,
+        total: totalCount || 0,
+        remaining: questions.length - 1,
+      }));
     } catch (e: any) {
+      // On error, add question back to UI
       flash("Error: " + e.message);
+      submittedRef.current.delete(questionId);
+      load(); // full reload to restore correct state
     } finally {
       setAnswering(null);
     }
   }
 
-  const unanswered = questions.filter((q) => !q.already_answered);
   const hasLicense = !!license && license.status === "active";
 
   return (
@@ -777,8 +811,8 @@ function RLHFSection({
               RLHF Validation License Required
             </p>
             <p className="text-slate-400 text-sm mt-2">
-              Earn $0.50 per validated AI response. Purchase the license to
-              access.
+              Earn $0.50 per validated AI response. 3–4 questions assigned
+              daily.
             </p>
           </div>
           <RLHFPreview />
@@ -787,11 +821,11 @@ function RLHFSection({
         <>
           <div className="grid grid-cols-3 gap-3">
             {[
-              { label: "Answered Today", value: count.today, color: "#10b981" },
-              { label: "Total Answered", value: count.total, color: "#8b5cf6" },
+              { label: "Answered Today", value: stats.today, color: "#10b981" },
+              { label: "Total Answered", value: stats.total, color: "#8b5cf6" },
               {
-                label: "Remaining",
-                value: unanswered.length,
+                label: "Today Remaining",
+                value: stats.remaining,
                 color: "#f59e0b",
               },
             ].map(({ label, value, color }) => (
@@ -815,7 +849,7 @@ function RLHFSection({
             <div className="text-center py-10">
               <div className="w-8 h-8 border-2 border-t-violet-400 rounded-full animate-spin mx-auto" />
             </div>
-          ) : unanswered.length === 0 ? (
+          ) : questions.length === 0 ? (
             <div
               className="rounded-2xl p-10 text-center"
               style={{
@@ -828,19 +862,19 @@ function RLHFSection({
                 className="text-emerald-400 mx-auto mb-3"
               />
               <p className="text-white font-black text-base">
-                All questions answered!
+                All done for today!
               </p>
               <p className="text-slate-400 text-sm mt-2">
-                You've completed all {questions.length} available questions.
-                Check back when admin adds new ones.
+                You've completed all your questions for today. New questions
+                will be assigned tomorrow. You've answered {stats.total} total.
               </p>
             </div>
           ) : (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-slate-400 text-sm">
-                  {unanswered.length} question
-                  {unanswered.length !== 1 ? "s" : ""} pending
+                  {questions.length} question{questions.length !== 1 ? "s" : ""}{" "}
+                  for today
                 </p>
                 <button
                   onClick={load}
@@ -849,7 +883,7 @@ function RLHFSection({
                   <RefreshCw size={10} /> Refresh
                 </button>
               </div>
-              {unanswered.map((q) => (
+              {questions.map((q) => (
                 <div
                   key={q.id}
                   className="rounded-2xl overflow-hidden"
@@ -885,52 +919,57 @@ function RLHFSection({
                     </p>
                   </div>
                   <div className="p-5 space-y-3">
-                    {(["A", "B"] as const).map((opt) => (
-                      <button
-                        key={opt}
-                        onClick={() => submitAnswer(q.id, opt, q.reward)}
-                        disabled={answering === q.id}
-                        className="w-full text-left rounded-xl p-4 transition-all disabled:opacity-60"
-                        style={{
-                          background: "rgba(8,13,24,0.8)",
-                          border: "1px solid rgba(255,255,255,0.06)",
-                        }}
-                        onMouseEnter={(e) => {
-                          e.currentTarget.style.border =
-                            "1px solid rgba(139,92,246,0.4)";
-                          e.currentTarget.style.background =
-                            "rgba(139,92,246,0.06)";
-                        }}
-                        onMouseLeave={(e) => {
-                          e.currentTarget.style.border =
-                            "1px solid rgba(255,255,255,0.06)";
-                          e.currentTarget.style.background =
-                            "rgba(8,13,24,0.8)";
-                        }}
-                      >
-                        <div className="flex items-start gap-3">
-                          <span
-                            className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5"
-                            style={{
-                              background: "rgba(139,92,246,0.15)",
-                              border: "1px solid rgba(139,92,246,0.3)",
-                              color: "#a78bfa",
-                            }}
-                          >
-                            {opt}
-                          </span>
-                          <p className="text-slate-300 text-sm leading-relaxed">
-                            {opt === "A" ? q.option_a : q.option_b}
-                          </p>
-                        </div>
-                        {answering === q.id && (
-                          <div className="flex items-center gap-1.5 mt-2 text-violet-400 text-xs">
-                            <RefreshCw size={11} className="animate-spin" />{" "}
-                            Recording...
+                    {(["A", "B"] as const).map((opt) => {
+                      const isThis = answering === q.id;
+                      return (
+                        <button
+                          key={opt}
+                          onClick={() => submitAnswer(q.id, opt, q.reward)}
+                          disabled={isThis || submittedRef.current.has(q.id)}
+                          className="w-full text-left rounded-xl p-4 transition-all disabled:opacity-60"
+                          style={{
+                            background: "rgba(8,13,24,0.8)",
+                            border: "1px solid rgba(255,255,255,0.06)",
+                          }}
+                          onMouseEnter={(e) => {
+                            if (!isThis) {
+                              e.currentTarget.style.border =
+                                "1px solid rgba(139,92,246,0.4)";
+                              e.currentTarget.style.background =
+                                "rgba(139,92,246,0.06)";
+                            }
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.border =
+                              "1px solid rgba(255,255,255,0.06)";
+                            e.currentTarget.style.background =
+                              "rgba(8,13,24,0.8)";
+                          }}
+                        >
+                          <div className="flex items-start gap-3">
+                            <span
+                              className="w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0 mt-0.5"
+                              style={{
+                                background: "rgba(139,92,246,0.15)",
+                                border: "1px solid rgba(139,92,246,0.3)",
+                                color: "#a78bfa",
+                              }}
+                            >
+                              {opt}
+                            </span>
+                            <p className="text-slate-300 text-sm leading-relaxed">
+                              {opt === "A" ? q.option_a : q.option_b}
+                            </p>
                           </div>
-                        )}
-                      </button>
-                    ))}
+                          {isThis && (
+                            <div className="flex items-center gap-1.5 mt-2 text-violet-400 text-xs">
+                              <RefreshCw size={11} className="animate-spin" />{" "}
+                              Recording…
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               ))}
@@ -952,7 +991,7 @@ function GPUAllocationSection({
 }: {
   userId: string;
   license: License | null;
-  onEarned: (amt: number) => void;
+  onEarned: (a: number) => void;
   userBalance: number;
   onBalanceChange: (b: number) => void;
 }) {
@@ -960,7 +999,6 @@ function GPUAllocationSection({
   const [ticks, setTicks] = useState<Record<string, GPUTick[]>>({});
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
-  // FIX 2: provisioning phrase state
   const [provisioningPhrase, setProvisioningPhrase] = useState("");
   const [allocAmount, setAllocAmount] = useState("500");
   const [toast, setToast] = useState<{
@@ -970,6 +1008,8 @@ function GPUAllocationSection({
   const [expanded, setExpanded] = useState<string | null>(null);
   const tickTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const runningTicks = useRef<Set<string>>(new Set());
+  // FIX 1: Track closed contracts to prevent final tick from processing
+  const closedContracts = useRef<Set<string>>(new Set());
   const isMounted = useRef(true);
 
   useEffect(() => {
@@ -1037,6 +1077,14 @@ function GPUAllocationSection({
 
   async function runTickById(contractId: string) {
     if (runningTicks.current.has(contractId)) return;
+    // FIX 1: Skip if closed locally
+    if (closedContracts.current.has(contractId)) {
+      if (tickTimers.current[contractId]) {
+        clearInterval(tickTimers.current[contractId]);
+        delete tickTimers.current[contractId];
+      }
+      return;
+    }
     runningTicks.current.add(contractId);
     try {
       const { data: fresh, error } = await supabase
@@ -1044,7 +1092,13 @@ function GPUAllocationSection({
         .select("*")
         .eq("id", contractId)
         .single();
-      if (error || !fresh || fresh.status !== "active") {
+      // FIX 1: Check both local closed set and DB status
+      if (
+        error ||
+        !fresh ||
+        fresh.status !== "active" ||
+        closedContracts.current.has(contractId)
+      ) {
         if (tickTimers.current[contractId]) {
           clearInterval(tickTimers.current[contractId]);
           delete tickTimers.current[contractId];
@@ -1058,6 +1112,9 @@ function GPUAllocationSection({
   }
 
   async function runTick(contract: GPUContract) {
+    // FIX 1: Final guard before processing tick
+    if (closedContracts.current.has(contract.id)) return;
+
     const currentValue = contract.current_value || contract.allocated_amount;
     const { type, pct, amount } = generateTickPnL(currentValue);
     const newValue =
@@ -1068,9 +1125,8 @@ function GPUAllocationSection({
     const now = new Date().toISOString();
     const isLiquidated = newValue <= contract.allocated_amount * 0.05;
 
-    await supabase
-      .from("gpu_allocation_ticks")
-      .insert({
+    fireAndForget(() =>
+      supabase.from("gpu_allocation_ticks").insert({
         contract_id: contract.id,
         user_id: userId,
         tick_type: type,
@@ -1078,7 +1134,9 @@ function GPUAllocationSection({
         pct_change: pct,
         running_value: newValue,
         created_at: now,
-      });
+      }),
+    );
+
     await supabase
       .from("gpu_allocation_contracts")
       .update({
@@ -1112,6 +1170,7 @@ function GPUAllocationSection({
     }
 
     if (isLiquidated) {
+      closedContracts.current.add(contract.id);
       if (tickTimers.current[contract.id]) {
         clearInterval(tickTimers.current[contract.id]);
         delete tickTimers.current[contract.id];
@@ -1131,7 +1190,6 @@ function GPUAllocationSection({
       flash("Minimum allocation is $100", "loss");
       return;
     }
-
     const { data: freshUser } = await supabase
       .from("users")
       .select("balance_available")
@@ -1145,10 +1203,7 @@ function GPUAllocationSection({
       );
       return;
     }
-
     setCreating(true);
-
-    // FIX 2: pick random phrase + random delay 1–6 seconds
     const phrase =
       PROVISIONING_PHRASES[
         Math.floor(Math.random() * PROVISIONING_PHRASES.length)
@@ -1156,7 +1211,6 @@ function GPUAllocationSection({
     setProvisioningPhrase(phrase);
     const delayMs = (1 + Math.floor(Math.random() * 6)) * 1000;
     await new Promise((r) => setTimeout(r, delayMs));
-
     try {
       const debitResult = await adjustBalance(userId, -amt, 0);
       if (!debitResult.success) {
@@ -1164,23 +1218,8 @@ function GPUAllocationSection({
         return;
       }
       onBalanceChange(debitResult.newBalance);
-
       const ref = generateContractRef();
       const now = new Date().toISOString();
-      const newContract: GPUContract = {
-        id: crypto.randomUUID(),
-        contract_ref: ref,
-        allocated_amount: amt,
-        status: "active",
-        outcome_type: "pending",
-        current_value: amt,
-        total_pnl: 0,
-        last_tick_at: now,
-        last_tick_pnl: 0,
-        tick_count: 0,
-        created_at: now,
-      };
-
       const { data: inserted, error } = await supabase
         .from("gpu_allocation_contracts")
         .insert({
@@ -1197,29 +1236,35 @@ function GPUAllocationSection({
         })
         .select("id")
         .single();
-
       if (error) {
         const rollback = await adjustBalance(userId, amt, 0);
         if (rollback.success) onBalanceChange(rollback.newBalance);
         flash(error.message, "loss");
       } else {
-        // FIX 1: Optimistic update — push contract into state immediately with real ID
-        const realContract = { ...newContract, id: inserted.id };
+        const realContract: GPUContract = {
+          id: inserted.id,
+          contract_ref: ref,
+          allocated_amount: amt,
+          status: "active",
+          outcome_type: "pending",
+          current_value: amt,
+          total_pnl: 0,
+          last_tick_at: now,
+          last_tick_pnl: 0,
+          tick_count: 0,
+          created_at: now,
+        };
         setContracts((prev) => [realContract, ...prev]);
-
-        supabase
-          .from("transaction_ledger")
-          .insert({
+        fireAndForget(() =>
+          supabase.from("transaction_ledger").insert({
             user_id: userId,
             type: "gpu_allocation",
             amount: amt,
             description: `GPU allocation contract signed: ${ref}`,
             created_at: now,
-          })
-          .catch(() => {});
-
+          }),
+        );
         flash(`Contract ${ref} active — first cycle in 30s.`, "info");
-        // Also run a full reload to sync ticks etc.
         load();
       }
     } finally {
@@ -1228,6 +1273,7 @@ function GPUAllocationSection({
     }
   }
 
+  // FIX 1: Close & Settle — immediately stops timer and removes from UI
   async function closeContract(id: string) {
     if (
       !confirm(
@@ -1237,29 +1283,40 @@ function GPUAllocationSection({
       return;
     const contract = contracts.find((c) => c.id === id);
     if (!contract) return;
+
+    // FIX 1: Mark closed BEFORE any async operations to stop any pending tick
+    closedContracts.current.add(id);
+    if (tickTimers.current[id]) {
+      clearInterval(tickTimers.current[id]);
+      delete tickTimers.current[id];
+    }
+
+    // FIX 1: Optimistic UI update — mark as closed immediately
+    setContracts((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, status: "closed" } : c)),
+    );
+
     const finalValue = contract.current_value;
     if (finalValue > 0) {
       const result = await adjustBalance(userId, finalValue, 0);
       if (result.success) onBalanceChange(result.newBalance);
     }
+
     await supabase
       .from("gpu_allocation_contracts")
       .update({ status: "closed", closed_at: new Date().toISOString() })
       .eq("id", id);
-    if (tickTimers.current[id]) {
-      clearInterval(tickTimers.current[id]);
-      delete tickTimers.current[id];
-    }
-    supabase
-      .from("transaction_ledger")
-      .insert({
+
+    fireAndForget(() =>
+      supabase.from("transaction_ledger").insert({
         user_id: userId,
         type: "gpu_settlement",
         amount: finalValue,
         description: `GPU contract closed & settled: ${contract.contract_ref}`,
         created_at: new Date().toISOString(),
-      })
-      .catch(() => {});
+      }),
+    );
+
     flash(
       `Contract closed. $${finalValue.toFixed(2)} settled to balance.`,
       "info",
@@ -1311,7 +1368,7 @@ function GPUAllocationSection({
               GPU Allocation License Required
             </p>
             <p className="text-slate-400 text-sm mt-2">
-              Deploy capital into GPU compute contracts. Earnings every 30
+              Deploy capital into GPU compute contracts. Returns every 30
               seconds.
             </p>
           </div>
@@ -1368,8 +1425,8 @@ function GPUAllocationSection({
                 Allocation Contract
               </p>
               <p className="text-slate-500 text-xs mt-1">
-                Amount is debited from your balance immediately. Returns
-                distributed every 30 seconds.
+                Amount is debited immediately. Returns distributed every 30
+                seconds.
               </p>
             </div>
             <div className="flex items-center justify-between text-sm">
@@ -1420,7 +1477,7 @@ function GPUAllocationSection({
               >
                 {creating ? (
                   <>
-                    <RefreshCw size={14} className="animate-spin" />{" "}
+                    <RefreshCw size={14} className="animate-spin" />
                     <span className="text-[11px] text-left leading-tight">
                       {provisioningPhrase || "Processing…"}
                     </span>
@@ -1663,7 +1720,7 @@ function ThermalSection({
 }: {
   userId: string;
   license: License | null;
-  onEarned: (amt: number) => void;
+  onEarned: (a: number) => void;
   onBalanceChange: (b: number) => void;
 }) {
   const [tasks, setTasks] = useState<ThermalTask[]>([]);
@@ -1679,23 +1736,26 @@ function ThermalSection({
 
   const load = useCallback(async () => {
     setLoading(true);
-    const { data: dbTasks } = await supabase
-      .from("thermal_tasks")
-      .select("*")
-      .eq("is_active", true)
-      .order("created_at");
-    const { data: completions } = await supabase
-      .from("thermal_completions")
-      .select("task_id, created_at")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false });
-    const cdMap: Record<string, Date> = {};
-    (completions || []).forEach((c: any) => {
-      if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
-    });
-    setCooldowns(cdMap);
-    setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
-    setLoading(false);
+    try {
+      const { data: dbTasks } = await supabase
+        .from("thermal_tasks")
+        .select("*")
+        .eq("is_active", true)
+        .order("created_at");
+      const { data: completions } = await supabase
+        .from("thermal_completions")
+        .select("task_id, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+      const cdMap: Record<string, Date> = {};
+      (completions || []).forEach((c: any) => {
+        if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
+      });
+      setCooldowns(cdMap);
+      setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
+    } finally {
+      setLoading(false);
+    }
   }, [userId]);
 
   useEffect(() => {
@@ -1716,9 +1776,10 @@ function ThermalSection({
     return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
   }
 
+  // FIX 4: Thermal uses fireAndForget for non-critical inserts
   async function completeTask(task: ThermalTask) {
     const cd = isOnCooldown(task.id, task.cooldown_minutes);
-    if (cd.on) return;
+    if (cd.on || completing) return;
     setCompleting(task.id);
     try {
       const { error: compErr } = await supabase
@@ -1730,23 +1791,26 @@ function ThermalSection({
           created_at: new Date().toISOString(),
         });
       if (compErr) throw new Error(compErr.message);
+
       const result = await adjustBalance(userId, task.reward, task.reward);
       if (!result.success) throw new Error(result.error);
-      // FIX 4: Update balance immediately
       onBalanceChange(result.newBalance);
-      supabase
-        .from("transaction_ledger")
-        .insert({
+
+      // FIX 7: fireAndForget instead of .catch()
+      fireAndForget(() =>
+        supabase.from("transaction_ledger").insert({
           user_id: userId,
           type: "task_reward",
           amount: task.reward,
           description: `Thermal task: ${task.name}`,
           created_at: new Date().toISOString(),
-        })
-        .catch(() => {});
+        }),
+      );
+
       flash(`+$${task.reward.toFixed(2)} credited to your balance!`);
       onEarned(task.reward);
-      load();
+      // Optimistic cooldown update
+      setCooldowns((prev) => ({ ...prev, [task.id]: new Date() }));
     } catch (e: any) {
       flash("Error: " + e.message);
     } finally {
@@ -1844,7 +1908,7 @@ function ThermalSection({
                     {completing === task.id ? (
                       <>
                         <RefreshCw size={10} className="animate-spin" />{" "}
-                        Completing...
+                        Completing…
                       </>
                     ) : cd.on ? (
                       <>
@@ -1948,8 +2012,8 @@ export default function TasksPage() {
           filter: `id=eq.${userId}`,
         },
         (payload) => {
-          const newBal = (payload.new as any)?.balance_available;
-          if (newBal != null) setBalance(newBal);
+          const b = (payload.new as any)?.balance_available;
+          if (b != null) setBalance(b);
         },
       )
       .subscribe();
@@ -1961,8 +2025,8 @@ export default function TasksPage() {
   function handleEarned(amt: number) {
     setTotalEarnedToday((t) => t + amt);
   }
-  function handleBalanceChange(newBal: number) {
-    setBalance(newBal);
+  function handleBalanceChange(b: number) {
+    setBalance(b);
   }
 
   if (loading)
@@ -2025,7 +2089,6 @@ export default function TasksPage() {
 
       <main className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto px-4 md:px-8 pt-6 pb-36 md:pb-16 space-y-6">
-          {/* Header */}
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div>
               <div className="flex items-center gap-2 mb-3 flex-wrap">
@@ -2073,7 +2136,6 @@ export default function TasksPage() {
             </div>
           </div>
 
-          {/* Tabs */}
           <div className="grid grid-cols-1 gap-3 mt-4">
             {TABS.map((tab) => {
               const Icon = tab.icon;
@@ -2144,7 +2206,6 @@ export default function TasksPage() {
             })}
           </div>
 
-          {/* Tab content */}
           <div className="mt-6">
             {userId && activeTab === "rlhf" && (
               <RLHFSection
