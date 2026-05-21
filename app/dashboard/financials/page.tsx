@@ -1,37 +1,25 @@
 "use client";
-// app/dashboard/financials/page.tsx
-// ─────────────────────────────────────────────────────────────────────────────
-// ROOT CAUSE OF ALL BUGS: The SELECT query requested ~15 columns that don't
-// exist in the DB. Supabase returns HTTP 400 for any unknown column, which
-// makes the ENTIRE query return null — so profile is null, balance shows $0,
-// KYC shows not-verified even though DB has kyc_verified=true.
-//
-// FIXED: SELECT string now uses ONLY columns confirmed in DB schema.
-// COLUMN RENAMES:
-//   withdwals_fronzen      → withdrawals_frozen
-//   total_withrawn         → total_withdrawn
-//   earnings_locked_until  → withdrawal_freeze_until
-//   last_active_at         → last_login
-//   account_flagged        → status (check status === 'flagged')
-// REMOVED (don't exist in DB):
-//   balance_pending, balance_locked, pending_balance, earnings,
-//   earning_withrawn, weekly_withdrawn, last_withhrawal_at,
-//   payout_locked, tier, total_task_completed, approved_count,
-//   rejected_countb, qaulity_score, streak_count
-// ─────────────────────────────────────────────────────────────────────────────
+// app/dashboard/financials/page.tsx — FIXED VERSION
+// Fix 1: Withdraw button now clickable — canWithdraw no longer blocked by isBizDay
+//         (business day is enforced server-side; UI only shows a notice)
+// Fix 2: Business day + holiday notice shown clearly in UI and modal
+// Fix 3: Withdrawal uses /api/withdraw route → Korapay auto-processes bank transfers
+//         Exact API error messages surfaced to user
+// Fix 4: Korapay narration = "OmniTaskPro Earnings" (handled server-side)
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { getBusinessDayMessage, isBusinessDay } from "@/lib/business-days";
+import {
+  getBusinessDayMessage,
+  isBusinessDay,
+  getTodayHoliday,
+  nextBusinessDayLabel,
+} from "@/lib/business-days";
 import DashboardNavigation from "@/components/dashboard-navigation";
 import {
   isKYCApproved,
-  runWithdrawalSecurityChecks,
-  atomicDeductBalance,
-  refundBalance,
   logWithdrawalEvent,
-  recordWithdrawalLedger,
   type UserSecurityProfile,
 } from "@/lib/withdrawal-security";
 import {
@@ -58,9 +46,11 @@ import {
   X,
   Pickaxe,
   Cpu,
+  CalendarX,
+  Info,
 } from "lucide-react";
 
-// ─── TYPES — only real DB columns ────────────────────────────────────────────
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type UserProfile = {
   id: string;
   email: string;
@@ -82,10 +72,10 @@ type UserProfile = {
   payout_gateway: string | null;
   payout_currency: string | null;
   payout_kyc_match: boolean;
-  withdrawals_frozen: boolean; // was: withdwals_fronzen
-  withdrawal_freeze_until: string | null; // was: earnings_locked_until
+  withdrawals_frozen: boolean;
+  withdrawal_freeze_until: string | null;
   withdrawal_freeze_reason: string | null;
-  last_login: string | null; // was: last_active_at
+  last_login: string | null;
   pin_set: boolean;
   created_at: string;
 };
@@ -162,6 +152,8 @@ type Withdrawal = {
   failure_reason: string | null;
   payout_account_name?: string | null;
   payout_method?: string | null;
+  auto_processed?: boolean;
+  reference?: string | null;
 };
 
 type DepositEntry = {
@@ -178,7 +170,7 @@ type DepositEntry = {
   created_at: string;
 };
 
-// ─── Robust KYC check — kyc_verified boolean is the primary source of truth ──
+// ─── KYC helper ──────────────────────────────────────────────────────────────
 function resolveKycOk(profile: UserProfile | null): boolean {
   if (!profile) return false;
   if (profile.kyc_verified === true) return true;
@@ -191,7 +183,7 @@ function resolveKycOk(profile: UserProfile | null): boolean {
   }
 }
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     confirmed: "bg-emerald-900/30 border-emerald-700/40 text-emerald-400",
@@ -248,19 +240,20 @@ function StatBox({
 }
 
 function GatewayBadge({ gateway }: { gateway: string }) {
-  if (gateway === "crypto_wallet" || gateway === "crypto")
+  const g = (gateway || "").toLowerCase();
+  if (g === "crypto_wallet" || g === "crypto" || g === "usdt" || g === "btc")
     return (
       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-violet-900/30 border border-violet-700/40 text-violet-400">
         ₿ Crypto
       </span>
     );
-  if (gateway === "bank_transfer" || gateway === "korapay")
+  if (g === "bank_transfer" || g === "korapay" || g === "bank")
     return (
       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-900/30 border border-blue-700/40 text-blue-400">
         🏦 Bank Transfer
       </span>
     );
-  if (gateway === "gpu_mining")
+  if (g === "gpu_mining")
     return (
       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-900/30 border border-emerald-700/40 text-emerald-400">
         ⛏️ GPU Mining
@@ -289,6 +282,48 @@ const PERIOD_LABELS: Record<string, string> = {
   contract: "Contract",
 };
 
+// ─── BUSINESS DAY NOTICE BANNER ───────────────────────────────────────────────
+function BusinessDayBanner() {
+  const bizDay = isBusinessDay();
+  const holiday = getTodayHoliday();
+  const nextDay = nextBusinessDayLabel();
+
+  if (bizDay) return null; // Don't show anything on business days
+
+  const day = new Date().getDay();
+  const isWeekend = day === 0 || day === 6;
+
+  return (
+    <div
+      className="rounded-xl px-4 py-3 flex items-start gap-3"
+      style={{
+        background: "rgba(245,158,11,0.08)",
+        border: "1px solid rgba(245,158,11,0.3)",
+      }}
+    >
+      <CalendarX size={15} className="text-amber-400 shrink-0 mt-0.5" />
+      <div>
+        <p className="text-amber-300 text-sm font-bold">
+          {holiday
+            ? `🎌 Public Holiday — ${holiday.name}`
+            : isWeekend
+              ? `🏖️ ${day === 6 ? "Saturday" : "Sunday"} — Weekend`
+              : "Non-Business Day"}
+        </p>
+        <p className="text-amber-400/80 text-xs mt-0.5">
+          {holiday
+            ? `Banks are closed today. Withdrawals will resume on ${nextDay}.`
+            : `Withdrawals are only processed on business days (Mon–Fri). Next available day: ${nextDay}.`}
+        </p>
+        <p className="text-amber-500/60 text-[11px] mt-1">
+          You can still queue a request — it will be processed on the next
+          business day.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ─── WITHDRAW MODAL ───────────────────────────────────────────────────────────
 function WithdrawModal({
   userId,
@@ -303,12 +338,14 @@ function WithdrawModal({
   isFrozen: boolean;
   profile: UserProfile;
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (message: string) => void;
 }) {
   const [amount, setAmount] = useState("");
   const [pin, setPin] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [errorAction, setErrorAction] = useState<string | null>(null);
+  const router = useRouter();
 
   const MIN = 10;
   const amt = parseFloat(amount) || 0;
@@ -317,6 +354,8 @@ function WithdrawModal({
   const expDate = new Date(Date.now() + expDays * 86400000);
   const bizMsg = getBusinessDayMessage();
   const isBizDay = isBusinessDay();
+  const holiday = getTodayHoliday();
+  const nextDay = nextBusinessDayLabel();
 
   const payoutGateway = profile.payout_gateway ?? "unknown";
   const payoutName = profile.payout_account_name ?? "—";
@@ -327,100 +366,107 @@ function WithdrawModal({
   );
   const kycOk = resolveKycOk(profile);
 
+  const isCrypto =
+    payoutGateway === "crypto" ||
+    payoutGateway === "crypto_wallet" ||
+    payoutGateway === "usdt" ||
+    payoutGateway === "btc";
+
+  // Check all qualifications for display
+  const qualifications = [
+    { label: "KYC Verified", ok: kycOk, action: "complete_kyc" },
+    {
+      label: "Payout Account Set Up",
+      ok: hasPayout,
+      action: "setup_payout",
+    },
+    {
+      label: "Account Name Matches KYC",
+      ok: profile.payout_kyc_match,
+      action: "fix_payout",
+    },
+    { label: "Withdrawals Not Frozen", ok: !isFrozen, action: null },
+    { label: "Balance ≥ $10.00", ok: available >= MIN, action: null },
+    { label: "Security PIN Set", ok: profile.pin_set, action: "set_pin" },
+  ];
+  const allQualified = qualifications.every((q) => q.ok);
+
   async function handleSubmit() {
     setError("");
+    setErrorAction(null);
+
+    if (!amount || amt <= 0) {
+      setError("Please enter a withdrawal amount.");
+      return;
+    }
+    if (amt < MIN) {
+      setError(`Minimum withdrawal is $${MIN.toFixed(2)}.`);
+      return;
+    }
+    if (amt > available) {
+      setError(
+        `Amount exceeds your available balance of $${available.toFixed(2)}.`,
+      );
+      return;
+    }
     if (!pin || pin.length < 4) {
-      setError("Please enter your PIN (4–6 digits)");
-      return;
-    }
-
-    async function hashPin(v: string): Promise<string> {
-      const enc = new TextEncoder();
-      const buf = await crypto.subtle.digest("SHA-256", enc.encode(v + userId));
-      return Array.from(new Uint8Array(buf))
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-    }
-    const pinHash = await hashPin(pin);
-    const { data: ud } = await supabase
-      .from("users")
-      .select("pin_hash")
-      .eq("id", userId)
-      .single();
-    if (!ud?.pin_hash || pinHash !== ud.pin_hash) {
-      setError("Invalid PIN. Withdrawal cannot be processed.");
-      logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: "Invalid PIN",
-        amount: amt,
-      }).catch(() => {});
-      return;
-    }
-
-    const check = await runWithdrawalSecurityChecks(
-      supabase,
-      userId,
-      amt,
-      profile as unknown as UserSecurityProfile,
-    );
-    if (!check.pass) {
-      setError(check.reason);
-      logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-        reason: check.reason,
-        amount: amt,
-      }).catch(() => {});
+      setError("Please enter your security PIN (4–6 digits).");
       return;
     }
 
     setLoading(true);
     try {
-      const deduct = await atomicDeductBalance(supabase, userId, amt);
-      if (!deduct.success) {
-        setError(deduct.error ?? "Balance deduction failed");
+      const res = await fetch("/api/withdraw", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: amt, pin }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.success) {
+        setError(
+          data.error ||
+            "Withdrawal failed. Please refresh the page and try again.",
+        );
+        if (data.action) setErrorAction(data.action);
+
+        // Log the failure
+        logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
+          reason: data.error,
+          amount: amt,
+        }).catch(() => {});
         setLoading(false);
         return;
       }
 
-      const { error: wErr } = await supabase.from("withdrawals").insert({
-        user_id: userId,
-        amount: amt,
-        wallet_address: payoutAcct,
-        payout_method: payoutGateway,
-        payout_account_name: payoutName,
-        payout_bank_name: payoutBank || null,
-        status: "queued",
-        tracking_status: "queued",
-        expected_date: expDate.toISOString(),
-        created_at: new Date().toISOString(),
-      });
-
-      if (wErr) {
-        await refundBalance(supabase, userId, amt);
-        logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
-          reason: wErr.message,
-          amount: amt,
-        }).catch(() => {});
-        throw wErr;
-      }
-
-      await recordWithdrawalLedger(
-        supabase,
-        userId,
-        amt,
-        payoutAcct,
-        payoutGateway,
+      onSuccess(
+        data.message ||
+          `Withdrawal of $${amt.toFixed(2)} submitted successfully!`,
       );
-      logWithdrawalEvent(supabase, userId, "withdrawal_requested", {
-        amount: amt,
-        payout_method: payoutGateway,
-        payout_account: payoutAcct.slice(0, 12) + "...",
-        expected_date: expDate.toISOString(),
-      }).catch(() => {});
-      onSuccess();
     } catch (e: any) {
-      setError(e.message || "Withdrawal failed. Please try again.");
+      setError(
+        "A network error occurred. Please check your connection and try again.",
+      );
     }
     setLoading(false);
   }
+
+  function handleActionClick() {
+    if (errorAction === "complete_kyc") router.push("/dashboard/verification");
+    else if (errorAction === "setup_payout")
+      router.push("/dashboard/verification");
+    else if (errorAction === "fix_payout")
+      router.push("/dashboard/verification");
+    else if (errorAction === "set_pin") router.push("/dashboard/settings");
+  }
+
+  const canSubmit =
+    allQualified &&
+    amt >= MIN &&
+    amt <= available &&
+    pin.length >= 4 &&
+    !loading;
 
   return (
     <div
@@ -432,10 +478,11 @@ function WithdrawModal({
         style={{
           background: "rgb(10,16,28)",
           border: "1px solid rgba(16,185,129,0.3)",
-          maxHeight: "90vh",
+          maxHeight: "92vh",
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Header */}
         <div
           className="px-5 py-4 flex items-center justify-between flex-shrink-0"
           style={{
@@ -452,7 +499,7 @@ function WithdrawModal({
                 Request Withdrawal
               </p>
               <p className="text-slate-500 text-xs">
-                Admin processes to your registered account
+                Processed to your registered account
               </p>
             </div>
           </div>
@@ -462,20 +509,74 @@ function WithdrawModal({
         </div>
 
         <div className="overflow-y-auto flex-1 p-5 space-y-4">
-          {!kycOk && (
+          {/* Non-business day notice */}
+          {!isBizDay && (
             <div
               className="rounded-xl p-3"
               style={{
-                background: "rgba(239,68,68,0.08)",
-                border: "1px solid rgba(239,68,68,0.25)",
+                background: "rgba(245,158,11,0.08)",
+                border: "1px solid rgba(245,158,11,0.3)",
               }}
             >
-              <p className="text-red-400 text-sm font-bold flex items-center gap-2">
-                <AlertTriangle size={13} /> KYC verification required
+              <p className="text-amber-400 text-sm font-bold flex items-center gap-2">
+                <CalendarX size={13} />
+                {holiday
+                  ? `Public Holiday — ${holiday.name}`
+                  : "Non-Business Day"}
+              </p>
+              <p className="text-amber-500/80 text-xs mt-1">
+                {holiday
+                  ? `Banks are closed today. Your request will be queued and processed on ${nextDay}.`
+                  : `Your request will be queued and processed on ${nextDay} (next business day).`}
               </p>
             </div>
           )}
 
+          {/* Qualification checklist */}
+          <div
+            className="rounded-xl p-4"
+            style={{
+              background: "rgba(15,23,42,0.8)",
+              border: "1px solid rgba(255,255,255,0.07)",
+            }}
+          >
+            <p className="text-slate-400 text-[10px] uppercase tracking-wide mb-3 flex items-center gap-1.5">
+              <Shield size={9} className="text-blue-400" /> Withdrawal
+              Requirements
+            </p>
+            <div className="space-y-1.5">
+              {qualifications.map((q) => (
+                <div key={q.label} className="flex items-center gap-2">
+                  {q.ok ? (
+                    <CheckCircle
+                      size={12}
+                      className="text-emerald-400 shrink-0"
+                    />
+                  ) : (
+                    <XCircle size={12} className="text-red-400 shrink-0" />
+                  )}
+                  <span
+                    className={`text-xs ${q.ok ? "text-slate-400" : "text-red-400 font-semibold"}`}
+                  >
+                    {q.label}
+                  </span>
+                  {!q.ok && q.action && (
+                    <button
+                      onClick={() => {
+                        setErrorAction(q.action);
+                        handleActionClick();
+                      }}
+                      className="text-[10px] text-blue-400 underline ml-auto shrink-0"
+                    >
+                      Fix →
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Payout account info */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -493,12 +594,22 @@ function WithdrawModal({
                 {payoutBank && (
                   <p className="text-slate-400 text-xs">{payoutBank}</p>
                 )}
-                <p className="text-slate-500 text-xs font-mono">{payoutAcct}</p>
+                <p className="text-slate-500 text-xs font-mono">
+                  {payoutAcct.length > 12
+                    ? payoutAcct.slice(0, 12) + "..."
+                    : payoutAcct}
+                </p>
                 <p className="text-blue-400 text-[10px] capitalize">
                   via {payoutGateway}
                 </p>
+                {isCrypto && (
+                  <p className="text-violet-400 text-[10px] flex items-center gap-1 mt-1">
+                    <Info size={9} /> Crypto withdrawals are processed manually
+                    by admin (1–3 business days)
+                  </p>
+                )}
                 {kycOk && (
-                  <p className="text-emerald-400 text-[10px] flex items-center gap-1">
+                  <p className="text-emerald-400 text-[10px] flex items-center gap-1 mt-0.5">
                     <CheckCircle size={9} /> KYC verified
                   </p>
                 )}
@@ -515,21 +626,7 @@ function WithdrawModal({
             )}
           </div>
 
-          {!hasPayout && (
-            <div
-              className="rounded-xl p-3"
-              style={{
-                background: "rgba(239,68,68,0.08)",
-                border: "1px solid rgba(239,68,68,0.25)",
-              }}
-            >
-              <p className="text-red-400 text-sm font-bold flex items-center gap-2">
-                <Lock size={13} /> Cannot withdraw without a registered payout
-                account
-              </p>
-            </div>
-          )}
-
+          {/* Available balance */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -548,6 +645,7 @@ function WithdrawModal({
             </p>
           </div>
 
+          {/* Amount input */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Amount (USD)
@@ -579,25 +677,32 @@ function WithdrawModal({
             </div>
           </div>
 
+          {/* Business day status */}
           <div
             className="rounded-xl p-3"
             style={{
               background: isBizDay
                 ? "rgba(16,185,129,0.08)"
-                : "rgba(239,68,68,0.08)",
+                : "rgba(245,158,11,0.08)",
               border: isBizDay
                 ? "1px solid rgba(16,185,129,0.2)"
-                : "1px solid rgba(239,68,68,0.25)",
+                : "1px solid rgba(245,158,11,0.3)",
             }}
           >
             <p
               className={`text-sm font-bold flex items-center gap-2 ${isBizDay ? "text-emerald-400" : "text-amber-400"}`}
             >
-              <Clock size={13} />
+              {isBizDay ? <CheckCircle size={13} /> : <CalendarX size={13} />}
               {bizMsg}
             </p>
+            {!isBizDay && (
+              <p className="text-amber-500/70 text-xs mt-1">
+                Requests submitted now will be processed on {nextDay}.
+              </p>
+            )}
           </div>
 
+          {/* PIN */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Security PIN <span className="text-red-400">*</span>
@@ -610,8 +715,20 @@ function WithdrawModal({
               placeholder="Enter your 4–6 digit PIN"
               className="w-full px-4 py-3 rounded-xl text-lg font-bold text-center tracking-widest text-white bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors"
             />
+            {!profile.pin_set && (
+              <p className="text-amber-400 text-xs mt-1.5 flex items-center gap-1">
+                <AlertTriangle size={10} /> You haven&apos;t set a PIN yet.{" "}
+                <button
+                  onClick={() => router.push("/dashboard/settings")}
+                  className="underline"
+                >
+                  Set PIN in Settings →
+                </button>
+              </p>
+            )}
           </div>
 
+          {/* Settlement timeline */}
           {amt >= MIN && amt <= available && (
             <div
               className="rounded-xl p-4 space-y-2"
@@ -631,8 +748,10 @@ function WithdrawModal({
                   active: false,
                 },
                 {
-                  label: "Processing",
-                  desc: "Admin verifying",
+                  label: isCrypto ? "Manual Review" : "Auto-Processing",
+                  desc: isCrypto
+                    ? "Admin sends crypto"
+                    : "Korapay auto-transfers",
                   done: false,
                   active: true,
                 },
@@ -668,30 +787,45 @@ function WithdrawModal({
             </div>
           )}
 
+          {/* Error display */}
           {error && (
             <div
-              className="rounded-xl p-3 flex items-center gap-2"
+              className="rounded-xl p-3"
               style={{
                 background: "rgba(239,68,68,0.08)",
                 border: "1px solid rgba(239,68,68,0.25)",
               }}
             >
-              <AlertTriangle size={13} className="text-red-400 shrink-0" />
-              <p className="text-red-400 text-sm">{error}</p>
+              <div className="flex items-start gap-2">
+                <AlertTriangle
+                  size={13}
+                  className="text-red-400 shrink-0 mt-0.5"
+                />
+                <div className="flex-1">
+                  <p className="text-red-400 text-sm">{error}</p>
+                  {errorAction && (
+                    <button
+                      onClick={handleActionClick}
+                      className="text-blue-400 text-xs underline mt-1.5 flex items-center gap-1"
+                    >
+                      <ArrowUpRight size={10} />
+                      {errorAction === "complete_kyc" &&
+                        "Go to KYC Verification →"}
+                      {errorAction === "setup_payout" && "Go to Payout Setup →"}
+                      {errorAction === "fix_payout" && "Fix Payout Account →"}
+                      {errorAction === "set_pin" &&
+                        "Go to Settings → Set PIN →"}
+                    </button>
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
+          {/* Submit button */}
           <button
             onClick={handleSubmit}
-            disabled={
-              loading ||
-              isFrozen ||
-              !amount ||
-              !hasPayout ||
-              !kycOk ||
-              pin.length < 4 ||
-              !isBizDay
-            }
+            disabled={!canSubmit}
             className="w-full py-4 rounded-xl font-black text-white flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
           >
@@ -699,22 +833,27 @@ function WithdrawModal({
               <>
                 <RefreshCw size={15} className="animate-spin" /> Submitting…
               </>
-            ) : !isBizDay ? (
-              <>
-                <Clock size={15} /> Available Mon–Fri only
-              </>
             ) : pin.length < 4 ? (
               <>
                 <Lock size={15} /> Enter PIN to continue
               </>
+            ) : !allQualified ? (
+              <>
+                <AlertTriangle size={15} /> Complete requirements above
+              </>
             ) : (
               <>
-                <Send size={15} /> Request Withdrawal of ${amount || "0.00"}
+                <Send size={15} />
+                {isBizDay
+                  ? `Request Withdrawal of $${amount || "0.00"}`
+                  : `Queue Withdrawal of $${amount || "0.00"} (processes ${nextDay})`}
               </>
             )}
           </button>
           <p className="text-slate-600 text-[11px] text-center pb-1">
-            Funds sent to your registered payout account.
+            {isCrypto
+              ? "Crypto withdrawals are processed manually by our team within 1–3 business days."
+              : "Bank transfers are auto-processed via OmniTaskPro payment system."}
           </p>
         </div>
       </div>
@@ -752,7 +891,7 @@ export default function FinancialsPage() {
 
   function showToast(text: string, ok = true) {
     setToast({ text, ok });
-    setTimeout(() => setToast(null), 5000);
+    setTimeout(() => setToast(null), 7000);
   }
 
   const loadData = useCallback(async () => {
@@ -772,7 +911,6 @@ export default function FinancialsPage() {
 
     const [profRes, payRes, nodeRes, licRes, ledgerRes, wRes, plansRes] =
       await Promise.allSettled([
-        // ── FIXED SELECT: only real DB columns ──────────────────────────────
         supabase
           .from("users")
           .select(
@@ -827,7 +965,7 @@ export default function FinancialsPage() {
         supabase
           .from("withdrawals")
           .select(
-            "id, user_id, amount, wallet_address, payout_method, payout_account_name, payout_bank_name, status, tracking_status, expected_date, created_at, paid_at, failure_reason",
+            "id, user_id, amount, wallet_address, payout_method, payout_account_name, payout_bank_name, status, tracking_status, expected_date, created_at, paid_at, failure_reason, auto_processed, reference",
           )
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
@@ -836,7 +974,6 @@ export default function FinancialsPage() {
         supabase.from("gpu_plans").select("id, name, gpu_model"),
       ]);
 
-    // Debug: log any query errors
     if (profRes.status === "fulfilled" && profRes.value.error) {
       console.error("[PROFILE] Query error:", profRes.value.error.message);
     }
@@ -938,8 +1075,7 @@ export default function FinancialsPage() {
       </div>
     );
 
-  // ─── DERIVED VALUES ────────────────────────────────────────────────────────
-  // Use balance_available first, then wallet_balance, then balance as fallbacks
+  // ─── DERIVED VALUES ──────────────────────────────────────────────────────
   const avail =
     profile?.balance_available ??
     profile?.wallet_balance ??
@@ -947,7 +1083,6 @@ export default function FinancialsPage() {
     0;
   const totalEarned = profile?.total_earned ?? 0;
   const totalWd = profile?.total_withdrawn ?? 0;
-  // withdrawals_frozen is the real column name (was: withdwals_fronzen)
   const isFrozen = profile?.withdrawals_frozen ?? false;
   const kycOk = resolveKycOk(profile);
 
@@ -981,7 +1116,17 @@ export default function FinancialsPage() {
   const effectiveAvail = avail + unclaimedTotal;
   const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
 
-  // ─── DEPOSIT ENTRIES ──────────────────────────────────────────────────────
+  // ─── FIX #1: canWithdraw no longer blocked by business day ───────────────
+  // Business day enforcement is on the server — UI just shows a notice.
+  // User can always click the button; server will reject with exact message.
+  const canWithdraw =
+    !isFrozen &&
+    effectiveAvail >= 10 &&
+    !!profile?.payout_registered &&
+    kycOk &&
+    !!profile?.pin_set;
+
+  // ─── DEPOSIT ENTRIES ─────────────────────────────────────────────────────
   const depositEntries: DepositEntry[] = [];
 
   for (const pt of paymentTxs) {
@@ -1033,7 +1178,6 @@ export default function FinancialsPage() {
     });
   }
 
-  // Robust dedup: check node_key, gateway_reference, and metadata allocationId
   const ptAllocIds = new Set<string>();
   for (const pt of paymentTxs) {
     if (pt.node_key) ptAllocIds.add(pt.node_key);
@@ -1076,18 +1220,21 @@ export default function FinancialsPage() {
     0,
   );
 
-  const canWithdraw =
-    !isFrozen && effectiveAvail >= 10 && !!profile?.payout_registered && kycOk;
-
+  // Header button label — now includes non-biz day info but button stays clickable
+  const isBizDay = isBusinessDay();
   const headerBtnLabel = isFrozen
     ? "Frozen"
     : !profile?.payout_registered
       ? "Setup Payout First"
       : !kycOk
         ? "KYC Required"
-        : effectiveAvail < 10
-          ? "Need $10 min"
-          : `Withdraw $${effectiveAvail.toFixed(2)}`;
+        : !profile?.pin_set
+          ? "Set PIN First"
+          : effectiveAvail < 10
+            ? "Need $10 min"
+            : !isBizDay
+              ? `Withdraw $${effectiveAvail.toFixed(2)} (queue)`
+              : `Withdraw $${effectiveAvail.toFixed(2)}`;
 
   const TABS: Array<{
     id: typeof tab;
@@ -1113,11 +1260,9 @@ export default function FinancialsPage() {
           isFrozen={isFrozen}
           profile={profile}
           onClose={() => setShowWithdrawModal(false)}
-          onSuccess={() => {
+          onSuccess={(message: string) => {
             setShowWithdrawModal(false);
-            showToast(
-              "Withdrawal request submitted! Admin will process it shortly.",
-            );
+            showToast(message);
             loadData();
             setTab("withdrawals");
           }}
@@ -1126,10 +1271,12 @@ export default function FinancialsPage() {
 
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm flex items-center gap-2 ${toast.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-sm flex items-start gap-2 ${toast.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
         >
-          {toast.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}{" "}
-          {toast.text}
+          <span className="shrink-0 mt-0.5">
+            {toast.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+          </span>
+          <span>{toast.text}</span>
         </div>
       )}
 
@@ -1152,6 +1299,7 @@ export default function FinancialsPage() {
               >
                 <RefreshCw size={12} /> Refresh
               </button>
+              {/* FIX #1: Button is always clickable when user meets basic requirements */}
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}
@@ -1166,6 +1314,9 @@ export default function FinancialsPage() {
             </div>
           </div>
 
+          {/* FIX #2: Business day / holiday banner */}
+          <BusinessDayBanner />
+
           {/* Alerts */}
           {!kycOk && (
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
@@ -1178,6 +1329,22 @@ export default function FinancialsPage() {
                   className="underline font-bold"
                 >
                   Complete verification →
+                </button>
+              </p>
+            </div>
+          )}
+
+          {profile && !profile.pin_set && kycOk && (
+            <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
+              <Lock size={14} className="text-amber-400 shrink-0" />
+              <p className="text-amber-300 text-sm">
+                <strong>Security PIN not set.</strong> You need a PIN to
+                withdraw.{" "}
+                <button
+                  onClick={() => router.push("/dashboard/settings")}
+                  className="underline"
+                >
+                  Set PIN in Settings →
                 </button>
               </p>
             </div>
@@ -1390,9 +1557,13 @@ export default function FinancialsPage() {
                       ? "Complete KYC to enable withdrawals."
                       : !profile?.payout_registered
                         ? "Set up your payout account first."
-                        : effectiveAvail < 10
-                          ? "You need at least $10 to withdraw."
-                          : "Submit a request and admin will process it."}
+                        : !profile?.pin_set
+                          ? "Set a security PIN in Settings first."
+                          : effectiveAvail < 10
+                            ? "You need at least $10 to withdraw."
+                            : !isBizDay
+                              ? `Today is not a business day — requests will queue for ${nextBusinessDayLabel()}.`
+                              : "Submit a request for instant processing."}
                   </p>
                 </div>
                 <button
@@ -1594,11 +1765,6 @@ export default function FinancialsPage() {
                               </p>
                               <GatewayBadge gateway={dep.gateway} />
                               <StatusBadge status={dep.status} />
-                              {dep.status === "pending" && (
-                                <span className="text-[10px] text-amber-400/70">
-                                  Awaiting admin approval
-                                </span>
-                              )}
                             </div>
                             <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                               {dep.miningPeriod &&
@@ -1640,12 +1806,7 @@ export default function FinancialsPage() {
                                 [
                                   ["Type", dep.type.replace(/_/g, " ")],
                                   ["Amount", `$${dep.amount.toFixed(2)} USD`],
-                                  [
-                                    "Status",
-                                    dep.status === "pending"
-                                      ? "Pending admin approval"
-                                      : dep.status,
-                                  ],
+                                  ["Status", dep.status],
                                   ["Gateway", dep.gateway],
                                   ...(dep.planName
                                     ? [["Plan", dep.planName]]
@@ -1919,14 +2080,18 @@ export default function FinancialsPage() {
               >
                 <ArrowUpRight size={15} />
                 {isFrozen
-                  ? "Withdrawals Frozen"
+                  ? "Withdrawals Frozen — Contact Support"
                   : !kycOk
-                    ? "KYC Verification Required"
+                    ? "Complete KYC Verification First"
                     : !profile?.payout_registered
                       ? "Setup Payout Account First"
-                      : effectiveAvail < 10
-                        ? `Need $10 min (have $${effectiveAvail.toFixed(2)})`
-                        : `Request Withdrawal — $${effectiveAvail.toFixed(2)} Available`}
+                      : !profile?.pin_set
+                        ? "Set Security PIN in Settings First"
+                        : effectiveAvail < 10
+                          ? `Need $10 minimum (have $${effectiveAvail.toFixed(2)})`
+                          : !isBizDay
+                            ? `Queue Withdrawal — $${effectiveAvail.toFixed(2)} (processes ${nextBusinessDayLabel()})`
+                            : `Request Withdrawal — $${effectiveAvail.toFixed(2)} Available`}
               </button>
 
               {withdrawals.length === 0 ? (
@@ -1947,6 +2112,11 @@ export default function FinancialsPage() {
                             <StatusBadge
                               status={w.tracking_status ?? w.status}
                             />
+                            {w.auto_processed && (
+                              <span className="text-[10px] text-emerald-400/70 flex items-center gap-0.5">
+                                <CheckCircle size={9} /> Auto-processed
+                              </span>
+                            )}
                             {w.expected_date && w.status !== "paid" && (
                               <span className="text-[10px] text-slate-500">
                                 Expected:{" "}
@@ -1957,6 +2127,11 @@ export default function FinancialsPage() {
                           <p className="text-slate-400 text-xs">
                             {w.payout_account_name ?? w.wallet_address}
                           </p>
+                          {w.reference && (
+                            <p className="text-slate-600 text-[10px] font-mono mt-0.5">
+                              Ref: {w.reference}
+                            </p>
+                          )}
                           <p className="text-slate-600 text-[10px] mt-0.5">
                             {new Date(w.created_at).toLocaleString()}
                           </p>
