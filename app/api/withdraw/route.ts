@@ -586,7 +586,7 @@ export async function POST(req: NextRequest) {
     const message = autoProcessed
       ? `Your withdrawal of $${amount.toFixed(2)} has been submitted and is being processed by our payment partner. Expected by ${new Date(expectedDate).toLocaleDateString("en-NG")}.`
       : isCrypto
-        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our admin team will process it to your registered ${profile.payout_gateway?.toUpperCase()} address within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
+        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our  team will process it to your registered ${profile.payout_gateway?.toUpperCase()} address within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
         : `Your withdrawal of $${amount.toFixed(2)} has been queued and will be processed by our team within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`;
 
     return NextResponse.json({

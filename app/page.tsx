@@ -150,7 +150,7 @@ const FAQS = [
   },
   {
     q: "What are the withdrawal requirements?",
-    a: "You can withdraw your mining profits anytime after completing KYC verification and receiving admin approval. The minimum withdrawal is $10. Withdrawal requests are processed through your Financials dashboard. Processing times range from 24 hours to 7 business days depending on amount. All withdrawals require KYC approval before funds are released.",
+    a: "You can withdraw your mining profits anytime after completing KYC verification and receiving  approvalfrom our Team. The minimum withdrawal is $10. Withdrawal requests are processed through your Financials dashboard. Processing times range from 24 hours to 7 business days depending on amount. All withdrawals require KYC approval before funds are released.",
   },
 ];
 

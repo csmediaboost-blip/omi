@@ -1,7 +1,10 @@
 "use client";
-// components/auth/set-pin-form.tsx — FIXED
-// Key fix: hashes PIN with SHA-256 + userId before saving (matches verify-pin logic)
-// Also fixes: infinite recursion by using auth.uid() correctly in update
+// components/auth/set-pin-form.tsx
+// FIXES:
+// 1. Sets pin_verified cookie immediately after PIN saved — so user isn't asked again
+// 2. Numeric PIN pad (no QWERTY)
+// 3. Company-facing language (no "admin" references)
+// 4. pin_set flag written to DB so verify-pin knows PIN exists
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -10,7 +13,8 @@ import * as z from "zod";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Eye, EyeOff, Shield, Lock } from "lucide-react";
+import { Shield, Lock, CheckCircle } from "lucide-react";
+import { PinPad } from "@/components/ui/pin-pad";
 
 const PinSchema = z
   .object({
@@ -28,7 +32,6 @@ const PinSchema = z
 
 type PinFormData = z.infer<typeof PinSchema>;
 
-// ── Same hash function used in verify-pin-form.tsx ───────────────────────────
 async function hashPin(pin: string, userId: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(pin + userId);
@@ -38,35 +41,51 @@ async function hashPin(pin: string, userId: string): Promise<string> {
     .join("");
 }
 
+function setPinVerifiedCookie(userId: string) {
+  document.cookie = `pin_verified=${userId}; path=/; SameSite=Lax`;
+}
+
 export function SetPinForm() {
   const [loading, setLoading] = useState(false);
-  const [showPin, setShowPin] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [step, setStep] = useState<"enter" | "confirm">("enter");
+  const [pin, setPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [pinError, setPinError] = useState("");
   const router = useRouter();
 
-  // Check session on mount
   useEffect(() => {
     const checkSession = async () => {
-      const { data: { session }, error } = await supabase.auth.getSession();
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.getSession();
       if (error || !session?.user) {
-        setSessionError("Session expired. Please sign in again.");
+        setSessionError("Your session has expired. Please sign in again.");
       }
     };
     checkSession();
   }, []);
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors },
-  } = useForm<PinFormData>({
-    resolver: zodResolver(PinSchema),
-  });
+  function handlePinNext() {
+    setPinError("");
+    if (pin.length < 4) {
+      setPinError("PIN must be at least 4 digits.");
+      return;
+    }
+    setStep("confirm");
+  }
 
-  const onSubmit = async (data: PinFormData) => {
+  async function handleConfirm() {
+    setPinError("");
+    if (confirmPin !== pin) {
+      setPinError("PINs do not match. Please try again.");
+      setConfirmPin("");
+      return;
+    }
+
+    setLoading(true);
     try {
-      setLoading(true);
-
       const {
         data: { session },
         error: sessionErr,
@@ -74,50 +93,56 @@ export function SetPinForm() {
       if (sessionErr || !session?.user)
         throw new Error("Session expired. Please sign in again.");
 
-      // ── FIXED: hash the PIN before storing — MUST match verify-pin hashing ──
-      const hashedPin = await hashPin(data.pin, session.user.id);
+      const hashedPin = await hashPin(pin, session.user.id);
 
-      // ── FIXED: use RPC or direct update with minimal fields to avoid RLS recursion ──
       const { error: updateError } = await supabase
         .from("users")
         .update({
           pin_hash: hashedPin,
+          pin_set: true, // mark PIN as set so verify-pin knows
           pin_attempts: 0,
           pin_locked: false,
         })
         .eq("id", session.user.id);
 
       if (updateError) {
-        // If RLS recursion error, try upsert instead
         if (
           updateError.message?.includes("infinite recursion") ||
           updateError.message?.includes("policy")
         ) {
           throw new Error(
-            "Database policy error. Please run the RLS fix SQL in Supabase. " +
-              updateError.message,
+            "A database configuration error occurred. Please contact our support team. (" +
+              updateError.message +
+              ")",
           );
         }
         throw updateError;
       }
 
-      toast.success("Security PIN set successfully!");
+      // FIX 1: Set verified cookie immediately — user won't be asked for PIN again this session
+      setPinVerifiedCookie(session.user.id);
+
+      toast.success("Security PIN created successfully!");
       router.refresh();
       router.replace("/dashboard");
     } catch (error: any) {
       console.error("PIN Error:", error);
-      toast.error(error.message || "Failed to save PIN");
+      toast.error(error.message || "Failed to save PIN. Please try again.");
     } finally {
       setLoading(false);
     }
-  };
+  }
+
+  // Dots display
+  const currentVal = step === "enter" ? pin : confirmPin;
+  const dots = Array.from({ length: 6 }, (_, i) => i < currentVal.length);
 
   return (
     <div
       className="min-h-screen flex items-center justify-center p-4"
       style={{ background: "#030712" }}
     >
-      <div className="w-full max-w-sm space-y-8">
+      <div className="w-full max-w-sm space-y-6">
         {/* Header */}
         <div className="text-center space-y-3">
           <div
@@ -129,106 +154,145 @@ export function SetPinForm() {
           >
             <Shield size={28} className="text-emerald-400" />
           </div>
-          <h1 className="text-white font-black text-2xl">Create PIN</h1>
+          <h1 className="text-white font-black text-2xl">
+            {step === "enter" ? "Create Security PIN" : "Confirm Your PIN"}
+          </h1>
           <p className="text-slate-400 text-sm">
-            Used for withdrawals and security
+            {step === "enter"
+              ? "Your PIN protects your account and is required for withdrawals"
+              : "Re-enter your PIN to confirm it"}
           </p>
         </div>
 
-        {/* Session error alert */}
+        {/* Step indicator */}
+        <div className="flex items-center justify-center gap-2">
+          <div
+            className={`h-1.5 w-12 rounded-full transition-all ${step === "enter" ? "bg-emerald-500" : "bg-emerald-500"}`}
+          />
+          <div
+            className={`h-1.5 w-12 rounded-full transition-all ${step === "confirm" ? "bg-emerald-500" : "bg-slate-700"}`}
+          />
+        </div>
+
+        {/* Session error */}
         {sessionError && (
-          <div className="bg-red-900/20 border border-red-700/30 rounded-lg px-3 py-2.5 text-xs text-red-300">
+          <div className="bg-red-900/20 border border-red-700/30 rounded-xl px-4 py-3 text-xs text-red-300 text-center">
             {sessionError}
           </div>
         )}
 
-        {/* Form card */}
+        {/* Card */}
         <div
-          className="rounded-2xl p-6 space-y-4"
+          className="rounded-2xl p-6 space-y-5"
           style={{
             background: "rgba(15,23,42,0.8)",
             border: "1px solid rgba(255,255,255,0.07)",
           }}
         >
-          {/* PIN input */}
-          <div className="space-y-1.5">
-            <label className="text-slate-400 text-xs font-semibold uppercase tracking-wide">
-              New PIN (4–6 digits)
-            </label>
-            <div className="relative">
-              <input
-                type={showPin ? "text" : "password"}
-                inputMode="numeric"
-                pattern="[0-9]*"
-                maxLength={6}
-                placeholder="••••"
-                {...register("pin")}
-                disabled={loading}
-                autoComplete="off"
-                className="w-full px-4 py-3.5 pr-11 rounded-xl text-white text-lg font-bold tracking-[0.4em] text-center bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors placeholder-slate-700 disabled:opacity-50"
+          {/* Dot display */}
+          <div className="flex justify-center gap-3">
+            {dots.map((filled, i) => (
+              <div
+                key={i}
+                className={`w-4 h-4 rounded-full border-2 transition-all duration-150 ${
+                  filled
+                    ? "bg-emerald-400 border-emerald-400 scale-110"
+                    : "border-slate-600 bg-transparent"
+                }`}
               />
+            ))}
+          </div>
+
+          {/* FIX 3: Numeric PIN pad */}
+          {step === "enter" ? (
+            <PinPad
+              value={pin}
+              onChange={(v) => {
+                setPin(v);
+                setPinError("");
+              }}
+              maxLength={6}
+              disabled={loading}
+            />
+          ) : (
+            <PinPad
+              value={confirmPin}
+              onChange={(v) => {
+                setConfirmPin(v);
+                setPinError("");
+              }}
+              maxLength={6}
+              disabled={loading}
+            />
+          )}
+
+          {/* Error */}
+          {pinError && (
+            <div
+              className="rounded-xl px-4 py-3"
+              style={{
+                background: "rgba(239,68,68,0.08)",
+                border: "1px solid rgba(239,68,68,0.2)",
+              }}
+            >
+              <p className="text-red-400 text-sm text-center">{pinError}</p>
+            </div>
+          )}
+
+          {/* Action button */}
+          {step === "enter" ? (
+            <button
+              type="button"
+              onClick={handlePinNext}
+              disabled={pin.length < 4 || loading || !!sessionError}
+              className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
+            >
+              Next →
+            </button>
+          ) : (
+            <div className="space-y-3">
               <button
                 type="button"
-                onClick={() => setShowPin((v) => !v)}
-                className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+                onClick={handleConfirm}
+                disabled={confirmPin.length < 4 || loading}
+                className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  background: "linear-gradient(135deg,#10b981,#059669)",
+                }}
               >
-                {showPin ? <EyeOff size={17} /> : <Eye size={17} />}
+                {loading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <Lock size={16} />
+                    Confirm & Save PIN
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStep("enter");
+                  setConfirmPin("");
+                  setPinError("");
+                }}
+                disabled={loading}
+                className="w-full py-3 rounded-xl font-semibold text-slate-400 text-sm border border-slate-700 hover:border-slate-600 hover:text-slate-200 transition-all disabled:opacity-40"
+              >
+                ← Change PIN
               </button>
             </div>
-            {errors.pin && (
-              <p className="text-red-400 text-xs mt-1">{errors.pin.message}</p>
-            )}
-          </div>
-
-          {/* Confirm PIN */}
-          <div className="space-y-1.5">
-            <label className="text-slate-400 text-xs font-semibold uppercase tracking-wide">
-              Confirm PIN
-            </label>
-            <div className="relative">
-              <input
-                type={showPin ? "text" : "password"}
-                inputMode="numeric"
-                pattern="[0-9]*"
-                maxLength={6}
-                placeholder="••••"
-                {...register("confirmPin")}
-                disabled={loading}
-                autoComplete="off"
-                className="w-full px-4 py-3.5 pr-11 rounded-xl text-white text-lg font-bold tracking-[0.4em] text-center bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors placeholder-slate-700 disabled:opacity-50"
-              />
-            </div>
-            {errors.confirmPin && (
-              <p className="text-red-400 text-xs mt-1">
-                {errors.confirmPin.message}
-              </p>
-            )}
-          </div>
-
-          <button
-            type="button"
-            onClick={handleSubmit(onSubmit)}
-            disabled={loading}
-            className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed mt-2"
-            style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
-          >
-            {loading ? (
-              <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Securing Account...
-              </>
-            ) : (
-              <>
-                <Lock size={16} />
-                Finish Setup
-              </>
-            )}
-          </button>
+          )}
         </div>
 
+        {/* FIX 2: Company language — no mention of "admin" */}
         <p className="text-center text-slate-600 text-xs">
-          Your PIN is hashed and stored securely. It cannot be recovered — keep
-          it safe.
+          Your PIN is encrypted and stored securely by OmniTaskPro. It cannot be
+          recovered — please memorise it or store it safely.
         </p>
       </div>
     </div>

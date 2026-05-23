@@ -605,7 +605,7 @@ function WithdrawModal({
                 {isCrypto && (
                   <p className="text-violet-400 text-[10px] flex items-center gap-1 mt-1">
                     <Info size={9} /> Crypto withdrawals are processed manually
-                    by admin (1–3 business days)
+                    by financial Team (1–3 business days)
                   </p>
                 )}
                 {kycOk && (
@@ -1322,8 +1322,8 @@ export default function FinancialsPage() {
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <AlertTriangle size={14} className="text-amber-400 shrink-0" />
               <p className="text-amber-300 text-sm">
-                KYC verification required for withdrawals. Mining continues
-                normally.{" "}
+                KYC verification required before  withdrawals
+                .{" "}
                 <button
                   onClick={() => router.push("/dashboard/verification")}
                   className="underline font-bold"
@@ -1356,7 +1356,7 @@ export default function FinancialsPage() {
               <p className="text-amber-300 text-sm">
                 <strong>
                   {pendingDeposits.length} payment
-                  {pendingDeposits.length > 1 ? "s" : ""} pending admin approval
+                  {pendingDeposits.length > 1 ? "s" : ""} pending approval
                 </strong>{" "}
                 — ${totalPendingDeposits.toFixed(2)} total.
               </p>

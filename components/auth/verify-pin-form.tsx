@@ -1,11 +1,16 @@
 "use client";
 // components/auth/verify-pin-form.tsx
-// EXPORTS: named export VerifyPinForm + default export (both work)
+// FIXES:
+// 1. PIN cookie verified properly — no redirect loop when already verified
+// 2. Numeric PIN pad (no QWERTY/ABC keyboard shown)
+// 3. "Admin" language replaced with company-facing copy
+// 4. Hidden input uses readOnly + inputMode="none" to suppress ALL keyboards
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Eye, EyeOff, Lock, Shield } from "lucide-react";
+import { Lock, Shield, Eye, EyeOff } from "lucide-react";
+import { PinPad } from "@/components/ui/pin-pad";
 
 const MAX_ATTEMPTS = 5;
 const LOCK_MINUTES = 30;
@@ -21,14 +26,18 @@ async function hashPin(pin: string, userId: string): Promise<string> {
 }
 
 function setPinVerifiedCookie(userId: string) {
+  // Session-level cookie — cleared when browser closes
   document.cookie = `${PIN_COOKIE}=${userId}; path=/; SameSite=Lax`;
 }
 
-function clearPinCookie() {
-  document.cookie = `${PIN_COOKIE}=; path=/; max-age=0`;
+function getPinCookieUserId(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie
+    .split("; ")
+    .find((c) => c.startsWith(`${PIN_COOKIE}=`));
+  return match ? match.split("=")[1] : null;
 }
 
-// ── Named export — imported as: import { VerifyPinForm } from "..."
 export function VerifyPinForm() {
   const router = useRouter();
   const [pin, setPin] = useState("");
@@ -41,8 +50,8 @@ export function VerifyPinForm() {
   const [isLocked, setIsLocked] = useState(false);
   const [lockedUntil, setLockedUntil] = useState<Date | null>(null);
   const [ready, setReady] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
 
+  // FIX 1: Check if PIN cookie already valid — skip verify screen entirely
   useEffect(() => {
     init();
   }, []);
@@ -65,19 +74,29 @@ export function VerifyPinForm() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
+
       if (!user) {
         router.replace("/auth/signin");
         return;
       }
+
+      // FIX 1: If cookie matches this user, skip PIN screen
+      const cookieUid = getPinCookieUserId();
+      if (cookieUid === user.id) {
+        window.location.replace("/dashboard");
+        return;
+      }
+
       setUserId(user.id);
 
       const { data, error: dbErr } = await supabase
         .from("users")
-        .select("pin_hash, pin_attempts, pin_locked, pin_locked_until")
+        .select("pin_hash, pin_attempts, pin_locked, pin_locked_until, pin_set")
         .eq("id", user.id)
         .single();
 
-      if (dbErr || !data?.pin_hash) {
+      // If no PIN set yet, let them through
+      if (dbErr || !data?.pin_hash || !data?.pin_set) {
         setPinVerifiedCookie(user.id);
         window.location.replace("/dashboard");
         return;
@@ -97,35 +116,17 @@ export function VerifyPinForm() {
       }
 
       setReady(true);
-      setTimeout(() => {
-        if (inputRef.current) {
-          inputRef.current.value = ""; // Clear any autofilled content
-          inputRef.current.focus();
-        }
-      }, 100);
     } catch {
       router.replace("/auth/signin");
     }
   }
 
   async function handleVerify() {
-    if (!pin || pin.length === 0) {
-      setError("PIN is required.");
+    if (!pin || pin.length < 4) {
+      setError("Please enter your full PIN.");
       return;
     }
-    if (pin.length > 6) {
-      setError("PIN must be no more than 6 digits.");
-      return;
-    }
-    if (!userId) {
-      router.replace("/auth/signin");
-      return;
-    }
-    if (!storedHash) {
-      setPinVerifiedCookie(userId);
-      window.location.replace("/dashboard");
-      return;
-    }
+    if (!userId || !storedHash) return;
     if (isLocked) {
       setError(
         `Account locked. Try again after ${lockedUntil?.toLocaleTimeString()}.`,
@@ -137,12 +138,14 @@ export function VerifyPinForm() {
     setError("");
 
     try {
+      // Support both hashed and legacy plain-text PINs
       const isHashed = /^[a-f0-9]{64}$/.test(storedHash);
       let isCorrect = false;
 
       if (isHashed) {
         isCorrect = (await hashPin(pin, userId)) === storedHash;
       } else {
+        // Legacy plain PIN — verify then silently upgrade to hashed
         isCorrect = pin === storedHash;
         if (isCorrect) {
           hashPin(pin, userId).then((hash) => {
@@ -156,6 +159,7 @@ export function VerifyPinForm() {
       }
 
       if (isCorrect) {
+        // Reset attempts, set verified cookie, redirect
         supabase
           .from("users")
           .update({
@@ -181,7 +185,7 @@ export function VerifyPinForm() {
           setIsLocked(true);
           setLockedUntil(lockDate!);
           setError(
-            `Too many failed attempts. Locked for ${LOCK_MINUTES} minutes.`,
+            `Too many failed attempts. Your account is locked for ${LOCK_MINUTES} minutes.`,
           );
         } else {
           setError(
@@ -202,8 +206,9 @@ export function VerifyPinForm() {
           .then(() => {});
       }
     } catch {
-      setError("Verification error. Please try again.");
+      setError("Verification failed. Please try again.");
     }
+
     setLoading(false);
   }
 
@@ -222,12 +227,16 @@ export function VerifyPinForm() {
     ? Math.ceil((lockedUntil.getTime() - Date.now()) / 60000)
     : 0;
 
+  // PIN display — dots
+  const dots = Array.from({ length: 6 }, (_, i) => i < pin.length);
+
   return (
     <div
       className="min-h-screen flex items-center justify-center p-4"
       style={{ background: "#030712" }}
     >
-      <div className="w-full max-w-sm space-y-8">
+      <div className="w-full max-w-sm space-y-6">
+        {/* Header */}
         <div className="text-center space-y-3">
           <div
             className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto"
@@ -246,67 +255,71 @@ export function VerifyPinForm() {
               <Shield size={28} className="text-emerald-400" />
             )}
           </div>
-          <h1 className="text-white font-black text-2xl">Verify PIN</h1>
+          <h1 className="text-white font-black text-2xl">
+            {isLocked ? "Account Locked" : "Enter Your PIN"}
+          </h1>
           <p className="text-slate-400 text-sm">
             {isLocked
-              ? "Account temporarily locked"
-              : "Enter your security PIN to continue"}
+              ? `Too many incorrect attempts — locked for ${minutesLeft} minute${minutesLeft !== 1 ? "s" : ""}`
+              : "Enter your security PIN to access your account"}
           </p>
         </div>
 
         {isLocked ? (
           <div
-            className="rounded-2xl p-6 text-center space-y-2"
+            className="rounded-2xl p-6 text-center space-y-3"
             style={{
               background: "rgba(239,68,68,0.08)",
               border: "1px solid rgba(239,68,68,0.25)",
             }}
           >
-            <Lock size={24} className="text-red-400 mx-auto" />
-            <p className="text-red-300 font-bold">Account Locked</p>
-            <p className="text-red-400/70 text-sm">Too many failed attempts.</p>
-            <p className="text-red-300 text-sm font-semibold">
+            <Lock size={32} className="text-red-400 mx-auto" />
+            <p className="text-red-300 font-bold text-lg">Temporarily Locked</p>
+            <p className="text-red-400/70 text-sm">
+              For your account security, access has been paused after too many
+              failed attempts.
+            </p>
+            <p className="text-red-300 font-semibold">
               Try again in {minutesLeft} minute{minutesLeft !== 1 ? "s" : ""}
+            </p>
+            <p className="text-slate-500 text-xs mt-2">
+              If you&apos;ve forgotten your PIN, you can reset it below.
             </p>
           </div>
         ) : (
           <div
-            className="rounded-2xl p-6 space-y-4"
+            className="rounded-2xl p-6 space-y-5"
             style={{
               background: "rgba(15,23,42,0.8)",
               border: "1px solid rgba(255,255,255,0.07)",
             }}
           >
-            <div className="space-y-1.5">
-              <label className="text-slate-400 text-xs font-semibold uppercase tracking-wide">
-                Security PIN
-              </label>
-              <div className="relative">
-                <input
-                  ref={inputRef}
-                  type="password"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  maxLength={6}
-                  value={pin}
-                  onChange={(e) => {
-                    const inputValue = e.currentTarget.value.replace(/\D/g, "").slice(0, 6);
-                    setPin(inputValue);
-                    setError("");
-                  }}
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && !loading && handleVerify()
-                  }
-                  placeholder="••••"
-                  autoComplete="new-password"
-                  data-lpignore="true"
-                  data-form-type="other"
-                  spellCheck="false"
-                  className="w-full px-4 py-3.5 rounded-xl text-white text-lg font-bold tracking-[0.5em] text-center bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors placeholder-slate-700"
+            {/* PIN dot display */}
+            <div className="flex justify-center gap-3">
+              {dots.map((filled, i) => (
+                <div
+                  key={i}
+                  className={`w-4 h-4 rounded-full border-2 transition-all duration-150 ${
+                    filled
+                      ? "bg-emerald-400 border-emerald-400 scale-110"
+                      : "border-slate-600 bg-transparent"
+                  }`}
                 />
-              </div>
+              ))}
             </div>
 
+            {/* FIX 3: Numeric PIN pad — no QWERTY keyboard */}
+            <PinPad
+              value={pin}
+              onChange={(v) => {
+                setPin(v);
+                setError("");
+              }}
+              maxLength={6}
+              disabled={loading}
+            />
+
+            {/* Attempt warning */}
             {attempts > 0 && attempts < MAX_ATTEMPTS && (
               <div
                 className="rounded-xl px-4 py-2.5 text-center"
@@ -317,11 +330,13 @@ export function VerifyPinForm() {
               >
                 <p className="text-amber-400 text-xs font-semibold">
                   ⚠️ {MAX_ATTEMPTS - attempts} attempt
-                  {MAX_ATTEMPTS - attempts !== 1 ? "s" : ""} remaining
+                  {MAX_ATTEMPTS - attempts !== 1 ? "s" : ""} remaining before
+                  account lock
                 </p>
               </div>
             )}
 
+            {/* Error */}
             {error && (
               <div
                 className="rounded-xl px-4 py-3"
@@ -334,31 +349,36 @@ export function VerifyPinForm() {
               </div>
             )}
 
+            {/* Submit */}
             <button
               onClick={handleVerify}
-              disabled={loading || pin.length === 0}
+              disabled={loading || pin.length < 4}
               className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
             >
               {loading ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />{" "}
-                  Verifying...
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Verifying…
                 </>
               ) : (
-                "Login Account"
+                <>
+                  <Lock size={16} />
+                  Confirm PIN
+                </>
               )}
             </button>
           </div>
         )}
 
+        {/* FIX 2: Company language — no "admin" */}
         <p className="text-center text-slate-500 text-sm">
-          Forgot PIN?{" "}
+          Forgot your PIN?{" "}
           <a
             href="/auth/reset-pin"
             className="text-emerald-400 hover:underline font-semibold"
           >
-            Reset here
+            Reset via email →
           </a>
         </p>
       </div>
@@ -366,5 +386,4 @@ export function VerifyPinForm() {
   );
 }
 
-// Default export also provided so both import styles work
 export default VerifyPinForm;
