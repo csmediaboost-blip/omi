@@ -15,6 +15,7 @@
 // Issue #12 FIXED: Quick-select only shows values ≥ plan.price_min
 // Issue #13 FIXED: X icon imported from lucide-react
 // Issue #14 FIXED: Stale closure in useLiveMiningEarnings fixed with liveRef
+// Issue #15 ADDED: EstimatedProfitBanner — live estimate range, reacts to capital + period/term
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
@@ -57,7 +58,7 @@ import {
   PlayCircle,
   RotateCcw,
   Gauge,
-  X, // Issue #13: X was missing — now imported
+  X,
 } from "lucide-react";
 import { useKycStatus, KYCStatus } from "@/lib/useKycStatus";
 import {
@@ -460,6 +461,123 @@ function Disclaimer() {
         rewards are variable and not guaranteed. Past performance is not
         indicative of future results.
       </p>
+    </div>
+  );
+}
+
+// ─── ESTIMATED PROFIT BANNER ─────────────────────────────────────────────────
+// Issue #15: Shows a live-reactive profit estimate range based on capital,
+// period/term, and plan rates. Updates instantly as the user types or changes
+// period/term. Clearly marked as an estimate — not a guarantee.
+function EstimatedProfitBanner({
+  minProfit,
+  maxProfit,
+  periodLabel,
+  isContract,
+}: {
+  minProfit: number;
+  maxProfit: number;
+  periodLabel: string;
+  isContract: boolean;
+}) {
+  const accentColor = isContract ? "#8b5cf6" : "#10b981";
+  const accentBg = isContract
+    ? "rgba(139,92,246,0.07)"
+    : "rgba(16,185,129,0.07)";
+  const accentBorder = isContract
+    ? "rgba(139,92,246,0.28)"
+    : "rgba(16,185,129,0.28)";
+  const accentText = isContract ? "text-violet-300" : "text-emerald-300";
+  const accentVal = isContract ? "text-violet-400" : "text-emerald-400";
+  const accentBadgeBg = isContract
+    ? "rgba(139,92,246,0.12)"
+    : "rgba(16,185,129,0.12)";
+  const accentBadgeBorder = isContract
+    ? "rgba(139,92,246,0.3)"
+    : "rgba(16,185,129,0.3)";
+
+  return (
+    <div
+      className="rounded-xl p-4 space-y-3"
+      style={{ background: accentBg, border: `1px solid ${accentBorder}` }}
+    >
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p
+          className={`text-xs font-black uppercase tracking-wide flex items-center gap-1.5 ${accentText}`}
+        >
+          <TrendingUp size={11} style={{ color: accentColor }} />
+          Estimated Profit — {periodLabel}
+        </p>
+        <span
+          className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+          style={{
+            background: accentBadgeBg,
+            border: `1px solid ${accentBadgeBorder}`,
+            color: accentColor,
+          }}
+        >
+          Live Estimate
+        </span>
+      </div>
+
+      {/* Low / High boxes */}
+      <div className="grid grid-cols-2 gap-2">
+        <div
+          className="rounded-xl py-3 px-3 text-center"
+          style={{
+            background: "rgba(0,0,0,0.3)",
+            border: "1px solid rgba(255,255,255,0.06)",
+          }}
+        >
+          <p className="text-slate-500 text-[9px] uppercase tracking-widest mb-1">
+            Low Estimate
+          </p>
+          <p className={`font-black text-xl tabular-nums ${accentVal}`}>
+            $
+            {minProfit.toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}
+          </p>
+        </div>
+        <div
+          className="rounded-xl py-3 px-3 text-center"
+          style={{
+            background: accentBg,
+            border: `1px solid ${accentBorder}`,
+          }}
+        >
+          <p className="text-slate-500 text-[9px] uppercase tracking-widest mb-1">
+            High Estimate
+          </p>
+          <p className={`font-black text-xl tabular-nums ${accentVal}`}>
+            $
+            {maxProfit.toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })}
+          </p>
+        </div>
+      </div>
+
+      {/* Disclaimer note */}
+      <div
+        className="flex items-start gap-2 rounded-lg px-3 py-2.5"
+        style={{
+          background: "rgba(245,158,11,0.05)",
+          border: "1px solid rgba(245,158,11,0.15)",
+        }}
+      >
+        <AlertTriangle size={11} className="text-amber-400 shrink-0 mt-0.5" />
+        <p className="text-amber-400/80 text-[11px] leading-relaxed">
+          This is an{" "}
+          <strong className="text-amber-300">estimated projection</strong> based
+          on current GPU demand and live network conditions. Your actual return
+          may be higher or lower — GPU demand fluctuates continuously and is not
+          fixed or stable. This figure is a guide only, not a guarantee.
+        </p>
+      </div>
     </div>
   );
 }
@@ -1734,11 +1852,12 @@ function KYCGateModal({
 }
 
 // ─── PLAN CARD ────────────────────────────────────────────────────────────────
-// Issue #1  FIX: No earnings range shown pre-purchase
+// Issue #1  FIX: No earnings range shown pre-purchase (now restored as estimate)
 // Issue #3  FIX: Contract % removed from term selector
 // Issue #4  FIX: Tab labelled "Pay-As-You-Go"
 // Issue #11 FIX: Period selector 2×2 on mobile
 // Issue #12 FIX: Quick-select filtered to valid plan range
+// Issue #15 ADD: EstimatedProfitBanner — reactive to capital + period/term changes
 // TypeScript: icon arrays typed explicitly — no "as const" hack
 type IconComponent = React.ComponentType<{ size?: number; className?: string }>;
 
@@ -1803,6 +1922,33 @@ function PlanCard({
   const quickVals = [100, 500, 1000, 5000].filter(
     (v) => v >= plan.price_min && v <= plan.price_max,
   );
+
+  // ── Issue #15: Estimated profit — reactive to amount + period + term ────────
+  // Uses the exact same formula as useLiveMiningEarnings so numbers are
+  // always consistent. Pure derived values — no useState/useEffect needed.
+  // Re-computes on every render triggered by amount/minPeriod/term changes.
+  const EST_PMULT: Record<string, number> = {
+    hourly: 0.8 / 24,
+    daily: 1.0,
+    weekly: 7 * 1.1,
+    monthly: 30 * 1.25,
+  };
+  // Flexible estimates
+  const flexDailyMin =
+    (plan.base_daily_profit_min * plan.roi_tier_multiplier) / 100;
+  const flexDailyMax =
+    (plan.base_daily_profit_max * plan.roi_tier_multiplier) / 100;
+  const flexPeriodMult = EST_PMULT[minPeriod.key] ?? 1.0;
+  const flexEstMin = amount * flexDailyMin * flexPeriodMult;
+  const flexEstMax = amount * flexDailyMax * flexPeriodMult;
+
+  // Contract estimates — uses contract_returns from plan DB object
+  const contractRet = plan.contract_returns?.[
+    term.key as keyof typeof plan.contract_returns
+  ] ?? { min_pct: 52, max_pct: 93 };
+  const contractEstMin = amount * (contractRet.min_pct / 100);
+  const contractEstMax = amount * (contractRet.max_pct / 100);
+  // ────────────────────────────────────────────────────────────────────────────
 
   // Typed icon arrays (TypeScript fix — no "as const" on mixed arrays)
   const INFO_SECTIONS: Array<{ id: string; lbl: string; Icon: IconComponent }> =
@@ -2054,9 +2200,17 @@ function PlanCard({
                 </p>
               </div>
 
-              {/* Issue #1 FIX: NO earnings estimate shown — only how-it-works info */}
+              {/* Issue #15: Estimated profit banner + how-it-works */}
               {!amountErr && amount > 0 && (
                 <>
+                  {/* Estimated profit — reacts to amount + period instantly */}
+                  <EstimatedProfitBanner
+                    minProfit={flexEstMin}
+                    maxProfit={flexEstMax}
+                    periodLabel={minPeriod.label}
+                    isContract={false}
+                  />
+
                   <div
                     className="rounded-xl p-4 space-y-2"
                     style={{
@@ -2202,9 +2356,17 @@ function PlanCard({
                 )}
               </div>
 
-              {/* Issue #1 / #3 FIX: No expected $ amounts shown — only how-it-works */}
+              {/* Issue #15: Estimated profit banner + how-it-works */}
               {!amountErr && amount > 0 && (
                 <>
+                  {/* Estimated profit — reacts to amount + term instantly */}
+                  <EstimatedProfitBanner
+                    minProfit={contractEstMin}
+                    maxProfit={contractEstMax}
+                    periodLabel={`${term.label} total`}
+                    isContract={true}
+                  />
+
                   <div
                     className="rounded-xl p-4 space-y-2"
                     style={{
@@ -2668,17 +2830,15 @@ export default function GPUPlansPage() {
 
   async function joinWaitlist(planId: string) {
     if (!userId) return;
-    const { error } = await supabase
-      .from("gpu_waitlist")
-      .upsert(
-        {
-          user_id: userId,
-          plan_id: planId,
-          email: userEmail,
-          status: "pending",
-        },
-        { onConflict: "user_id,plan_id" },
-      );
+    const { error } = await supabase.from("gpu_waitlist").upsert(
+      {
+        user_id: userId,
+        plan_id: planId,
+        email: userEmail,
+        status: "pending",
+      },
+      { onConflict: "user_id,plan_id" },
+    );
     if (!error) {
       showToast("You're on the waitlist!");
       loadAll();
