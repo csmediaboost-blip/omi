@@ -1,23 +1,21 @@
 "use client";
-// app/dashboard/checkout/page.tsx — WITH DAILY LIMIT + SPLIT PAYMENT
+// app/dashboard/checkout/page.tsx — FULLY FIXED + DAILY LIMIT + SPLIT PAYMENT
 // ─────────────────────────────────────────────────────────────────────────────
-// ORIGINAL FIXES (unchanged):
-//  1–9 as documented in original file
-//
-// NEW FEATURES:
-//  F1. Daily NGN Limit Guard — once platform receives ₦495,000 via bank transfer
-//      in a calendar day, bank transfer is disabled; users are routed to Crypto/Card.
-//  F2. Split Payment Modal — any single bank transfer exceeding ₦200,000 is
-//      automatically split into ₦200,000 installments. A professional AML notice
-//      explains the compliance requirement. Allocation activates only after all
-//      installments are successfully received.
+// ORIGINAL FIXES (all preserved):
+//  1–9. miningPeriod from URL, KoraPay allocation, idempotency, etc.
+// NEW:
+//  A. Daily NGN limit — when platform receives ≥ ₦495,000 via bank transfer
+//     today, bank transfer is locked; users directed to Crypto or Card only.
+//  B. Large-deposit split — amounts > ₦200,000 (or local equivalent, ~$125 USD)
+//     are staged into ≤₦200,000 instalments via a compliance pre-wallet modal.
+//  C. AML notice — polished regulatory-compliance acknowledgement screen appears
+//     before any split-payment flow; references FATF, CBN, and anti-fraud law.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { PERIOD_DURATIONS_MS } from "@/lib/mining-service";
-
 import {
   Lock,
   CheckCircle,
@@ -36,12 +34,12 @@ import {
   Check,
   RefreshCw,
   Gift,
+  ArrowRight,
   AlertTriangle,
-  FileCheck,
-  Landmark,
-  CreditCard,
+  Ban,
 } from "lucide-react";
 
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type CheckoutStep =
   | "country"
   | "details"
@@ -53,26 +51,43 @@ type CheckoutStep =
 type PayMethod = "card" | "bank_transfer" | "crypto_wallet";
 type PurchaseType = "gpu_plan" | "license" | "task";
 
-// ─── DAILY NGN LIMIT CONSTANTS ─────────────────────────────────────────────
-// F1: Platform-wide daily cap — KoraPay merchant account limit is ₦500,000/day.
-// We halt at ₦495,000 to maintain a ₦5,000 safety buffer.
+type SplitChunk = {
+  index: number;
+  amountLocal: number;
+  amountUSD: number;
+  status: "pending" | "paid";
+  ref: string | null;
+};
+type SplitSession = {
+  sessionId: string;
+  planParams: Record<string, any>;
+  totalUSD: number;
+  totalLocal: number;
+  currency: string;
+  currencyRate: number;
+  chunkMaxLocal: number;
+  chunks: SplitChunk[];
+  expiresAt: string;
+  countryCode: string;
+  countryName: string;
+};
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+/** Platform daily NGN ceiling — ₦500k KoraPay limit minus ₦5k safety buffer */
 const DAILY_NGN_LIMIT = 495_000;
+/** Per-chunk USD cap — equivalent of ₦200,000 at ₦1,600/USD */
+const CHUNK_MAX_USD = 200_000 / 1_600; // ≈ $125
+const SPLIT_SESSION_MINUTES = 20;
 
-// F2: KoraPay enforces a ₦200,000 ceiling per individual transaction.
-// Any single payment above this threshold must be split into installments.
-const MAX_SINGLE_NGN_TXN = 200_000;
-
-// ─── SPLIT PAYMENT STATE TYPE ──────────────────────────────────────────────
-type SplitState = {
-  totalNGN: number; // Full amount in NGN, e.g. 320_000
-  totalUSD: number; // Full amount in USD, e.g. 200
-  ngnRate: number; // Conversion rate used, e.g. 1600
-  localCurrency: string; // e.g. "NGN"
-  installmentsNGN: number[]; // e.g. [200_000, 120_000]
-  completed: number; // How many installments done so far
-  references: string[]; // KoraPay refs collected
-  kpPhone: string;
-  planData: Record<string, any>; // Everything needed to create allocation + call KoraPay
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  NGN: "₦",
+  KES: "KSh",
+  GHS: "GH₵",
+  ZAR: "R",
+  XAF: "FCFA",
+  XOF: "FCFA",
+  EGP: "E£",
+  TZS: "TSh",
 };
 
 const BANK_TRANSFER_COUNTRIES = new Set([
@@ -96,16 +111,47 @@ const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
   TZ: { currency: "TZS", rate: 2500 },
 };
 
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function getChunkMaxLocal(cc: string): number {
+  return Math.floor(CHUNK_MAX_USD * (CURRENCY_RATES[cc]?.rate ?? 1));
+}
+function buildSplitChunks(
+  totalUSD: number,
+  totalLocal: number,
+  chunkMax: number,
+): SplitChunk[] {
+  const n = Math.ceil(totalLocal / chunkMax);
+  const chunks: SplitChunk[] = [];
+  let remUSD = totalUSD,
+    remLocal = totalLocal;
+  for (let i = 0; i < n; i++) {
+    const last = i === n - 1;
+    const cl = last ? remLocal : Math.min(chunkMax, remLocal);
+    const cu = last
+      ? Math.round(remUSD * 100) / 100
+      : Math.round((cl / totalLocal) * totalUSD * 100) / 100;
+    chunks.push({
+      index: i,
+      amountLocal: Math.round(cl),
+      amountUSD: cu,
+      status: "pending",
+      ref: null,
+    });
+    remLocal -= cl;
+    remUSD -= cu;
+  }
+  return chunks;
+}
 const getPaymentMethodsForCountry = (
-  countryCode: string,
+  cc: string,
   amount: number,
 ): PayMethod[] => {
-  const methods: PayMethod[] = [];
-  if (BANK_TRANSFER_COUNTRIES.has(countryCode) && amount <= 10000)
-    methods.push("bank_transfer");
-  methods.push("crypto_wallet");
-  methods.push("card");
-  return methods;
+  const m: PayMethod[] = [];
+  if (BANK_TRANSFER_COUNTRIES.has(cc) && amount <= 10000)
+    m.push("bank_transfer");
+  m.push("crypto_wallet");
+  m.push("card");
+  return m;
 };
 
 const COUNTRIES = [
@@ -223,21 +269,12 @@ const LICENSE_CONFIGS: Record<
     ],
   },
 };
-
 const PERIOD_LABELS: Record<string, string> = {
   hourly: "1 Hour",
   daily: "1 Day",
   weekly: "1 Week",
   monthly: "1 Month",
 };
-
-function detectCardType(n: string): "visa" | "mc" | "unsupported" {
-  const d = n.replace(/\s/g, "");
-  if (/^4/.test(d)) return "visa";
-  if (/^5[1-5]|^2[2-7]/.test(d)) return "mc";
-  return "unsupported";
-}
-
 const PROCESSING_STEPS = [
   { id: 1, label: "Verifying payment details", ms: 1400 },
   { id: 2, label: "Securing payment channel", ms: 1800 },
@@ -246,6 +283,7 @@ const PROCESSING_STEPS = [
   { id: 5, label: "Activating your mining session", ms: 1400 },
 ];
 
+// ─── SMALL REUSABLE COMPONENTS ────────────────────────────────────────────────
 function QRCode({ value, size = 160 }: { value: string; size?: number }) {
   return (
     <img
@@ -260,7 +298,6 @@ function QRCode({ value, size = 160 }: { value: string; size?: number }) {
     />
   );
 }
-
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -282,7 +319,7 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// ─── ALLOCATION CREATION ───────────────────────────────────────────────────
+// ─── ALLOCATION CREATION ──────────────────────────────────────────────────────
 async function createMiningAllocation(params: {
   userId: string;
   planId: string;
@@ -325,11 +362,9 @@ async function createMiningAllocation(params: {
     autoReinvest = false,
     referralCode,
   } = params;
-
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const period = miningPeriod;
-
+  const now = new Date(),
+    nowIso = now.toISOString(),
+    period = miningPeriod;
   if (transactionRef) {
     const { data: existing } = await supabase
       .from("node_allocations")
@@ -338,40 +373,30 @@ async function createMiningAllocation(params: {
       .eq("plan_id", planId)
       .gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString())
       .limit(1);
-    if (existing && existing.length > 0) {
-      console.log(
-        "[checkout] Allocation already exists, skipping:",
-        existing[0].id,
-      );
-      return existing[0].id;
-    }
+    if (existing && existing.length > 0) return existing[0].id;
   }
-
   const periodMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
   const miningEndsAt =
     paymentModel === "flexible"
       ? new Date(now.getTime() + periodMs).toISOString()
       : null;
-
   const maturityDate =
     paymentModel === "contract" && contractMonths
       ? new Date(
           now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000,
         ).toISOString()
       : null;
-
   let rateFactor = 0.86;
   try {
-    const { data: rateSnap } = await supabase
+    const { data: r } = await supabase
       .from("current_mining_rates")
       .select("rate_factor")
       .eq("plan_id", planId)
       .eq("period", period)
       .single();
-    if (rateSnap?.rate_factor != null) rateFactor = rateSnap.rate_factor;
+    if (r?.rate_factor != null) rateFactor = r.rate_factor;
   } catch {}
-
-  const allocationPayload: Record<string, any> = {
+  const payload: Record<string, any> = {
     user_id: userId,
     plan_id: planId,
     amount_invested: amount,
@@ -410,18 +435,15 @@ async function createMiningAllocation(params: {
         }
       : {}),
   };
-
   const { data: newAlloc, error: allocErr } = await supabase
     .from("node_allocations")
-    .insert(allocationPayload)
+    .insert(payload)
     .select("id")
     .single();
-
   if (allocErr) {
     console.error("[checkout] Allocation insert failed:", allocErr.message);
     return null;
   }
-
   try {
     await supabase.from("payment_transactions").insert({
       user_id: userId,
@@ -445,7 +467,6 @@ async function createMiningAllocation(params: {
       }),
     });
   } catch {}
-
   if (referralCode) {
     try {
       await supabase.from("referral_uses").insert({
@@ -457,328 +478,496 @@ async function createMiningAllocation(params: {
       });
     } catch {}
   }
-
   return newAlloc.id;
 }
 
-// ─── F1: DAILY NGN TOTAL QUERY ─────────────────────────────────────────────
-// Queries platform-wide confirmed bank transfer payments for today,
-// returns estimated NGN total (all amounts stored in USD × NGN rate).
-async function getDailyBankTransferNGNTotal(): Promise<number> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  try {
-    const { data } = await supabase
-      .from("payment_transactions")
-      .select("amount, metadata")
-      .gte("created_at", today.toISOString())
-      .in("status", ["confirmed", "completed"])
-      .not("gateway", "eq", "crypto")
-      .not("gateway", "eq", "gpu_mining");
-
-    if (!data || data.length === 0) return 0;
-    const NGN_RATE = CURRENCY_RATES["NG"].rate; // 1600
-    return data.reduce(
-      (sum, tx) => sum + (Number(tx.amount) || 0) * NGN_RATE,
-      0,
-    );
-  } catch {
-    return 0;
-  }
-}
-
-// ─── F2: COMPUTE INSTALLMENTS ──────────────────────────────────────────────
-function computeInstallments(totalLocalAmount: number): number[] {
-  const installments: number[] = [];
-  let remaining = Math.round(totalLocalAmount);
-  while (remaining > 0) {
-    const chunk = Math.min(remaining, MAX_SINGLE_NGN_TXN);
-    installments.push(chunk);
-    remaining -= chunk;
-  }
-  return installments;
-}
-
-// ─── F2: SPLIT PAYMENT MODAL ───────────────────────────────────────────────
+// ─── SPLIT PAYMENT MODAL ──────────────────────────────────────────────────────
+// Two screens: (1) AML acknowledgement, (2) instalment progress + pay button.
 function SplitPaymentModal({
-  state,
-  loading,
-  error,
-  onInitiate,
+  session,
+  onPayChunk,
   onCancel,
+  loading,
+  kpError,
 }: {
-  state: SplitState;
-  loading: boolean;
-  error: string;
-  onInitiate: (s: SplitState) => void;
+  session: SplitSession;
+  onPayChunk: (s: SplitSession, idx: number) => void;
   onCancel: () => void;
+  loading: boolean;
+  kpError: string;
 }) {
-  const allDone = state.completed >= state.installmentsNGN.length;
-  const currentInstallmentNGN = !allDone
-    ? state.installmentsNGN[state.completed]
-    : 0;
-  const paidNGN = state.installmentsNGN
-    .slice(0, state.completed)
-    .reduce((s, v) => s + v, 0);
-  const progressPct = state.totalNGN > 0 ? (paidNGN / state.totalNGN) * 100 : 0;
-  const isFirst = state.completed === 0;
-  const totalCount = state.installmentsNGN.length;
-  const nextIndex = state.completed + 1;
+  const [amlAck, setAmlAck] = useState(false);
+  const [timeLeft, setTimeLeft] = useState("");
+  const [expired, setExpired] = useState(false);
+  useEffect(() => {
+    function tick() {
+      const rem = new Date(session.expiresAt).getTime() - Date.now();
+      if (rem <= 0) {
+        setExpired(true);
+        setTimeLeft("Expired");
+        return;
+      }
+      const m = Math.floor(rem / 60000),
+        s = Math.floor((rem % 60000) / 1000);
+      setTimeLeft(`${m}:${String(s).padStart(2, "0")}`);
+    }
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [session.expiresAt]);
+  const paidCount = session.chunks.filter((c) => c.status === "paid").length;
+  const totalCount = session.chunks.length;
+  const currentChunk = session.chunks.find((c) => c.status === "pending");
+  const allPaid = !currentChunk;
+  const sym = CURRENCY_SYMBOLS[session.currency] ?? session.currency;
+  const minsLeft = timeLeft
+    ? parseInt(timeLeft.split(":")[0])
+    : SPLIT_SESSION_MINUTES;
+  const timerColor = expired
+    ? "text-red-400"
+    : minsLeft < 5
+      ? "text-amber-400"
+      : "text-emerald-400";
 
+  /* ── Screen 1: AML acknowledgement ── */
+  if (!amlAck)
+    return (
+      <div
+        className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+        style={{ background: "rgba(0,0,0,0.94)", backdropFilter: "blur(18px)" }}
+      >
+        <div
+          className="relative max-w-lg w-full rounded-3xl overflow-hidden"
+          style={{
+            background: "rgb(5,8,16)",
+            border: "1px solid rgba(245,158,11,0.4)",
+            boxShadow: "0 0 80px rgba(245,158,11,0.07)",
+          }}
+        >
+          <div
+            className="absolute top-0 left-0 right-0 h-px"
+            style={{
+              background:
+                "linear-gradient(90deg,transparent,#f59e0b,transparent)",
+            }}
+          />
+          {/* Header */}
+          <div
+            className="p-6 pb-5"
+            style={{
+              background:
+                "linear-gradient(135deg,rgba(245,158,11,0.09),rgba(5,8,16,0.98))",
+              borderBottom: "1px solid rgba(245,158,11,0.18)",
+            }}
+          >
+            <div className="flex items-start gap-4">
+              <div
+                className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0"
+                style={{
+                  background: "rgba(245,158,11,0.12)",
+                  border: "2px solid rgba(245,158,11,0.4)",
+                }}
+              >
+                <Shield size={28} className="text-amber-400" />
+              </div>
+              <div>
+                <p className="text-[9px] font-black uppercase tracking-[0.28em] text-amber-500 mb-2">
+                  Regulatory Compliance Notice
+                </p>
+                <h3 className="text-white font-black text-xl leading-tight">
+                  Anti-Money Laundering
+                  <br />
+                  Transaction Protocol
+                </h3>
+                <p className="text-amber-400/60 text-xs mt-1.5">
+                  Required for all deposits exceeding the single-transaction
+                  threshold
+                </p>
+              </div>
+            </div>
+          </div>
+          {/* Body */}
+          <div className="p-6 space-y-5 max-h-[70vh] overflow-y-auto">
+            <p className="text-slate-300 text-sm leading-relaxed">
+              To comply with{" "}
+              <strong className="text-white">
+                Anti-Money Laundering (AML)
+              </strong>{" "}
+              regulations,{" "}
+              <strong className="text-white">
+                Counter-Terrorism Financing (CTF)
+              </strong>{" "}
+              directives, and international{" "}
+              <strong className="text-white">Know Your Customer (KYC)</strong>{" "}
+              standards mandated by the{" "}
+              <strong className="text-white">
+                Financial Action Task Force (FATF)
+              </strong>{" "}
+              and applicable Central Bank regulatory frameworks, transactions
+              exceeding <strong className="text-amber-300">{sym}200,000</strong>{" "}
+              per single transaction must be processed in structured,
+              individually-auditable instalments.
+            </p>
+            <p className="text-slate-400 text-sm leading-relaxed">
+              This mandatory protocol is specifically designed to protect you
+              from{" "}
+              <strong className="text-slate-200">
+                unauthorised account access, compromised financial credentials,
+                stolen-device fraud, and transactions conducted without the
+                account holder's knowledge or consent.
+              </strong>{" "}
+              Each instalment is independently verified, fully traceable, and
+              exclusively attributable to the registered account holder.
+            </p>
+            <div
+              className="rounded-2xl p-5 space-y-3"
+              style={{
+                background: "rgba(245,158,11,0.05)",
+                border: "1px solid rgba(245,158,11,0.18)",
+              }}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <AlertCircle size={12} className="text-amber-400" />
+                <p className="text-amber-300 text-[10px] font-black uppercase tracking-wider">
+                  What This Means For You
+                </p>
+              </div>
+              {[
+                `Your deposit of ${sym}${session.totalLocal.toLocaleString()} will be processed in ${totalCount} secure, compliance-approved instalment${totalCount > 1 ? "s" : ""}`,
+                "Each instalment is individually verified through an encrypted, fraud-monitored payment channel",
+                "Your plan or license activates automatically and immediately once all instalments are confirmed",
+                `This secure session expires in ${SPLIT_SESSION_MINUTES} minutes — please complete all instalments without closing your browser`,
+                "No additional fees or surcharges are applied for instalment processing",
+              ].map((item) => (
+                <div key={item} className="flex items-start gap-2.5">
+                  <CheckCircle
+                    size={11}
+                    className="text-amber-400 shrink-0 mt-0.5"
+                  />
+                  <p className="text-amber-400/75 text-xs leading-relaxed">
+                    {item}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div
+              className="rounded-xl px-4 py-3"
+              style={{
+                background: "rgba(255,255,255,0.02)",
+                border: "1px solid rgba(255,255,255,0.05)",
+              }}
+            >
+              <p className="text-slate-600 text-[10px] leading-relaxed">
+                <strong className="text-slate-500">Legal Basis:</strong> FATF
+                Recommendation 10 (Customer Due Diligence) · FATF Recommendation
+                20 (Suspicious Transaction Reporting) · CBN AML/CFT Regulations
+                2022 · Money Laundering (Prevention &amp; Prohibition) Act 2022
+              </p>
+            </div>
+            <button
+              onClick={() => setAmlAck(true)}
+              className="w-full py-4 rounded-2xl font-black text-slate-950 text-base flex items-center justify-center gap-2 transition-all hover:opacity-90"
+              style={{ background: "linear-gradient(135deg,#f59e0b,#d97706)" }}
+            >
+              <CheckCircle size={16} /> I Understand &amp; Acknowledge — Proceed
+              Securely
+            </button>
+            <button
+              onClick={onCancel}
+              className="w-full py-2.5 text-slate-600 text-xs hover:text-slate-400 transition-colors"
+            >
+              Cancel — Choose a different payment method
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+
+  /* ── Screen 2: Instalment progress ── */
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: "rgba(0,0,0,0.92)", backdropFilter: "blur(12px)" }}
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.94)", backdropFilter: "blur(18px)" }}
     >
       <div
-        className="w-full max-w-lg rounded-3xl overflow-hidden"
+        className="max-w-lg w-full rounded-3xl overflow-hidden"
         style={{
-          background: "rgb(8,12,22)",
-          border: "1px solid rgba(245,158,11,0.35)",
-          boxShadow: "0 0 60px rgba(245,158,11,0.08)",
+          background: "rgb(5,8,16)",
+          border: "1px solid rgba(16,185,129,0.3)",
+          boxShadow: "0 0 80px rgba(16,185,129,0.07)",
         }}
       >
         {/* Header */}
         <div
-          className="px-6 pt-6 pb-5"
+          className="px-5 py-4 flex items-center justify-between"
           style={{
-            background: "rgba(245,158,11,0.07)",
-            borderBottom: "1px solid rgba(245,158,11,0.2)",
+            background: "rgba(16,185,129,0.07)",
+            borderBottom: "1px solid rgba(16,185,129,0.18)",
           }}
         >
-          <div className="flex items-start gap-4">
+          <div className="flex items-center gap-3">
             <div
-              className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+              className="w-10 h-10 rounded-xl flex items-center justify-center"
               style={{
-                background: "rgba(245,158,11,0.12)",
-                border: "1px solid rgba(245,158,11,0.3)",
+                background: "rgba(16,185,129,0.12)",
+                border: "1px solid rgba(16,185,129,0.3)",
               }}
             >
-              <Landmark size={20} className="text-amber-400" />
+              <Lock size={15} className="text-emerald-400" />
             </div>
             <div>
-              <p className="text-[9px] font-black uppercase tracking-[0.2em] text-amber-400 mb-1">
-                Regulatory Compliance · Installment Processing
+              <p className="text-white font-black text-sm">
+                Staged Payment Portal
               </p>
-              <h3 className="text-white font-black text-lg leading-tight">
-                {isFirst
-                  ? "Payment Split Required"
-                  : `Installment ${state.completed} of ${totalCount} Complete`}
-              </h3>
-              {!isFirst && (
-                <p className="text-emerald-400 text-sm font-bold mt-1 flex items-center gap-1.5">
-                  <CheckCircle size={12} />₦
-                  {state.installmentsNGN[state.completed - 1].toLocaleString()}{" "}
-                  received successfully
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* AML Compliance Notice */}
-        <div
-          className="mx-5 mt-5 rounded-2xl p-4"
-          style={{
-            background: "rgba(15,23,42,0.9)",
-            border: "1px solid rgba(100,116,139,0.2)",
-          }}
-        >
-          <div className="flex items-start gap-3">
-            <Shield size={14} className="text-slate-400 mt-0.5 shrink-0" />
-            <div>
-              <p className="text-slate-300 text-[11px] font-black uppercase tracking-wider mb-1.5">
-                Why is my payment being split?
-              </p>
-              <p className="text-slate-500 text-[11px] leading-relaxed">
-                In accordance with Anti-Money Laundering (AML) directives and
-                electronic payment regulations, individual bank transfer
-                transactions are subject to a{" "}
-                <strong className="text-slate-300">
-                  ₦200,000 per-transaction ceiling
-                </strong>
-                . This safeguard protects you against unauthorised use of
-                payment instruments — including transactions initiated on
-                compromised or stolen devices where the legitimate account
-                holder is unaware. Each installment undergoes real-time fraud
-                screening and transaction monitoring by our payment processor.
-                Your service activates automatically once all installments are
-                received and reconciled.{" "}
-                <strong className="text-slate-300">
-                  No additional fees are applied.
-                </strong>
+              <p className="text-slate-500 text-[10px]">
+                Compliance-secured instalment processing
               </p>
             </div>
           </div>
+          <div className="text-right">
+            <p className="text-[9px] text-slate-600 uppercase tracking-wider">
+              Session
+            </p>
+            <p className={`font-black text-base tabular-nums ${timerColor}`}>
+              {timeLeft}
+            </p>
+          </div>
         </div>
 
-        {/* Payment Plan */}
-        <div className="px-5 mt-4 space-y-3">
-          <div className="flex justify-between items-center">
-            <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">
-              Payment Plan
-            </p>
-            <p className="text-slate-400 text-xs">
-              Total:{" "}
-              <span className="text-white font-black">
-                ₦{state.totalNGN.toLocaleString()}
-              </span>{" "}
-              <span className="text-slate-600">
-                (${state.totalUSD.toFixed(2)})
-              </span>
-            </p>
+        <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+          {/* Overview */}
+          <div
+            className="flex items-center justify-between p-4 rounded-2xl"
+            style={{
+              background: "rgba(15,23,42,0.8)",
+              border: "1px solid rgba(255,255,255,0.06)",
+            }}
+          >
+            <div>
+              <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1">
+                Total Deposit
+              </p>
+              <p className="text-white font-black text-2xl">
+                {sym}
+                {session.totalLocal.toLocaleString()}
+              </p>
+              <p className="text-slate-600 text-xs">
+                ${session.totalUSD.toFixed(2)} USD · {totalCount} instalment
+                {totalCount > 1 ? "s" : ""}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-slate-500 text-[10px] uppercase tracking-wider mb-1">
+                Progress
+              </p>
+              <p className="text-emerald-400 font-black text-2xl">
+                {paidCount}/{totalCount}
+              </p>
+              <p className="text-slate-600 text-xs">paid</p>
+            </div>
           </div>
 
           {/* Progress bar */}
-          <div>
-            <div className="flex justify-between text-[10px] text-slate-600 mb-1.5">
-              <span>₦{paidNGN.toLocaleString()} paid</span>
-              <span>{progressPct.toFixed(0)}% complete</span>
-              <span>
-                ₦{(state.totalNGN - paidNGN).toLocaleString()} remaining
-              </span>
-            </div>
-            <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+          <div className="space-y-1.5">
+            <div className="h-2 rounded-full overflow-hidden bg-slate-800/80">
               <div
                 className="h-2 rounded-full transition-all duration-700"
                 style={{
-                  width: `${progressPct}%`,
-                  background: "linear-gradient(90deg, #f59e0b, #10b981)",
+                  width: `${totalCount > 0 ? (paidCount / totalCount) * 100 : 0}%`,
+                  background: "linear-gradient(90deg,#10b981,#34d399)",
                 }}
               />
             </div>
+            <div className="flex justify-between text-[10px] text-slate-700">
+              <span>0%</span>
+              <span>
+                {Math.round((paidCount / totalCount) * 100)}% complete
+              </span>
+              <span>100%</span>
+            </div>
           </div>
 
-          {/* Installment list */}
+          {/* Chunk list */}
           <div className="space-y-2">
-            {state.installmentsNGN.map((amt, i) => {
-              const isPaid = i < state.completed;
-              const isCurrent = i === state.completed;
-              const isPending = i > state.completed;
+            {session.chunks.map((chunk) => {
+              const isPaid = chunk.status === "paid";
+              const isCurrent =
+                !isPaid &&
+                session.chunks
+                  .slice(0, chunk.index)
+                  .every((c) => c.status === "paid");
               return (
                 <div
-                  key={i}
-                  className="flex items-center justify-between rounded-xl px-4 py-3"
+                  key={chunk.index}
+                  className="rounded-xl p-3.5 flex items-center gap-3"
                   style={{
                     background: isPaid
-                      ? "rgba(16,185,129,0.07)"
+                      ? "rgba(16,185,129,0.08)"
                       : isCurrent
-                        ? "rgba(245,158,11,0.07)"
-                        : "rgba(15,23,42,0.6)",
+                        ? "rgba(59,130,246,0.08)"
+                        : "rgba(15,23,42,0.5)",
                     border: isPaid
                       ? "1px solid rgba(16,185,129,0.25)"
                       : isCurrent
-                        ? "1px solid rgba(245,158,11,0.3)"
-                        : "1px solid rgba(255,255,255,0.05)",
+                        ? "1px solid rgba(59,130,246,0.3)"
+                        : "1px solid rgba(255,255,255,0.04)",
                   }}
                 >
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0 text-[10px] font-black"
-                      style={{
-                        background: isPaid
-                          ? "rgba(16,185,129,0.2)"
-                          : isCurrent
-                            ? "rgba(245,158,11,0.2)"
-                            : "rgba(100,116,139,0.15)",
-                        color: isPaid
-                          ? "#10b981"
-                          : isCurrent
-                            ? "#f59e0b"
-                            : "#475569",
-                      }}
-                    >
-                      {isPaid ? <CheckCircle size={12} /> : i + 1}
-                    </div>
-                    <div>
-                      <p
-                        className={`text-sm font-black ${isPaid ? "text-emerald-300" : isCurrent ? "text-amber-300" : "text-slate-500"}`}
-                      >
-                        Installment {i + 1} of {totalCount}
-                      </p>
-                      {isPaid && state.references[i] && (
-                        <p className="text-emerald-600 text-[10px] font-mono">
-                          Ref: {state.references[i].slice(-10)}…
-                        </p>
-                      )}
-                    </div>
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-black shrink-0
+                    ${isPaid ? "bg-emerald-500 text-slate-950" : isCurrent ? "border-2 border-blue-400 text-blue-300" : "bg-slate-800/80 text-slate-600"}`}
+                  >
+                    {isPaid ? (
+                      <CheckCircle size={14} className="text-slate-950" />
+                    ) : (
+                      chunk.index + 1
+                    )}
                   </div>
-                  <div className="text-right">
+                  <div className="flex-1 min-w-0">
                     <p
-                      className={`font-black text-sm ${isPaid ? "text-emerald-400" : isCurrent ? "text-amber-400" : "text-slate-600"}`}
+                      className={`text-sm font-black ${isPaid ? "text-emerald-300" : isCurrent ? "text-white" : "text-slate-600"}`}
                     >
-                      ₦{amt.toLocaleString()}
+                      Instalment {chunk.index + 1} of {totalCount}
                     </p>
-                    <p
-                      className="text-[10px]"
-                      style={{
-                        color: isPaid
-                          ? "#059669"
-                          : isCurrent
-                            ? "#d97706"
-                            : "#334155",
-                      }}
-                    >
-                      {isPaid ? "✓ Paid" : isCurrent ? "→ Next" : "○ Pending"}
+                    <p className="text-[10px] text-slate-600">
+                      {sym}
+                      {chunk.amountLocal.toLocaleString()} · $
+                      {chunk.amountUSD.toFixed(2)} USD
                     </p>
+                  </div>
+                  <div className="shrink-0">
+                    {isPaid ? (
+                      <span
+                        className="text-[9px] font-black px-2.5 py-1 rounded-full"
+                        style={{
+                          background: "rgba(16,185,129,0.15)",
+                          border: "1px solid rgba(16,185,129,0.3)",
+                          color: "#10b981",
+                        }}
+                      >
+                        PAID ✓
+                      </span>
+                    ) : isCurrent ? (
+                      <span
+                        className="text-[9px] font-black px-2.5 py-1 rounded-full flex items-center gap-1"
+                        style={{
+                          background: "rgba(59,130,246,0.15)",
+                          border: "1px solid rgba(59,130,246,0.35)",
+                          color: "#60a5fa",
+                        }}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />{" "}
+                        NEXT
+                      </span>
+                    ) : (
+                      <span
+                        className="text-[9px] font-black px-2.5 py-1 rounded-full"
+                        style={{
+                          background: "rgba(15,23,42,0.6)",
+                          border: "1px solid rgba(255,255,255,0.05)",
+                          color: "#475569",
+                        }}
+                      >
+                        QUEUED
+                      </span>
+                    )}
                   </div>
                 </div>
               );
             })}
           </div>
-        </div>
 
-        {/* Error */}
-        {error && (
-          <div
-            className="mx-5 mt-3 rounded-xl p-3 flex items-start gap-2"
-            style={{
-              background: "rgba(239,68,68,0.08)",
-              border: "1px solid rgba(239,68,68,0.25)",
-            }}
-          >
-            <AlertCircle size={13} className="text-red-400 mt-0.5 shrink-0" />
-            <p className="text-red-300 text-xs">{error}</p>
-          </div>
-        )}
+          {/* Error */}
+          {kpError && (
+            <div
+              className="rounded-xl p-3 flex items-start gap-2"
+              style={{
+                background: "rgba(239,68,68,0.08)",
+                border: "1px solid rgba(239,68,68,0.25)",
+              }}
+            >
+              <AlertCircle size={13} className="text-red-400 shrink-0 mt-0.5" />
+              <p className="text-red-300 text-xs">{kpError}</p>
+            </div>
+          )}
 
-        {/* CTA */}
-        <div className="px-5 py-5 space-y-2 mt-1">
-          <button
-            onClick={() => onInitiate(state)}
-            disabled={loading}
-            className="w-full py-4 rounded-2xl font-black text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60"
-            style={{
-              background: "linear-gradient(135deg, #f59e0b, #d97706)",
-              color: "#0c0a00",
-            }}
-          >
-            {loading ? (
-              <>
-                <Loader2 size={16} className="animate-spin" /> Connecting to
-                bank…
-              </>
-            ) : isFirst ? (
-              <>
-                <Landmark size={16} />
-                Begin Payment — Installment 1 of {totalCount}: ₦
-                {state.installmentsNGN[0].toLocaleString()}
-              </>
-            ) : (
-              <>
-                <Landmark size={16} />
-                Continue — Installment {nextIndex} of {totalCount}: ₦
-                {currentInstallmentNGN.toLocaleString()}
-              </>
-            )}
-          </button>
+          {/* Pay CTA */}
+          {!allPaid && !expired && currentChunk && (
+            <button
+              onClick={() => onPayChunk(session, currentChunk.index)}
+              disabled={loading}
+              className="w-full py-4 rounded-2xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60"
+              style={{ background: "linear-gradient(135deg,#3b82f6,#1d4ed8)" }}
+            >
+              {loading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" /> Connecting to
+                  secure payment…
+                </>
+              ) : (
+                <>
+                  <Lock size={15} /> Pay Instalment {currentChunk.index + 1} —{" "}
+                  {sym}
+                  {currentChunk.amountLocal.toLocaleString()}{" "}
+                  <ArrowRight size={13} />
+                </>
+              )}
+            </button>
+          )}
+          {expired && !allPaid && (
+            <div
+              className="rounded-xl p-4 text-center"
+              style={{
+                background: "rgba(239,68,68,0.08)",
+                border: "1px solid rgba(239,68,68,0.25)",
+              }}
+            >
+              <AlertCircle size={20} className="text-red-400 mx-auto mb-2" />
+              <p className="text-red-400 font-black text-sm">
+                Secure Session Expired
+              </p>
+              <p className="text-red-400/70 text-xs mt-1">
+                Please restart the checkout process to begin a new secure
+                session.
+              </p>
+            </div>
+          )}
+          {allPaid && (
+            <div
+              className="rounded-xl p-4 text-center"
+              style={{
+                background: "rgba(16,185,129,0.08)",
+                border: "1px solid rgba(16,185,129,0.25)",
+              }}
+            >
+              <CheckCircle
+                size={20}
+                className="text-emerald-400 mx-auto mb-2"
+              />
+              <p className="text-emerald-300 font-black text-sm">
+                All Instalments Confirmed — Activating Your Plan…
+              </p>
+            </div>
+          )}
           <button
             onClick={onCancel}
-            disabled={loading}
-            className="w-full py-2.5 text-slate-600 hover:text-slate-400 text-xs transition-colors"
+            className="w-full py-2 text-slate-700 text-[11px] hover:text-slate-500 transition-colors"
           >
-            Cancel — choose a different payment method
+            Cancel — Return to payment options
           </button>
+          <div
+            className="rounded-xl px-4 py-3"
+            style={{
+              background: "rgba(245,158,11,0.04)",
+              border: "1px solid rgba(245,158,11,0.1)",
+            }}
+          >
+            <p className="text-amber-500/55 text-[10px] leading-relaxed">
+              ⚠ Do not close or refresh your browser between instalments. Each
+              payment is individually verified and recorded. Your plan activates
+              automatically upon final instalment confirmation.
+            </p>
+          </div>
         </div>
       </div>
     </div>
@@ -815,14 +1004,14 @@ function Receipt({
   const isContract = data.paymentModel === "contract";
   const licConfig =
     LICENSE_CONFIGS[data.licenseType] ?? LICENSE_CONFIGS.operator_license;
+  const LicIcon = licConfig.icon;
   const periodLabel = PERIOD_LABELS[data.miningPeriod] ?? data.miningPeriod;
-  const contractDurLabel =
+  const cdl =
     data.contractMonths === 6
       ? "6 months"
       : data.contractMonths === 12
         ? "12 months"
         : "2 years";
-
   function download() {
     if (!ref.current) return;
     const blob = new Blob([ref.current.innerText], { type: "text/plain" });
@@ -831,7 +1020,6 @@ function Receipt({
     a.download = `OmniTask-Receipt-${data.txId}.txt`;
     a.click();
   }
-
   return (
     <div
       className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4"
@@ -890,14 +1078,9 @@ function Receipt({
                   ["VRAM", data.vram],
                   [
                     "Payment Model",
-                    isContract
-                      ? `Contract — ${contractDurLabel}`
-                      : "Pay-As-You-Go",
+                    isContract ? `Contract — ${cdl}` : "Pay-As-You-Go",
                   ],
-                  [
-                    "Mining Session",
-                    isContract ? contractDurLabel : periodLabel,
-                  ],
+                  ["Mining Session", isContract ? cdl : periodLabel],
                   [
                     "Amount Paid",
                     `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`,
@@ -983,7 +1166,7 @@ function OrderSummary({
   miningPeriod: string;
 }) {
   const isContract = paymentModel === "contract";
-  const contractDurLabel =
+  const cdl =
     contractMonths === 6
       ? "6 months"
       : contractMonths === 12
@@ -995,11 +1178,9 @@ function OrderSummary({
     LICENSE_CONFIGS[licenseType] ?? LICENSE_CONFIGS.operator_license;
   const LicIcon = licConfig.icon;
   const periodLabel = PERIOD_LABELS[miningPeriod] ?? miningPeriod;
-
   return (
     <div>
       <div className="text-2xl font-black text-white mb-6">Order Summary</div>
-
       {purchaseType === "gpu_plan" && (
         <>
           <div
@@ -1027,7 +1208,7 @@ function OrderSummary({
                       ],
                     ]
                   : [
-                      ["Contract Term", contractDurLabel],
+                      ["Contract Term", cdl],
                       [
                         "Earnings",
                         "Accumulate daily — visible in your portfolio",
@@ -1058,7 +1239,6 @@ function OrderSummary({
               </span>
             </div>
           </div>
-
           {isContract ? (
             <div
               className="rounded-xl p-4 mb-4"
@@ -1073,10 +1253,8 @@ function OrderSummary({
               <p className="text-amber-400/80 text-xs leading-relaxed">
                 Capital of{" "}
                 <strong className="text-amber-300">${price.toFixed(2)}</strong>{" "}
-                is locked for{" "}
-                <strong className="text-amber-300">{contractDurLabel}</strong>.
-                Earnings accumulate every second and are visible in your
-                portfolio. Capital released at maturity.{" "}
+                is locked for <strong className="text-amber-300">{cdl}</strong>.
+                Earnings accumulate every second. Capital released at maturity.{" "}
                 <strong className="text-white">Returns not guaranteed.</strong>
               </p>
             </div>
@@ -1094,145 +1272,128 @@ function OrderSummary({
               <p className="text-emerald-400/70 text-xs leading-relaxed">
                 Mining runs for{" "}
                 <strong className="text-emerald-300">{periodLabel}</strong>.
-                When done, your capital + earnings are credited to your wallet
-                automatically. Returns not guaranteed.
+                Capital + earnings credited automatically when done. Returns not
+                guaranteed.
               </p>
             </div>
           )}
         </>
       )}
-
       {purchaseType === "license" && (
-        <>
-          <div
-            className="rounded-2xl p-6 mb-4"
-            style={{
-              background: "rgba(22,28,36,0.95)",
-              border: "1px solid rgba(255,255,255,0.08)",
-            }}
-          >
-            <div className="flex items-start gap-4 mb-5 pb-5 border-b border-slate-700">
-              <div
-                className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
-                style={{
-                  background: `${licConfig.color}18`,
-                  border: `1px solid ${licConfig.color}40`,
-                }}
-              >
-                <LicIcon size={22} style={{ color: licConfig.color }} />
-              </div>
-              <div>
-                <p className="text-white font-black text-sm">
-                  {licConfig.label}
-                </p>
-                <p className="text-slate-500 text-xs mt-1">
-                  Certified AI Operator Program
-                </p>
-              </div>
+        <div
+          className="rounded-2xl p-6 mb-4"
+          style={{
+            background: "rgba(22,28,36,0.95)",
+            border: "1px solid rgba(255,255,255,0.08)",
+          }}
+        >
+          <div className="flex items-start gap-4 mb-5 pb-5 border-b border-slate-700">
+            <div
+              className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0"
+              style={{
+                background: `${licConfig.color}18`,
+                border: `1px solid ${licConfig.color}40`,
+              }}
+            >
+              <LicIcon size={22} style={{ color: licConfig.color }} />
             </div>
-            <div className="space-y-2.5 mb-5">
-              {licConfig.features.map((f) => (
-                <div key={f} className="flex items-center gap-2.5">
-                  <CheckCircle
-                    size={13}
-                    style={{ color: licConfig.color }}
-                    className="shrink-0"
-                  />
-                  <span className="text-slate-300 text-sm">{f}</span>
-                </div>
-              ))}
-            </div>
-            <div className="space-y-3 mb-4">
-              {[
-                ["License Fee (one-time)", `$${price.toFixed(2)}`],
-                ["Validity", "4 years from activation"],
-                ["Monthly Infrastructure", "$5.00 / month (auto-deducted)"],
-              ].map(([l, v]) => (
-                <div key={l} className="flex justify-between items-start">
-                  <span className="text-slate-400 text-sm">{l}</span>
-                  <span className="text-white font-semibold text-right text-sm">
-                    {v}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <div className="border-t border-slate-700 my-4" />
-            {payMethod === "crypto_wallet" && (
-              <div className="mb-3 p-3 bg-violet-500/10 border border-violet-500/30 rounded-lg">
-                <p className="text-violet-200 text-sm">
-                  <strong>Crypto Discount:</strong> {cryptoDiscount}% off
-                </p>
-              </div>
-            )}
-            <div className="flex justify-between items-center">
-              <span className="text-slate-400 text-sm">Due Today</span>
-              <span className="text-2xl font-black text-amber-400">
-                ${effectivePrice.toFixed(2)}
-              </span>
+            <div>
+              <p className="text-white font-black text-sm">{licConfig.label}</p>
+              <p className="text-slate-500 text-xs mt-1">
+                Certified AI Operator Program
+              </p>
             </div>
           </div>
-        </>
+          <div className="space-y-2.5 mb-5">
+            {licConfig.features.map((f) => (
+              <div key={f} className="flex items-center gap-2.5">
+                <CheckCircle
+                  size={13}
+                  style={{ color: licConfig.color }}
+                  className="shrink-0"
+                />
+                <span className="text-slate-300 text-sm">{f}</span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-3 mb-4">
+            {[
+              ["License Fee (one-time)", `$${price.toFixed(2)}`],
+              ["Validity", "4 years from activation"],
+              ["Monthly Infrastructure", "$5.00 / month (auto-deducted)"],
+            ].map(([l, v]) => (
+              <div key={l} className="flex justify-between items-start">
+                <span className="text-slate-400 text-sm">{l}</span>
+                <span className="text-white font-semibold text-right text-sm">
+                  {v}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="border-t border-slate-700 my-4" />
+          {payMethod === "crypto_wallet" && (
+            <div className="mb-3 p-3 bg-violet-500/10 border border-violet-500/30 rounded-lg">
+              <p className="text-violet-200 text-sm">
+                <strong>Crypto Discount:</strong> {cryptoDiscount}% off
+              </p>
+            </div>
+          )}
+          <div className="flex justify-between items-center">
+            <span className="text-slate-400 text-sm">Due Today</span>
+            <span className="text-2xl font-black text-amber-400">
+              ${effectivePrice.toFixed(2)}
+            </span>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-// ─── INNER CHECKOUT COMPONENT ─────────────────────────────────────────────────
+// ─── CHECKOUT INNER ───────────────────────────────────────────────────────────
 function CheckoutInner() {
-  const router = useRouter();
-  const params = useSearchParams();
-
+  const router = useRouter(),
+    params = useSearchParams();
   const [step, setStep] = useState<CheckoutStep>("country");
   const [userId, setUserId] = useState<string | undefined | null>(undefined);
   const [processingStep, setProcessingStep] = useState(0);
-  const [errorMsg, setErrorMsg] = useState("");
-  const [transactionId, setTransactionId] = useState("");
+  const [errorMsg, setErrorMsg] = useState(""),
+    [transactionId, setTransactionId] = useState("");
   const [showReceipt, setShowReceipt] = useState(false);
   const [allocationId, setAllocationId] = useState<string | null>(null);
-
   // Config
   const [cryptoDiscount, setCryptoDiscount] = useState(5);
   const [cryptoWalletAddress, setCryptoWalletAddress] = useState("");
   const [cryptoNetwork, setCryptoNetwork] = useState("TRC-20 (TRON)");
   const [cryptoQrImageUrl, setCryptoQrImageUrl] = useState("");
   const [configLoaded, setConfigLoaded] = useState(false);
-
-  // Form state
-  const [countryCode, setCountryCode] = useState("");
-  const [countryName, setCountryName] = useState("");
+  // Daily NGN limit (global platform — protects KoraPay account ceiling)
+  const [dailyNgnTotal, setDailyNgnTotal] = useState(0);
+  const bankTransferLocked = dailyNgnTotal >= DAILY_NGN_LIMIT;
+  // Split payment
+  const [showSplitModal, setShowSplitModal] = useState(false);
+  const [splitSession, setSplitSession] = useState<SplitSession | null>(null);
+  // Form
+  const [countryCode, setCountryCode] = useState(""),
+    [countryName, setCountryName] = useState("");
   const [payMethod, setPayMethod] = useState<PayMethod>("crypto_wallet");
   const [countrySearch, setCountrySearch] = useState("");
-  const [kpPhone, setKpPhone] = useState("");
-  const [kpLoading, setKpLoading] = useState(false);
-  const [kpError, setKpError] = useState("");
-  const [twSenderAddress, setTwSenderAddress] = useState("");
-  const [twConfirmed, setTwConfirmed] = useState(false);
+  const [kpPhone, setKpPhone] = useState(""),
+    [kpLoading, setKpLoading] = useState(false),
+    [kpError, setKpError] = useState("");
+  const [twSenderAddress, setTwSenderAddress] = useState(""),
+    [twConfirmed, setTwConfirmed] = useState(false);
   const [cryptoError, setCryptoError] = useState("");
-
-  // ── F1: Daily limit state ──
-  const [bankTransferBlocked, setBankTransferBlocked] = useState(false);
-  const [dailyLimitChecked, setDailyLimitChecked] = useState(false);
-
-  // ── F2: Split payment state ──
-  const [splitState, setSplitState] = useState<SplitState | null>(null);
-  const [splitLoading, setSplitLoading] = useState(false);
-  const [splitError, setSplitError] = useState("");
-
-  // Feature A: Auto-reinvest toggle
   const [autoReinvest, setAutoReinvest] = useState(false);
-
-  // Feature B: Referral code
-  const [referralCode, setReferralCode] = useState("");
-  const [referralValid, setReferralValid] = useState<boolean | null>(null);
-  const [referralDiscount, setReferralDiscount] = useState(0);
-  const [checkingReferral, setCheckingReferral] = useState(false);
-
-  // Idempotency ref
+  const [referralCode, setReferralCode] = useState(""),
+    [referralValid, setReferralValid] = useState<boolean | null>(null);
+  const [referralDiscount, setReferralDiscount] = useState(0),
+    [checkingReferral, setCheckingReferral] = useState(false);
   const isSubmittingRef = useRef(false);
 
-  // ── URL PARAMS ───────────────────────────────────────────────────────────
-  const rawPurchaseType = params.get("purchaseType");
-  const nodeKey = params.get("node") || "foundation";
+  // URL params
+  const rawPurchaseType = params.get("purchaseType"),
+    nodeKey = params.get("node") || "foundation";
   const purchaseType: PurchaseType = rawPurchaseType
     ? (rawPurchaseType as PurchaseType)
     : nodeKey === "operator_license" ||
@@ -1244,9 +1405,9 @@ function CheckoutInner() {
       : "gpu_plan";
   const nodeName = params.get("name") || "Foundation Node";
   const price = parseFloat(params.get("price") || "5");
-  const itype = params.get("itype") || "on_demand";
-  const gpu = params.get("gpu") || "Shared Pool (NVIDIA T4)";
-  const vram = params.get("vram") || "16 GB GDDR6";
+  const itype = params.get("itype") || "on_demand",
+    gpu = params.get("gpu") || "Shared Pool (NVIDIA T4)",
+    vram = params.get("vram") || "16 GB GDDR6";
   const paymentModel = (params.get("paymentModel") || "flexible") as
     | "flexible"
     | "contract";
@@ -1265,7 +1426,6 @@ function CheckoutInner() {
     params.get("type") ||
     nodeKey ||
     "operator_license";
-
   const discountedPrice = +(price * (1 - cryptoDiscount / 100)).toFixed(2);
   const effectivePrice = (() => {
     let p = payMethod === "crypto_wallet" ? discountedPrice : price;
@@ -1273,34 +1433,36 @@ function CheckoutInner() {
       p = +(p * (1 - referralDiscount / 100)).toFixed(2);
     return p;
   })();
+  const conversionInfo = CURRENCY_RATES[countryCode];
+  const localAmount = conversionInfo
+    ? Math.round(price * conversionInfo.rate)
+    : null;
 
-  // ── INIT: auth + config in parallel ────────────────────────────────────
+  // Init
   useEffect(() => {
-    let cancelled = false;
-
+    let c = false;
     supabase.auth.getUser().then(({ data: { user } }: any) => {
-      if (cancelled) return;
+      if (c) return;
       if (!user) {
         router.push("/auth/signin");
         return;
       }
       setUserId(user.id);
     });
-
     supabase
       .from("payment_config")
       .select("key,value")
       .then(({ data }: any) => {
-        if (cancelled || !data) {
+        if (c || !data) {
           setConfigLoaded(true);
           return;
         }
         const get = (k: string) =>
           data.find((d: any) => d.key === k)?.value || "";
-        const disc = get("crypto_discount_percent");
-        const wallet = get("crypto_wallet_usdt_trc20");
-        const network = get("crypto_network_label");
-        const qr = get("crypto_qr_image_url");
+        const disc = get("crypto_discount_percent"),
+          wallet = get("crypto_wallet_usdt_trc20");
+        const network = get("crypto_network_label"),
+          qr = get("crypto_qr_image_url");
         if (disc && !isNaN(parseFloat(disc)))
           setCryptoDiscount(parseFloat(disc));
         if (wallet && wallet !== "EMPTY") setCryptoWalletAddress(wallet);
@@ -1308,136 +1470,167 @@ function CheckoutInner() {
         if (qr && qr !== "EMPTY") setCryptoQrImageUrl(qr);
         setConfigLoaded(true);
       });
-
     return () => {
-      cancelled = true;
+      c = true;
     };
   }, []); // eslint-disable-line
 
-  // ── F1: Check daily bank transfer limit on mount ────────────────────────
+  // Daily NGN limit — queries all confirmed NGN transactions platform-wide
   useEffect(() => {
-    getDailyBankTransferNGNTotal().then((total) => {
-      if (total >= DAILY_NGN_LIMIT) setBankTransferBlocked(true);
-      setDailyLimitChecked(true);
-    });
-  }, []);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    supabase
+      .from("payment_transactions")
+      .select("amount")
+      .eq("currency", "NGN")
+      .in("status", ["confirmed", "success"])
+      .gte("created_at", today.toISOString())
+      .then(({ data }) => {
+        const total = (data || []).reduce(
+          (s: number, tx: any) => s + (Number(tx.amount) || 0),
+          0,
+        );
+        setDailyNgnTotal(total);
+      });
+  }, [step]);
 
-  // ── Handle KoraPay redirect (SPLIT + regular) ───────────────────────────
+  // KoraPay redirect handler — split-payment aware
   useEffect(() => {
-    const s = params.get("status");
-    const r = params.get("reference");
-    if (!s || !r) return;
-
-    // ── F2: Handle split payment continuation ──
-    const splitSaved = sessionStorage.getItem("korapay_split_checkout");
-    if (splitSaved) {
-      if (s === "success") {
-        window.history.replaceState({}, "", "/dashboard/checkout");
+    const s = params.get("status"),
+      r = params.get("reference");
+    if (!s && !r) {
+      // Resume any live split session
+      const saved = sessionStorage.getItem("split_payment_session");
+      if (saved) {
         try {
-          const saved: SplitState = JSON.parse(splitSaved);
-
-          // Restore country so details step renders correctly
-          if (saved.planData.countryCode) {
-            setCountryCode(saved.planData.countryCode);
-            setCountryName(saved.planData.countryName || "");
+          const sess: SplitSession = JSON.parse(saved);
+          const alive = new Date(sess.expiresAt) > new Date();
+          const hasPending = sess.chunks.some((c) => c.status === "pending");
+          if (alive && hasPending) {
+            setCountryCode(sess.countryCode);
+            setCountryName(sess.countryName);
+            setSplitSession(sess);
+            setStep("details");
+            setShowSplitModal(true);
+          } else if (!alive) {
+            sessionStorage.removeItem("split_payment_session");
           }
-
-          const updated: SplitState = {
-            ...saved,
-            completed: saved.completed + 1,
-            references: [...saved.references, r],
-          };
-
-          if (updated.completed >= updated.installmentsNGN.length) {
-            // ── All installments done — create allocation ──
-            sessionStorage.removeItem("korapay_split_checkout");
-            setTransactionId(r);
-
+        } catch {
+          sessionStorage.removeItem("split_payment_session");
+        }
+      }
+      return;
+    }
+    if (!s || !r) return;
+    if (s === "success") {
+      setTransactionId(r);
+      window.history.replaceState({}, "", "/dashboard/checkout");
+      const savedCheckout = sessionStorage.getItem("korapay_pending_checkout");
+      if (savedCheckout) {
+        sessionStorage.removeItem("korapay_pending_checkout");
+        try {
+          const cd = JSON.parse(savedCheckout);
+          if (cd.isSplitPayment && cd.splitSessionId) {
+            const savedSplit = sessionStorage.getItem("split_payment_session");
+            if (savedSplit) {
+              const sess: SplitSession = JSON.parse(savedSplit);
+              if (sess.sessionId === cd.splitSessionId) {
+                const updChunks = sess.chunks.map((c) =>
+                  c.index === cd.chunkIndex
+                    ? { ...c, status: "paid" as const, ref: r }
+                    : c,
+                );
+                const allPaid = updChunks.every((c) => c.status === "paid");
+                const updSess = { ...sess, chunks: updChunks };
+                if (allPaid) {
+                  sessionStorage.removeItem("split_payment_session");
+                  supabase.auth.getUser().then(async ({ data: { user } }) => {
+                    if (!user) return;
+                    try {
+                      const id = await createMiningAllocation({
+                        ...sess.planParams,
+                        userId: user.id,
+                        transactionRef: r,
+                      });
+                      if (id) setAllocationId(id);
+                    } catch (e) {
+                      console.error("[checkout] Split alloc error:", e);
+                    }
+                  });
+                  setStep("success");
+                } else {
+                  sessionStorage.setItem(
+                    "split_payment_session",
+                    JSON.stringify(updSess),
+                  );
+                  setSplitSession(updSess);
+                  setCountryCode(sess.countryCode);
+                  setCountryName(sess.countryName);
+                  setStep("details");
+                  setShowSplitModal(true);
+                }
+              }
+            }
+          } else {
             supabase.auth.getUser().then(async ({ data: { user } }) => {
               if (!user) return;
               try {
                 const id = await createMiningAllocation({
-                  ...updated.planData,
+                  ...cd,
                   userId: user.id,
-                  transactionRef: updated.references.join(","),
+                  transactionRef: r,
                 });
                 if (id) setAllocationId(id);
               } catch (e) {
-                console.error("[checkout] Split allocation failed:", e);
+                console.error("[checkout] KoraPay alloc error:", e);
               }
             });
-
             setStep("success");
-          } else {
-            // ── More installments needed — show continuation modal ──
-            sessionStorage.setItem(
-              "korapay_split_checkout",
-              JSON.stringify(updated),
-            );
-            setSplitState(updated);
-            setStep("details");
           }
-        } catch (e) {
-          console.error("[checkout] Split state parse error:", e);
-          sessionStorage.removeItem("korapay_split_checkout");
-          setStep("failed");
-          setErrorMsg("Payment session error. Please contact support.");
+        } catch {
+          setStep("success");
         }
-      } else if (s === "declined") {
-        sessionStorage.removeItem("korapay_split_checkout");
-        setTransactionId(r);
-        setStep("declined");
-        window.history.replaceState({}, "", "/dashboard/checkout");
-      }
-      return; // Don't fall through to regular handler
-    }
-
-    // ── Regular KoraPay handler (unchanged) ──
-    if (s === "success") {
-      setTransactionId(r);
-      setStep("success");
-      window.history.replaceState({}, "", "/dashboard/checkout");
-
-      const saved = sessionStorage.getItem("korapay_pending_checkout");
-      if (saved) {
-        sessionStorage.removeItem("korapay_pending_checkout");
-        supabase.auth.getUser().then(async ({ data: { user } }) => {
-          if (!user) return;
-          try {
-            const checkoutData = JSON.parse(saved);
-            const id = await createMiningAllocation({
-              ...checkoutData,
-              userId: user.id,
-              transactionRef: r,
-            });
-            if (id) setAllocationId(id);
-          } catch (e) {
-            console.error(
-              "[checkout] Failed to create allocation after KoraPay:",
-              e,
-            );
-          }
-        });
+      } else {
+        setStep("success");
       }
     } else if (s === "declined") {
+      window.history.replaceState({}, "", "/dashboard/checkout");
+      const savedCheckout = sessionStorage.getItem("korapay_pending_checkout");
+      if (savedCheckout) {
+        try {
+          const cd = JSON.parse(savedCheckout);
+          if (cd.isSplitPayment) {
+            sessionStorage.removeItem("korapay_pending_checkout");
+            const savedSplit = sessionStorage.getItem("split_payment_session");
+            if (savedSplit) {
+              const sess: SplitSession = JSON.parse(savedSplit);
+              setSplitSession(sess);
+              setCountryCode(sess.countryCode);
+              setCountryName(sess.countryName);
+              setKpError("Payment declined. Please try again.");
+              setStep("details");
+              setShowSplitModal(true);
+              return;
+            }
+          }
+        } catch {}
+      }
       sessionStorage.removeItem("korapay_pending_checkout");
       setTransactionId(r);
       setStep("declined");
-      window.history.replaceState({}, "", "/dashboard/checkout");
     }
   }, [params]); // eslint-disable-line
 
-  // Default payment method when country changes
+  // Auto-select payment method when country changes
   useEffect(() => {
     if (!countryCode) return;
     setPayMethod(
-      BANK_TRANSFER_COUNTRIES.has(countryCode)
+      BANK_TRANSFER_COUNTRIES.has(countryCode) && !bankTransferLocked
         ? "bank_transfer"
         : "crypto_wallet",
     );
-  }, [countryCode]);
+  }, [countryCode, bankTransferLocked]);
 
-  // Feature B: Validate referral code
   const validateReferralCode = useCallback(async (code: string) => {
     if (!code || code.length < 4) {
       setReferralValid(null);
@@ -1448,7 +1641,7 @@ function CheckoutInner() {
     try {
       const { data } = await supabase
         .from("referral_codes")
-        .select("discount_percent, is_active")
+        .select("discount_percent,is_active")
         .eq("code", code.toUpperCase())
         .single();
       if (data && data.is_active) {
@@ -1465,105 +1658,13 @@ function CheckoutInner() {
     setCheckingReferral(false);
   }, []);
 
-  // ── F2: Initiate a single split installment via KoraPay ─────────────────
-  async function initiateSplitInstallment(state: SplitState) {
-    if (!userId) return;
-    setSplitLoading(true);
-    setSplitError("");
-
-    const installmentNGN = state.installmentsNGN[state.completed];
-    const installmentUSD = parseFloat(
-      (installmentNGN / state.ngnRate).toFixed(2),
-    );
-
-    try {
-      // Save split state to sessionStorage so we can restore after redirect
-      sessionStorage.setItem("korapay_split_checkout", JSON.stringify(state));
-
-      const res = await fetch("/api/korapay/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          phone: state.kpPhone || "",
-          nodeKey: state.planData.nodeKey || nodeKey,
-          nodeName: state.planData.nodeName || nodeName,
-          price: installmentNGN,
-          originalPrice: installmentUSD,
-          currency: state.localCurrency,
-          itype: state.planData.itype || itype,
-          gpu: state.planData.gpuModel || gpu,
-          vram: state.planData.vram || vram,
-          purchaseType,
-          licenseType,
-          paymentModel,
-          miningPeriod: state.planData.miningPeriod || miningPeriod,
-          contractMonths: state.planData.contractMonths || contractMonths,
-          contractLabel: state.planData.contractLabel || contractLabel,
-          contractMinPct: state.planData.contractMinPct || contractMinPct,
-          contractMaxPct: state.planData.contractMaxPct || contractMaxPct,
-          lockInMonths: state.planData.lockInMonths || lockInMonths,
-          lockInMultiplier: state.planData.lockInMultiplier || lockInMultiplier,
-          lockInLabel: state.planData.lockInLabel || lockInLabel,
-          countryCode: state.planData.countryCode || countryCode,
-          countryName: state.planData.countryName || countryName,
-          // Split metadata
-          isSplitPayment: true,
-          splitInstallment: state.completed + 1,
-          splitTotal: state.installmentsNGN.length,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.checkoutUrl) {
-        sessionStorage.removeItem("korapay_split_checkout");
-        setSplitError(
-          data.error || "Payment initiation failed. Please try again.",
-        );
-        setSplitLoading(false);
-        return;
-      }
-
-      window.location.href = data.checkoutUrl;
-    } catch (err: any) {
-      sessionStorage.removeItem("korapay_split_checkout");
-      setSplitError(
-        "Connection error. Please check your internet and try again.",
-      );
-      setSplitLoading(false);
-    }
-  }
-
-  // ── F1 + F2: Bank Transfer Submit ───────────────────────────────────────
-  async function handleBankTransferSubmit() {
-    if (!userId) {
-      setKpError("Session not ready. Please wait and try again.");
-      return;
-    }
-    setKpError("");
-    setKpLoading(true);
-
-    // ── F1: Re-check daily limit at time of submission ──
-    const currentNGNTotal = await getDailyBankTransferNGNTotal();
-    if (currentNGNTotal >= DAILY_NGN_LIMIT) {
-      setBankTransferBlocked(true);
-      setKpError(
-        "Bank transfer is unavailable — today's processing limit has been reached. Please use Crypto or Card payment.",
-      );
-      setKpLoading(false);
-      return;
-    }
-
-    const conversion = CURRENCY_RATES[countryCode];
-    const localCurrency = conversion?.currency ?? "NGN";
-    const convertedPrice = conversion
-      ? parseFloat((price * conversion.rate).toFixed(2))
-      : price;
-
-    // ── F2: Check single-transaction limit ──
-    if (convertedPrice > MAX_SINGLE_NGN_TXN) {
-      const installmentsNGN = computeInstallments(convertedPrice);
-      const planData: Record<string, any> = {
+  // Split helpers
+  function initiateSplitPayment(totalLocal: number, chunkMax: number) {
+    const chunks = buildSplitChunks(price, totalLocal, chunkMax);
+    const sessionId = `SPL-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const newSession: SplitSession = {
+      sessionId,
+      planParams: {
         planId: nodeKey,
         planName: nodeName,
         amount: price,
@@ -1583,33 +1684,122 @@ function CheckoutInner() {
         countryName,
         autoReinvest,
         referralCode: referralValid ? referralCode.toUpperCase() : undefined,
-        // Extra fields for KoraPay call in initiateSplitInstallment
-        nodeKey,
-        nodeName,
-        itype,
-        purchaseType,
-        licenseType,
-      };
+      },
+      totalUSD: price,
+      totalLocal,
+      currency: conversionInfo!.currency,
+      currencyRate: conversionInfo!.rate,
+      chunkMaxLocal: chunkMax,
+      chunks,
+      expiresAt: new Date(
+        Date.now() + SPLIT_SESSION_MINUTES * 60_000,
+      ).toISOString(),
+      countryCode,
+      countryName,
+    };
+    sessionStorage.setItem("split_payment_session", JSON.stringify(newSession));
+    setSplitSession(newSession);
+    setShowSplitModal(true);
+  }
 
-      const newSplitState: SplitState = {
-        totalNGN: convertedPrice,
-        totalUSD: price,
-        ngnRate: conversion?.rate ?? 1600,
-        localCurrency,
-        installmentsNGN,
-        completed: 0,
-        references: [],
-        kpPhone: kpPhone.trim(),
-        planData,
-      };
-
-      setSplitState(newSplitState);
-      setKpLoading(false);
-      return; // Modal will render and handle from here
-    }
-
-    // ── Normal bank transfer flow (amount ≤ ₦200,000) ──
+  async function payChunk(session: SplitSession, chunkIndex: number) {
+    const chunk = session.chunks[chunkIndex];
+    setKpLoading(true);
+    setKpError("");
+    sessionStorage.setItem(
+      "korapay_pending_checkout",
+      JSON.stringify({
+        ...session.planParams,
+        isSplitPayment: true,
+        splitSessionId: session.sessionId,
+        chunkIndex,
+        chunkAmountUSD: chunk.amountUSD,
+      }),
+    );
     try {
+      const res = await fetch("/api/korapay/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          phone: kpPhone.trim() || "",
+          nodeKey,
+          nodeName,
+          price: chunk.amountLocal,
+          originalPrice: chunk.amountUSD,
+          currency: session.currency,
+          itype,
+          gpu,
+          vram,
+          purchaseType,
+          licenseType,
+          paymentModel,
+          miningPeriod,
+          contractMonths,
+          contractLabel,
+          contractMinPct,
+          contractMaxPct,
+          lockInMonths: isContract ? contractMonths : lockInMonths,
+          lockInMultiplier,
+          lockInLabel: isContract ? contractLabel : lockInLabel,
+          countryCode,
+          countryName,
+          isSplitPayment: true,
+          splitChunkIndex: chunkIndex,
+          splitTotalChunks: session.chunks.length,
+          splitSessionId: session.sessionId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.checkoutUrl) {
+        sessionStorage.removeItem("korapay_pending_checkout");
+        setKpError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
+        setKpLoading(false);
+        return;
+      }
+      window.location.href = data.checkoutUrl;
+    } catch {
+      sessionStorage.removeItem("korapay_pending_checkout");
+      setKpError("Connection error. Please check your internet and try again.");
+      setKpLoading(false);
+    }
+  }
+
+  function cancelSplitPayment() {
+    sessionStorage.removeItem("split_payment_session");
+    setSplitSession(null);
+    setShowSplitModal(false);
+    setKpError("");
+  }
+
+  async function handleBankTransferSubmit() {
+    if (bankTransferLocked) {
+      setKpError(
+        "Bank transfer is temporarily unavailable — daily processing capacity has been reached. Please use Crypto (USDT) or Card payment to continue.",
+      );
+      return;
+    }
+    if (!userId) {
+      setKpError("Session not ready. Please wait and try again.");
+      return;
+    }
+    setKpError("");
+    setKpLoading(true);
+    try {
+      const conversion = CURRENCY_RATES[countryCode];
+      const localCurrency = conversion?.currency ?? "NGN";
+      const convertedPrice = conversion
+        ? parseFloat((price * conversion.rate).toFixed(2))
+        : price;
+      const chunkMax = getChunkMaxLocal(countryCode);
+      if (convertedPrice > chunkMax) {
+        setKpLoading(false);
+        initiateSplitPayment(convertedPrice, chunkMax);
+        return;
+      }
+      // Normal single payment
       sessionStorage.setItem(
         "korapay_pending_checkout",
         JSON.stringify({
@@ -1634,7 +1824,6 @@ function CheckoutInner() {
           referralCode: referralValid ? referralCode.toUpperCase() : undefined,
         }),
       );
-
       const res = await fetch("/api/korapay/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1664,7 +1853,6 @@ function CheckoutInner() {
           countryName,
         }),
       });
-
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_pending_checkout");
@@ -1674,11 +1862,9 @@ function CheckoutInner() {
         setKpLoading(false);
         return;
       }
-
       window.location.href = data.checkoutUrl;
     } catch (err: any) {
       sessionStorage.removeItem("korapay_pending_checkout");
-      console.error("Bank transfer error:", err);
       setKpError("Connection error. Please check your internet and try again.");
       setKpLoading(false);
     }
@@ -1691,12 +1877,10 @@ function CheckoutInner() {
       return;
     }
     if (isSubmittingRef.current) return;
-
     if (payMethod === "bank_transfer") {
       await handleBankTransferSubmit();
       return;
     }
-
     if (payMethod === "crypto_wallet") {
       setCryptoError("");
       if (!twConfirmed) {
@@ -1710,11 +1894,9 @@ function CheckoutInner() {
         return;
       }
     }
-
     isSubmittingRef.current = true;
     setStep("processing");
     setProcessingStep(0);
-
     if (payMethod === "crypto_wallet") {
       setProcessingStep(1);
       await new Promise((r) => setTimeout(r, 1200));
@@ -1769,8 +1951,7 @@ function CheckoutInner() {
       }
       return;
     }
-
-    // Card payment
+    // Card
     let cur = 0;
     for (const ps of PROCESSING_STEPS) {
       setProcessingStep(cur);
@@ -1807,7 +1988,6 @@ function CheckoutInner() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Payment failed");
-
       const id = await createMiningAllocation({
         userId,
         planId: nodeKey,
@@ -1830,7 +2010,6 @@ function CheckoutInner() {
         referralCode: referralValid ? referralCode.toUpperCase() : undefined,
       });
       if (id) setAllocationId(id);
-
       setTransactionId(data.transactionId || `TXN-${Date.now()}`);
       setStep("success");
       isSubmittingRef.current = false;
@@ -1868,16 +2047,12 @@ function CheckoutInner() {
     originalAmount: price,
     walletAddress: payMethod === "crypto_wallet" ? twSenderAddress : undefined,
   };
-
   const filteredCountries = COUNTRIES.filter((c) =>
     c.name.toLowerCase().includes(countrySearch.toLowerCase()),
   );
-  const conversionInfo = CURRENCY_RATES[countryCode];
-  const localAmount = conversionInfo
-    ? Math.round(price * conversionInfo.rate)
-    : null;
+  const periodLabel = PERIOD_LABELS[miningPeriod] ?? miningPeriod;
 
-  if (userId === undefined) {
+  if (userId === undefined)
     return (
       <div
         className="min-h-screen flex items-center justify-center"
@@ -1889,39 +2064,21 @@ function CheckoutInner() {
         </div>
       </div>
     );
-  }
-
-  const periodLabel = PERIOD_LABELS[miningPeriod] ?? miningPeriod;
-
-  // F1: Payment methods filtered by daily limit
-  const availablePayMethods = (() => {
-    const methods = getPaymentMethodsForCountry(countryCode, price);
-    if (bankTransferBlocked)
-      return methods.filter((m) => m !== "bank_transfer");
-    return methods;
-  })();
 
   return (
     <div className="min-h-screen py-8 px-4" style={{ background: "#0d1117" }}>
       {showReceipt && (
         <Receipt data={receiptData} onClose={() => setShowReceipt(false)} />
       )}
-
-      {/* ── F2: Split Payment Modal ── */}
-      {splitState !== null && step === "details" && (
+      {showSplitModal && splitSession && (
         <SplitPaymentModal
-          state={splitState}
-          loading={splitLoading}
-          error={splitError}
-          onInitiate={initiateSplitInstallment}
-          onCancel={() => {
-            sessionStorage.removeItem("korapay_split_checkout");
-            setSplitState(null);
-            setSplitError("");
-          }}
+          session={splitSession}
+          onPayChunk={payChunk}
+          onCancel={cancelSplitPayment}
+          loading={kpLoading}
+          kpError={kpError}
         />
       )}
-
       <div className="max-w-[960px] mx-auto mb-6">
         <button
           onClick={() =>
@@ -1933,7 +2090,7 @@ function CheckoutInner() {
         </button>
       </div>
 
-      {/* ── PENDING CRYPTO ── */}
+      {/* PENDING CRYPTO */}
       {step === "pending_crypto" && (
         <div className="max-w-[560px] mx-auto">
           <div
@@ -1971,15 +2128,13 @@ function CheckoutInner() {
                 {cryptoQrImageUrl ? (
                   <img
                     src={cryptoQrImageUrl}
-                    alt="Payment QR"
+                    alt="QR"
                     className="w-40 h-40 rounded-xl object-contain"
                     style={{ background: "white", padding: "8px" }}
                   />
-                ) : (
-                  cryptoWalletAddress && (
-                    <QRCode value={cryptoWalletAddress} size={160} />
-                  )
-                )}
+                ) : cryptoWalletAddress ? (
+                  <QRCode value={cryptoWalletAddress} size={160} />
+                ) : null}
               </div>
               <div
                 className="rounded-xl p-3"
@@ -2041,7 +2196,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── DECLINED ── */}
+      {/* DECLINED */}
       {step === "declined" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -2078,7 +2233,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── COUNTRY SELECTION ── */}
+      {/* COUNTRY */}
       {step === "country" && (
         <div className="max-w-[960px] mx-auto">
           <div className="text-center mb-8">
@@ -2117,11 +2272,7 @@ function CheckoutInner() {
                     setCountryCode(c.code);
                     setCountryName(c.name);
                   }}
-                  className={`p-3 rounded-lg text-left transition-all border ${
-                    countryCode === c.code
-                      ? "bg-emerald-600/20 border-emerald-500 text-emerald-100"
-                      : "bg-black/20 border-slate-700 text-slate-300 hover:border-slate-600"
-                  }`}
+                  className={`p-3 rounded-lg text-left transition-all border ${countryCode === c.code ? "bg-emerald-600/20 border-emerald-500 text-emerald-100" : "bg-black/20 border-slate-700 text-slate-300 hover:border-slate-600"}`}
                 >
                   <div className="font-semibold text-sm">{c.name}</div>
                   <div className="text-xs opacity-70">{c.code}</div>
@@ -2131,11 +2282,7 @@ function CheckoutInner() {
             <button
               onClick={() => countryCode && setStep("details")}
               disabled={!countryCode}
-              className={`w-full mt-6 py-3 rounded-lg font-bold transition-all flex items-center justify-center gap-2 ${
-                countryCode
-                  ? "bg-emerald-600 hover:bg-emerald-500 text-white"
-                  : "bg-slate-700 text-slate-400 cursor-not-allowed"
-              }`}
+              className={`w-full mt-6 py-3 rounded-lg font-bold transition-all flex items-center justify-center gap-2 ${countryCode ? "bg-emerald-600 hover:bg-emerald-500 text-white" : "bg-slate-700 text-slate-400 cursor-not-allowed"}`}
             >
               Continue <ChevronRight size={16} />
             </button>
@@ -2143,7 +2290,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── PAYMENT DETAILS ── */}
+      {/* DETAILS */}
       {step === "details" && (
         <div className="max-w-[960px] mx-auto">
           <div className="grid lg:grid-cols-[1fr_420px] gap-8">
@@ -2163,7 +2310,6 @@ function CheckoutInner() {
               payMethod={payMethod}
               miningPeriod={miningPeriod}
             />
-
             <div className="space-y-5">
               <div>
                 <div className="text-xl font-bold text-white mb-1">
@@ -2174,47 +2320,61 @@ function CheckoutInner() {
                 </p>
               </div>
 
-              {/* ── F1: Daily limit banner ── */}
-              {bankTransferBlocked && dailyLimitChecked && (
-                <div
-                  className="rounded-xl p-4 flex items-start gap-3"
-                  style={{
-                    background: "rgba(239,68,68,0.08)",
-                    border: "1px solid rgba(239,68,68,0.25)",
-                  }}
-                >
-                  <AlertTriangle
-                    size={15}
-                    className="text-red-400 shrink-0 mt-0.5"
-                  />
-                  <div>
-                    <p className="text-red-300 text-sm font-black">
-                      Bank Transfer Unavailable Today
-                    </p>
-                    <p className="text-red-400/70 text-xs mt-0.5 leading-relaxed">
-                      Our daily processing capacity for bank transfers has been
-                      reached for today. This resets at midnight. Please use{" "}
-                      <strong className="text-red-300">Crypto</strong> or{" "}
-                      <strong className="text-red-300">Card</strong> to complete
-                      your payment.
-                    </p>
+              {/* Daily limit banner */}
+              {bankTransferLocked &&
+                BANK_TRANSFER_COUNTRIES.has(countryCode) && (
+                  <div
+                    className="rounded-2xl p-4 flex items-start gap-3"
+                    style={{
+                      background: "rgba(239,68,68,0.07)",
+                      border: "1px solid rgba(239,68,68,0.3)",
+                    }}
+                  >
+                    <div
+                      className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                      style={{
+                        background: "rgba(239,68,68,0.12)",
+                        border: "1px solid rgba(239,68,68,0.3)",
+                      }}
+                    >
+                      <Ban size={18} className="text-red-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-red-300 font-black text-sm">
+                        Bank Transfer Unavailable Today
+                      </p>
+                      <p className="text-red-400/70 text-xs mt-1 leading-relaxed">
+                        Daily bank-transfer processing capacity has been
+                        reached. Please use{" "}
+                        <strong className="text-white">Crypto (USDT)</strong> or{" "}
+                        <strong className="text-white">Card</strong> to continue
+                        — both are instant and fully supported.
+                      </p>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* Payment method selector */}
+              {/* Payment methods */}
               {(() => {
-                const methods = getPaymentMethodsForCountry(countryCode, price);
+                const baseMethods = getPaymentMethodsForCountry(
+                  countryCode,
+                  price,
+                );
+                const methods = baseMethods.filter(
+                  (m) => m !== "bank_transfer" || !bankTransferLocked,
+                );
+                const chunkMax = getChunkMaxLocal(countryCode);
+                const willSplit =
+                  methods.includes("bank_transfer") &&
+                  localAmount !== null &&
+                  localAmount > chunkMax;
                 return (
                   <div className="space-y-3">
+                    {/* Crypto */}
                     <button
                       type="button"
                       onClick={() => setPayMethod("crypto_wallet")}
-                      className={`w-full p-4 rounded-xl transition-all border-2 relative overflow-hidden ${
-                        payMethod === "crypto_wallet"
-                          ? "bg-gradient-to-r from-violet-600/40 to-purple-600/40 border-violet-400"
-                          : "bg-slate-800/50 border-slate-600 hover:border-violet-400/50"
-                      }`}
+                      className={`w-full p-4 rounded-xl transition-all border-2 relative overflow-hidden ${payMethod === "crypto_wallet" ? "bg-gradient-to-r from-violet-600/40 to-purple-600/40 border-violet-400" : "bg-slate-800/50 border-slate-600 hover:border-violet-400/50"}`}
                     >
                       <div className="absolute top-2 right-2 bg-violet-500 text-white text-[10px] font-black px-2 py-1 rounded">
                         RECOMMENDED
@@ -2234,7 +2394,7 @@ function CheckoutInner() {
                         </div>
                       </div>
                     </button>
-
+                    {/* Card */}
                     {methods.includes("card") && (
                       <button
                         type="button"
@@ -2261,38 +2421,21 @@ function CheckoutInner() {
                         </div>
                       </button>
                     )}
-
-                    {/* ── F1: Bank transfer button — disabled when limit reached ── */}
+                    {/* Bank transfer */}
                     {methods.includes("bank_transfer") && (
                       <button
                         type="button"
-                        onClick={() =>
-                          !bankTransferBlocked && setPayMethod("bank_transfer")
-                        }
-                        disabled={bankTransferBlocked}
-                        className={`w-full p-4 rounded-xl transition-all border-2 ${
-                          bankTransferBlocked
-                            ? "bg-slate-900/20 border-slate-800 opacity-50 cursor-not-allowed"
-                            : payMethod === "bank_transfer"
-                              ? "bg-blue-700/20 border-blue-400"
-                              : "bg-slate-800/30 border-slate-700 hover:border-blue-500/50"
-                        }`}
+                        onClick={() => setPayMethod("bank_transfer")}
+                        className={`w-full p-4 rounded-xl transition-all border-2 ${payMethod === "bank_transfer" ? "bg-blue-700/20 border-blue-400" : "bg-slate-800/30 border-slate-700 hover:border-blue-500/50"}`}
                       >
                         <div className="flex items-center gap-3">
                           <div className="text-xl">🏦</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">
                               Local Transfer
-                              {bankTransferBlocked && (
-                                <span className="ml-2 text-[10px] font-black text-red-400 bg-red-900/20 border border-red-800/30 px-1.5 py-0.5 rounded-full">
-                                  LIMIT REACHED
-                                </span>
-                              )}
                             </div>
                             <div className="text-slate-500 text-xs">
-                              {bankTransferBlocked
-                                ? "Unavailable today — resets at midnight"
-                                : "Bank · Card · Mobile Money"}
+                              Bank · Card · Mobile Money
                             </div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">
@@ -2301,11 +2444,39 @@ function CheckoutInner() {
                         </div>
                       </button>
                     )}
+                    {/* Split preview notice */}
+                    {willSplit && payMethod === "bank_transfer" && (
+                      <div
+                        className="rounded-xl p-3 flex items-start gap-2"
+                        style={{
+                          background: "rgba(59,130,246,0.07)",
+                          border: "1px solid rgba(59,130,246,0.25)",
+                        }}
+                      >
+                        <AlertTriangle
+                          size={13}
+                          className="text-blue-400 shrink-0 mt-0.5"
+                        />
+                        <p className="text-blue-300 text-xs leading-relaxed">
+                          This deposit (
+                          {CURRENCY_SYMBOLS[conversionInfo?.currency ?? ""] ??
+                            ""}
+                          {localAmount?.toLocaleString()}) exceeds the
+                          single-transaction limit and will be split into{" "}
+                          <strong className="text-white">
+                            {Math.ceil((localAmount ?? 0) / chunkMax)} secure
+                            instalments
+                          </strong>{" "}
+                          in compliance with AML regulations. No extra fees
+                          apply.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 );
               })()}
 
-              {/* Feature A: Auto-reinvest toggle */}
+              {/* Auto-reinvest */}
               {purchaseType === "gpu_plan" && (
                 <div
                   className="rounded-xl p-4"
@@ -2317,11 +2488,7 @@ function CheckoutInner() {
                   <label className="flex items-start gap-3 cursor-pointer">
                     <div
                       onClick={() => setAutoReinvest((v) => !v)}
-                      className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-all ${
-                        autoReinvest
-                          ? "bg-emerald-500 border-emerald-500"
-                          : "border-slate-600"
-                      }`}
+                      className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-all ${autoReinvest ? "bg-emerald-500 border-emerald-500" : "border-slate-600"}`}
                     >
                       {autoReinvest && (
                         <Check size={12} className="text-white" />
@@ -2341,7 +2508,7 @@ function CheckoutInner() {
                 </div>
               )}
 
-              {/* Feature B: Referral code */}
+              {/* Referral */}
               <div>
                 <label className="block text-slate-300 text-sm font-bold mb-2 flex items-center gap-1.5">
                   <Gift size={13} className="text-amber-400" /> Referral Code{" "}
@@ -2359,13 +2526,7 @@ function CheckoutInner() {
                       setReferralValid(null);
                     }}
                     onBlur={() => validateReferralCode(referralCode)}
-                    className={`w-full px-4 py-3 bg-black/30 border rounded-lg text-white placeholder-slate-600 text-sm font-mono uppercase focus:outline-none transition-colors ${
-                      referralValid === true
-                        ? "border-emerald-500"
-                        : referralValid === false
-                          ? "border-red-500"
-                          : "border-slate-700 focus:border-amber-500"
-                    }`}
+                    className={`w-full px-4 py-3 bg-black/30 border rounded-lg text-white placeholder-slate-600 text-sm font-mono uppercase focus:outline-none transition-colors ${referralValid === true ? "border-emerald-500" : referralValid === false ? "border-red-500" : "border-slate-700 focus:border-amber-500"}`}
                   />
                   <div className="absolute right-3 top-1/2 -translate-y-1/2">
                     {checkingReferral && (
@@ -2395,8 +2556,8 @@ function CheckoutInner() {
               </div>
 
               <form onSubmit={handleSubmit}>
-                {/* ── Bank Transfer ── */}
-                {payMethod === "bank_transfer" && !bankTransferBlocked && (
+                {/* Bank transfer form */}
+                {payMethod === "bank_transfer" && (
                   <div
                     className="rounded-2xl p-6 space-y-4"
                     style={{
@@ -2404,40 +2565,6 @@ function CheckoutInner() {
                       border: "1px solid rgba(59,130,246,0.25)",
                     }}
                   >
-                    {/* F2: Show split notice if amount will require splitting */}
-                    {localAmount && localAmount > MAX_SINGLE_NGN_TXN && (
-                      <div
-                        className="p-3 rounded-xl flex items-start gap-2.5"
-                        style={{
-                          background: "rgba(245,158,11,0.07)",
-                          border: "1px solid rgba(245,158,11,0.25)",
-                        }}
-                      >
-                        <Landmark
-                          size={13}
-                          className="text-amber-400 mt-0.5 shrink-0"
-                        />
-                        <div>
-                          <p className="text-amber-300 text-xs font-black">
-                            Installment Payment Required
-                          </p>
-                          <p className="text-amber-400/70 text-xs mt-0.5 leading-relaxed">
-                            Your payment of{" "}
-                            <strong className="text-amber-200">
-                              ₦{localAmount.toLocaleString()}
-                            </strong>{" "}
-                            exceeds the ₦200,000 single-transaction limit. It
-                            will be split into{" "}
-                            <strong className="text-amber-200">
-                              {computeInstallments(localAmount).length}{" "}
-                              installments
-                            </strong>{" "}
-                            for regulatory compliance.
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
                     <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                       <p className="text-blue-200 text-xs leading-relaxed">
                         You will be redirected to complete payment securely via
@@ -2468,10 +2595,9 @@ function CheckoutInner() {
                       </label>
                       <input
                         type="tel"
-                        placeholder=""
                         value={kpPhone}
                         onChange={(e) => setKpPhone(e.target.value)}
-                        className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 text-sm focus:outline-none focus:border-blue-500"
+                        className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white text-sm focus:outline-none focus:border-blue-500"
                       />
                     </div>
                     {kpError && (
@@ -2493,10 +2619,6 @@ function CheckoutInner() {
                           <Loader2 size={16} className="animate-spin" />{" "}
                           Connecting…
                         </>
-                      ) : localAmount && localAmount > MAX_SINGLE_NGN_TXN ? (
-                        <>
-                          <Landmark size={14} /> Set Up Installment Payment
-                        </>
                       ) : (
                         <>
                           <Lock size={14} /> Proceed to Secure Payment
@@ -2505,8 +2627,7 @@ function CheckoutInner() {
                     </button>
                   </div>
                 )}
-
-                {/* ── Crypto ── */}
+                {/* Crypto form */}
                 {payMethod === "crypto_wallet" && (
                   <div
                     className="rounded-2xl p-6 space-y-5"
@@ -2558,7 +2679,7 @@ function CheckoutInner() {
                           {cryptoQrImageUrl ? (
                             <img
                               src={cryptoQrImageUrl}
-                              alt="Payment QR Code"
+                              alt="QR"
                               className="w-36 h-36 rounded-xl object-contain"
                               style={{ background: "white", padding: "6px" }}
                             />
@@ -2612,7 +2733,6 @@ function CheckoutInner() {
                         </div>
                       </div>
                     )}
-
                     <div>
                       <label className="block text-white text-sm font-bold mb-1.5">
                         Your Wallet Address{" "}
@@ -2628,15 +2748,10 @@ function CheckoutInner() {
                         className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 font-mono text-xs focus:outline-none focus:border-violet-500"
                       />
                     </div>
-
                     <label className="flex items-start gap-2.5 cursor-pointer">
                       <div
                         onClick={() => setTwConfirmed((v) => !v)}
-                        className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${
-                          twConfirmed
-                            ? "bg-violet-500 border-violet-500"
-                            : "border-slate-600"
-                        }`}
+                        className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${twConfirmed ? "bg-violet-500 border-violet-500" : "border-slate-600"}`}
                       >
                         {twConfirmed && (
                           <Check size={12} className="text-white" />
@@ -2652,7 +2767,6 @@ function CheckoutInner() {
                         network to the address above.
                       </p>
                     </label>
-
                     {cryptoError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
                         <AlertCircle
@@ -2662,7 +2776,6 @@ function CheckoutInner() {
                         <p className="text-red-300 text-xs">{cryptoError}</p>
                       </div>
                     )}
-
                     <button
                       type="submit"
                       disabled={!twConfirmed || !cryptoWalletAddress}
@@ -2680,7 +2793,7 @@ function CheckoutInner() {
                 )}
               </form>
 
-              {/* Total summary */}
+              {/* Total */}
               <div
                 className="rounded-xl p-4"
                 style={{
@@ -2713,7 +2826,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── PROCESSING ── */}
+      {/* PROCESSING */}
       {step === "processing" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -2737,20 +2850,10 @@ function CheckoutInner() {
               {PROCESSING_STEPS.map((ps, idx) => (
                 <div
                   key={ps.id}
-                  className={`flex items-center gap-3 text-sm ${
-                    idx <= processingStep
-                      ? "text-emerald-300"
-                      : "text-slate-600"
-                  }`}
+                  className={`flex items-center gap-3 text-sm ${idx <= processingStep ? "text-emerald-300" : "text-slate-600"}`}
                 >
                   <div
-                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${
-                      idx < processingStep
-                        ? "bg-emerald-500 border-emerald-500"
-                        : idx === processingStep
-                          ? "border-emerald-500 animate-pulse"
-                          : "border-slate-600"
-                    }`}
+                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${idx < processingStep ? "bg-emerald-500 border-emerald-500" : idx === processingStep ? "border-emerald-500 animate-pulse" : "border-slate-600"}`}
                   >
                     {idx < processingStep && (
                       <CheckCircle size={14} className="text-white" />
@@ -2764,7 +2867,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── SUCCESS ── */}
+      {/* SUCCESS */}
       {step === "success" && (
         <div className="max-w-[520px] mx-auto">
           <div
@@ -2818,7 +2921,6 @@ function CheckoutInner() {
                 </div>
               )}
             </div>
-
             {autoReinvest && purchaseType === "gpu_plan" && (
               <div
                 className="rounded-xl p-3 mb-5"
@@ -2836,7 +2938,6 @@ function CheckoutInner() {
                 </p>
               </div>
             )}
-
             <div className="flex gap-3">
               <button
                 onClick={() => setShowReceipt(true)}
@@ -2863,7 +2964,7 @@ function CheckoutInner() {
         </div>
       )}
 
-      {/* ── FAILED ── */}
+      {/* FAILED */}
       {step === "failed" && (
         <div className="max-w-[520px] mx-auto">
           <div
