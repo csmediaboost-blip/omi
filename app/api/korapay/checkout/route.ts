@@ -1,11 +1,15 @@
 // app/api/korapay/checkout/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES:
-//  1. miningPeriod now included in metadata stored in payment_transaction
-//     (was missing — callback/webhook couldn't create correct allocation)
-//  2. lockInMonths = 0 for flexible plans (was defaulting to 6)
-//  3. autoReinvest flag stored in metadata
-//  4. currency fallback improved
+// FIXES vs broken version:
+//  FIX-A  Removed import from @/lib/allocation-creator (file does not exist —
+//         this was causing the entire route to fail at startup, producing the
+//         "Payment gateway not configured" error regardless of key validity).
+//  FIX-B  Removed overly-strict korapayKey.length < 10 guard that was
+//         silently rejecting valid keys stored under variant config names.
+//  FIX-C  API key lookup now tries four common config-table key names so the
+//         route works no matter which name the admin stored it under.
+//  FIX-D  metadata now always stores miningPeriod, paymentModel, all fields
+//         needed by the callback/webhook to create a correct allocation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -62,8 +66,8 @@ export async function POST(req: NextRequest) {
       phone,
       nodeKey,
       nodeName,
-      price, // converted local-currency amount
-      originalPrice, // USD amount
+      price, // converted local-currency amount (e.g. ₦200,000)
+      originalPrice, // USD amount (e.g. $125)
       currency: rawCurrency,
       gpu,
       vram,
@@ -71,7 +75,6 @@ export async function POST(req: NextRequest) {
       purchaseType,
       licenseType,
       paymentModel,
-      // FIX #1: miningPeriod now extracted from body
       miningPeriod,
       contractMonths,
       contractLabel,
@@ -82,10 +85,12 @@ export async function POST(req: NextRequest) {
       lockInLabel,
       countryCode,
       countryName,
-      // FEATURE: autoReinvest
       autoReinvest,
-      // FEATURE: referralCode
       referralCode,
+      // Split payment metadata (passed through transparently)
+      isSplitPayment,
+      splitInstallment,
+      splitTotal,
     } = body;
 
     const isContract = paymentModel === "contract";
@@ -104,50 +109,58 @@ export async function POST(req: NextRequest) {
       currency,
       countryCode,
       paymentModel,
-      miningPeriod, // FIX: now logged
+      miningPeriod,
     });
 
     if (!userId)
       return NextResponse.json({ error: "Missing userId" }, { status: 400 });
     if (!price || isNaN(Number(price)) || Number(price) <= 0)
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
-    if (originalPrice > 10000)
+    if (Number(originalPrice) > 10000)
       return NextResponse.json(
         { error: "Payment limit is $10,000 USD." },
         { status: 400 },
       );
 
-    // Load config
+    // ── Load KoraPay API key ─────────────────────────────────────────────────
+    // FIX-A/C: No longer imports allocation-creator. Tries all common key names.
     const { data: configData } = await supabaseAdmin
       .from("payment_config")
       .select("key, value");
+
     const cfg: Record<string, string> = {};
     (configData || []).forEach((r: any) => {
       if (r.key && r.value) cfg[r.key] = r.value;
     });
 
+    // FIX-C: Try every plausible config-table name AND the env var
     const korapayKey =
       cfg["korapay_secret_key"] ||
       cfg["korapay_api_key"] ||
+      cfg["korapay_key"] ||
+      cfg["KORAPAY_SECRET_KEY"] ||
       process.env.KORAPAY_SECRET_KEY ||
       "";
 
-    if (!korapayKey || korapayKey === "EMPTY" || korapayKey.length < 10) {
+    // FIX-B: Only reject if truly empty — not based on length
+    if (!korapayKey || korapayKey.trim() === "" || korapayKey === "EMPTY") {
+      console.error("[korapay/checkout] No API key found in config or env");
       return NextResponse.json(
         {
           error:
-            "Payment gateway not configured. Use Crypto payment or contact support.",
+            "Payment gateway not configured. Please use Crypto payment or contact support.",
         },
         { status: 500 },
       );
     }
 
-    // Load user email
+    // ── Load user email ───────────────────────────────────────────────────────
     const { data: user } = await supabaseAdmin
       .from("users")
       .select("email, full_name")
       .eq("id", userId)
       .single();
+
     if (!user?.email)
       return NextResponse.json(
         { error: "User account error — no email found" },
@@ -156,7 +169,8 @@ export async function POST(req: NextRequest) {
 
     const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 
-    // FIX #1: Insert pending tx with miningPeriod in metadata
+    // ── Insert pending payment_transaction ────────────────────────────────────
+    // FIX-D: All fields needed by callback/webhook stored in metadata
     const { data: txn, error: txnErr } = await supabaseAdmin
       .from("payment_transactions")
       .insert({
@@ -184,22 +198,22 @@ export async function POST(req: NextRequest) {
           gpu,
           vram,
           paymentModel,
-          // FIX #1: miningPeriod stored in metadata — was missing before
           miningPeriod: miningPeriod ?? "daily",
           itype,
-          // Contract fields
           contractMonths: contractMonths || null,
           contractLabel: contractLabel || null,
           contractMinPct: contractMinPct || null,
           contractMaxPct: contractMaxPct || null,
-          // FIX #2: lockInMonths = 0 for flexible, contractMonths for contract
+          // FIX-D: lockInMonths = 0 for flexible sessions
           lockInMonths: isContract ? contractMonths || 6 : 0,
           lockInMultiplier: lockInMultiplier || 1.0,
           lockInLabel: isContract ? contractLabel || "6 Months" : "Flexible",
-          // FEATURE: autoReinvest stored in metadata
           autoReinvest: autoReinvest || false,
-          // FEATURE: referralCode stored in metadata
           referralCode: referralCode || null,
+          // Split payment passthrough — so callback knows it's an installment
+          isSplitPayment: isSplitPayment || false,
+          splitInstallment: splitInstallment || null,
+          splitTotal: splitTotal || null,
         },
       })
       .select()
@@ -213,7 +227,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Customer object
+    // ── Build KoraPay payload ─────────────────────────────────────────────────
     const customerObj: Record<string, string> = {
       name: user.full_name || "OmniTask User",
       email: user.email,

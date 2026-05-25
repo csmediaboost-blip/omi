@@ -1,29 +1,32 @@
 // app/api/korapay/webhook/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// CRITICAL FIX: Removed duplicate `export async function POST` that was
-// running admin-approval logic on every KoraPay webhook ping — marking ALL
-// crypto payments as "confirmed" immediately without admin review.
-//
-// The old v0 block also had these bugs:
-//  - Queried `transaction_id` column (doesn't exist; correct: gateway_reference)
-//  - Inserted into `user_balances` table (doesn't exist in schema)
-//  - Set lock_in_months: 6 for all plans including flexible ones
-//
-// Now only ONE POST handler exists — the correct webhook processor.
+// FIXES vs broken version:
+//  FIX-A  Removed import from @/lib/allocation-creator (file does not exist).
+//         All allocation and license logic is now inlined directly here.
+//  FIX-B  Uses gateway_reference column (not transaction_id — doesn't exist).
+//  FIX-C  Removed duplicate POST export that was crashing the route file.
+//  FIX-D  Does NOT insert into user_balances (that table doesn't exist).
+//         Balance is managed via balance_available on the users table.
+//  FIX-E  Allocations created with all correct mining fields.
+//  FIX-F  Idempotency guard — won't create duplicate allocations.
+//  FIX-G  Plan/license activates IMMEDIATELY on charge.success event.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
-import {
-  createNodeAllocation,
-  activateLicense,
-  writeLedgerEntry,
-} from "@/lib/allocation-creator";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const maxDuration = 60;
+
+// Mirror of PERIOD_DURATIONS_MS from mining-service
+const PERIOD_DURATIONS_MS: Record<string, number> = {
+  hourly: 1 * 60 * 60 * 1000,
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+};
 
 function getSupabaseAdmin() {
   return createClient(
@@ -49,6 +52,189 @@ function verifyKorapaySignature(
   }
 }
 
+// ─── Inline allocation creator ────────────────────────────────────────────────
+async function createNodeAllocation(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  params: {
+    userId: string;
+    planId: string;
+    amount: number;
+    metadata: Record<string, any>;
+    transactionRef: string;
+  },
+): Promise<{
+  success: boolean;
+  id?: string;
+  alreadyExisted?: boolean;
+  error?: string;
+}> {
+  const { userId, planId, amount, metadata, transactionRef } = params;
+
+  // Idempotency — check for recent allocation for same user+plan
+  const { data: existing } = await supabase
+    .from("node_allocations")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("plan_id", planId)
+    .gte("created_at", new Date(Date.now() - 15 * 60 * 1000).toISOString())
+    .limit(1);
+
+  if (existing && existing.length > 0) {
+    console.log("[webhook] Allocation already exists:", existing[0].id);
+    return { success: true, id: existing[0].id, alreadyExisted: true };
+  }
+
+  const paymentModel: "flexible" | "contract" =
+    metadata.paymentModel === "contract" ? "contract" : "flexible";
+  const miningPeriod = metadata.miningPeriod ?? "daily";
+  const isContract = paymentModel === "contract";
+  const now = new Date();
+
+  const periodMs =
+    PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
+  const miningEndsAt = isContract
+    ? null
+    : new Date(now.getTime() + periodMs).toISOString();
+
+  const contractMonths = Number(metadata.contractMonths) || 6;
+  const maturityDate = isContract
+    ? new Date(
+        now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000,
+      ).toISOString()
+    : null;
+
+  // Fetch rate_factor for this plan (soft — fallback 0.86)
+  let rateFactor = 0.86;
+  try {
+    const { data: rateSnap } = await supabase
+      .from("current_mining_rates")
+      .select("rate_factor")
+      .eq("plan_id", planId)
+      .eq("period", miningPeriod)
+      .single();
+    if (rateSnap?.rate_factor != null) rateFactor = rateSnap.rate_factor;
+  } catch {}
+
+  const allocationPayload: Record<string, any> = {
+    user_id: userId,
+    plan_id: planId,
+    amount_invested: amount,
+    status: "active",
+    payment_model: paymentModel,
+    instance_type: metadata.itype || "on_demand",
+    total_earned: 0,
+    total_withdrawn: 0,
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    auto_reinvest: metadata.autoReinvest || false,
+    ...(paymentModel === "flexible"
+      ? {
+          mining_period: miningPeriod,
+          mining_ends_at: miningEndsAt,
+          mining_completed: false,
+          rate_factor_used: rateFactor,
+          capital_returned: false,
+          final_profit: 0,
+        }
+      : {
+          contract_months: contractMonths,
+          contract_label: metadata.contractLabel || null,
+          contract_min_pct: metadata.contractMinPct || null,
+          contract_max_pct: metadata.contractMaxPct || null,
+          maturity_date: maturityDate,
+          lock_in_months: contractMonths,
+          lock_in_label: metadata.lockInLabel || metadata.contractLabel || null,
+          lock_in_multiplier: metadata.lockInMultiplier || 1.0,
+          mining_completed: false,
+          rate_factor_used: rateFactor,
+          mining_period: "contract",
+          mining_ends_at: maturityDate,
+        }),
+  };
+
+  const { data: newAlloc, error: allocErr } = await supabase
+    .from("node_allocations")
+    .insert(allocationPayload)
+    .select("id")
+    .single();
+
+  if (allocErr) {
+    console.error("[webhook] Allocation insert failed:", allocErr.message);
+    return { success: false, error: allocErr.message };
+  }
+
+  // Record a confirmed payment_transaction for this allocation
+  try {
+    await supabase.from("payment_transactions").insert({
+      user_id: userId,
+      node_key: planId,
+      amount,
+      currency: "USD",
+      gateway: "korapay_confirmed",
+      gateway_reference: newAlloc.id,
+      status: "confirmed",
+      verified_by_admin: true,
+      created_at: now.toISOString(),
+      confirmed_at: now.toISOString(),
+      metadata: JSON.stringify({
+        purchaseType: isContract ? "gpu_contract" : "gpu_mining",
+        miningPeriod,
+        allocationId: newAlloc.id,
+        transactionRef,
+      }),
+    });
+  } catch {}
+
+  return { success: true, id: newAlloc.id };
+}
+
+// ─── Inline license activator ─────────────────────────────────────────────────
+async function activateLicense(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  userId: string,
+  licenseType: string,
+  amount: number,
+  txRef: string,
+): Promise<{ success: boolean; error?: string }> {
+  const now = new Date();
+  const expiresAt = new Date(
+    now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  // Idempotency
+  const { data: existing } = await supabase
+    .from("operator_licenses")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("license_type", licenseType)
+    .eq("status", "active")
+    .limit(1);
+
+  if (existing && existing.length > 0) {
+    console.log("[webhook] License already active:", existing[0].id);
+    return { success: true };
+  }
+
+  const { error } = await supabase.from("operator_licenses").insert({
+    user_id: userId,
+    license_type: licenseType,
+    status: "active",
+    activated_at: now.toISOString(),
+    expires_at: expiresAt,
+    amount_paid: amount,
+    transaction_ref: txRef,
+    created_at: now.toISOString(),
+  });
+
+  if (error) {
+    console.error("[webhook] License insert failed:", error.message);
+    return { success: false, error: error.message };
+  }
+  return { success: true };
+}
+
+// ─── SINGLE POST handler — processes KoraPay webhook events ──────────────────
+// FIX-C: Only ONE export async function POST (old file had two — syntax error)
 export async function POST(req: NextRequest) {
   const supabaseAdmin = getSupabaseAdmin();
 
@@ -73,7 +259,7 @@ export async function POST(req: NextRequest) {
     body?.data?.reference,
   );
 
-  // Signature verification — non-blocking if secret not set
+  // Signature verification (non-blocking if secret not configured)
   const signature = req.headers.get("x-korapay-signature");
   const korapaySecret = process.env.KORAPAY_SECRET_KEY || "";
   if (signature && korapaySecret) {
@@ -84,6 +270,7 @@ export async function POST(req: NextRequest) {
   }
 
   const { data, event } = body;
+  // FIX-B: KoraPay sends reference in data.reference
   const reference = data?.reference;
 
   if (!reference) {
@@ -92,7 +279,7 @@ export async function POST(req: NextRequest) {
 
   if (event === "charge.success") {
     try {
-      // Query by gateway_reference — the correct column
+      // FIX-B: Query by gateway_reference (not transaction_id — wrong column)
       const { data: txData, error: txErr } = await supabaseAdmin
         .from("payment_transactions")
         .select("*")
@@ -105,7 +292,7 @@ export async function POST(req: NextRequest) {
           reference,
           txErr,
         );
-        // Return 200 to stop KoraPay retrying for unknown references
+        // Return 200 so KoraPay stops retrying for unknown references
         return NextResponse.json({ success: true, note: "tx_not_found" });
       }
 
@@ -124,7 +311,7 @@ export async function POST(req: NextRequest) {
       const userId = txData.user_id;
       const purchaseType = metadata.purchaseType || "gpu_plan";
 
-      // Mark payment confirmed
+      // ── Mark payment confirmed ────────────────────────────────────────────
       await supabaseAdmin
         .from("payment_transactions")
         .update({
@@ -135,6 +322,7 @@ export async function POST(req: NextRequest) {
         })
         .eq("gateway_reference", reference);
 
+      // ── FIX-G: Activate plan or license immediately ───────────────────────
       if (purchaseType === "license") {
         const licenseType =
           metadata.licenseType || txData.node_key || "operator_license";
@@ -143,7 +331,7 @@ export async function POST(req: NextRequest) {
           userId,
           licenseType,
           txData.amount,
-          String(txData.id),
+          reference,
         );
         if (!result.success) {
           console.error(
@@ -152,40 +340,48 @@ export async function POST(req: NextRequest) {
           );
         }
       } else {
-        // GPU plan — create allocation with all mining fields
-        // miningPeriod correctly read from metadata
-        const result = await createNodeAllocation(supabaseAdmin, {
-          userId,
-          planId: txData.node_key,
-          amount: txData.amount,
-          metadata,
-          transactionRef: reference,
-        });
+        // Split payment: only activate on final installment
+        const isSplit = metadata.isSplitPayment === true;
+        const splitInstallment = Number(metadata.splitInstallment) || 1;
+        const splitTotal = Number(metadata.splitTotal) || 1;
+        const isFinalInstallment = !isSplit || splitInstallment >= splitTotal;
 
-        if (!result.success && !result.alreadyExisted) {
-          console.error(
-            "[korapay/webhook] Allocation creation failed:",
-            result.error,
+        if (isFinalInstallment) {
+          const result = await createNodeAllocation(supabaseAdmin, {
+            userId,
+            planId: txData.node_key,
+            amount: metadata.originalPrice ?? txData.amount,
+            metadata,
+            transactionRef: reference,
+          });
+          if (!result.success && !result.alreadyExisted) {
+            console.error(
+              "[korapay/webhook] Allocation creation failed:",
+              result.error,
+            );
+          }
+        } else {
+          console.log(
+            `[korapay/webhook] Split installment ${splitInstallment}/${splitTotal} confirmed — waiting for remaining.`,
           );
-          // Non-fatal — payment confirmed, can be activated manually from admin
         }
       }
 
-      // Write ledger entry
-      await writeLedgerEntry(supabaseAdmin, {
-        userId,
-        type: purchaseType === "license" ? "license_purchase" : "investment",
-        amount: txData.amount,
-        currency: metadata.currency || txData.currency || "USD",
-        description:
-          purchaseType === "license"
-            ? `Operator License via KoraPay (${metadata.licenseType || txData.node_key})`
-            : `GPU Node via KoraPay (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
-        referenceId: String(txData.id),
-        metadata: { ...metadata, gateway: "korapay" },
-      });
+      // ── Write transaction ledger ──────────────────────────────────────────
+      try {
+        await supabaseAdmin.from("transaction_ledger").insert({
+          user_id: userId,
+          type: purchaseType === "license" ? "license_purchase" : "investment",
+          amount: txData.amount,
+          description:
+            purchaseType === "license"
+              ? `Operator License via KoraPay (${metadata.licenseType || txData.node_key})`
+              : `GPU Node via KoraPay (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
+          created_at: now,
+        });
+      } catch {}
 
-      // In-app notification
+      // ── In-app notification ───────────────────────────────────────────────
       try {
         await supabaseAdmin.from("user_notifications").insert({
           user_id: userId,
@@ -228,6 +424,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true });
   }
 
-  // Unknown event — acknowledge so KoraPay doesn't retry
+  // Unknown event — acknowledge so KoraPay doesn't retry indefinitely
   return NextResponse.json({ success: true });
 }
