@@ -1,6 +1,6 @@
 "use client";
 // app/auth/update-password/page.tsx
-// Handles the password reset link from Supabase email
+// Fixed: handles both hash-based (implicit) and PKCE flow tokens
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -9,9 +9,15 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { Lock, Eye, EyeOff, CheckCircle, ShieldCheck } from "lucide-react";
+import {
+  Lock,
+  Eye,
+  EyeOff,
+  CheckCircle,
+  ShieldCheck,
+  AlertCircle,
+} from "lucide-react";
 
-// ── Validation schema ──────────────────────────────────────────────
 const UpdatePasswordSchema = z
   .object({
     password: z
@@ -28,15 +34,15 @@ const UpdatePasswordSchema = z
 
 type UpdatePasswordData = z.infer<typeof UpdatePasswordSchema>;
 
-// ── Component ──────────────────────────────────────────────────────
+type PageState = "loading" | "ready" | "error" | "done";
+
 export default function UpdatePasswordPage() {
   const router = useRouter();
-  const [loading, setLoading] = useState(false);
-  const [done, setDone] = useState(false);
+  const [pageState, setPageState] = useState<PageState>("loading");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-  const [sessionReady, setSessionReady] = useState(false);
-  const [sessionError, setSessionError] = useState(false);
 
   const {
     register,
@@ -47,61 +53,107 @@ export default function UpdatePasswordPage() {
     resolver: zodResolver(UpdatePasswordSchema),
   });
 
-  // ── Supabase exchanges the URL tokens automatically on mount ──────
-  // When the user lands here from the email link, Supabase parses the
-  // #access_token fragment and fires an INITIAL_SESSION / PASSWORD_RECOVERY event.
   useEffect(() => {
+    // Supabase Auth supports two flows:
+    // 1. Implicit flow  → token is in the URL hash (#access_token=...)
+    // 2. PKCE flow      → token is exchanged via a code in the query string (?code=...)
+    //
+    // onAuthStateChange handles BOTH — we just need to wait for it.
+    // We also guard with a 10s timeout so the spinner doesn't run forever.
+
+    const timeout = setTimeout(() => {
+      setErrorMsg(
+        "Link verification timed out. Please request a new reset link.",
+      );
+      setPageState("error");
+    }, 10_000);
+
     const { data: listener } = supabase.auth.onAuthStateChange(
       (event, session) => {
-        if (event === "PASSWORD_RECOVERY" || event === "INITIAL_SESSION") {
-          if (session) {
-            setSessionReady(true);
-          } else {
-            setSessionError(true);
-          }
+        console.log(
+          "[update-password] auth event:",
+          event,
+          "session:",
+          !!session,
+        );
+
+        if (event === "PASSWORD_RECOVERY") {
+          clearTimeout(timeout);
+          setPageState("ready");
+        } else if (event === "SIGNED_IN" && session) {
+          // PKCE flow fires SIGNED_IN instead of PASSWORD_RECOVERY
+          clearTimeout(timeout);
+          setPageState("ready");
+        } else if (event === "INITIAL_SESSION" && session) {
+          clearTimeout(timeout);
+          setPageState("ready");
         }
       },
     );
 
-    // Also check for an existing session in case the event already fired
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) setSessionReady(true);
+    // Also check for an already-active session (page reload after token exchange)
+    supabase.auth.getSession().then(({ data, error }) => {
+      console.log(
+        "[update-password] getSession →",
+        data.session?.user?.email,
+        error,
+      );
+      if (data.session) {
+        clearTimeout(timeout);
+        setPageState("ready");
+      }
     });
 
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      listener.subscription.unsubscribe();
+    };
   }, []);
 
   const onSubmit = async (data: UpdatePasswordData) => {
     try {
-      setLoading(true);
+      setSubmitting(true);
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      console.log(
+        "[update-password] session before update:",
+        sessionData.session?.user?.email,
+      );
+
       const { error } = await supabase.auth.updateUser({
         password: data.password,
       });
+      console.log("[update-password] updateUser error:", error);
+
       if (error) throw error;
-      setDone(true);
-      toast.success("Password updated successfully!");
+
+      setPageState("done");
+      toast.success("Password updated! Redirecting to sign in…");
+
+      // Sign out so the old recovery token is invalidated
+      await supabase.auth.signOut();
       setTimeout(() => router.push("/auth/signin"), 2500);
     } catch (error: any) {
-      console.error("Update password error:", error);
+      console.error("[update-password] submit error:", error);
       toast.error(error.message || "Failed to update password");
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   };
 
+  // ── Password strength ────────────────────────────────────────────
   const password = watch("password", "");
-  const strength = [
+  const checks = [
     password.length >= 8,
     /[A-Z]/.test(password),
     /[0-9]/.test(password),
     /[^A-Za-z0-9]/.test(password),
   ];
-  const strengthScore = strength.filter(Boolean).length;
-  const strengthLabel = ["", "Weak", "Fair", "Good", "Strong"][strengthScore];
-  const strengthColor = ["", "#ef4444", "#f59e0b", "#10b981", "#10b981"][
-    strengthScore
-  ];
+  const score = checks.filter(Boolean).length;
+  const strengthLabel = ["", "Weak", "Fair", "Good", "Strong"][score];
+  const strengthColor = ["", "#ef4444", "#f59e0b", "#10b981", "#10b981"][score];
 
+  // ── Render ───────────────────────────────────────────────────────
   return (
     <div
       className="min-h-screen flex items-center justify-center p-4"
@@ -117,26 +169,50 @@ export default function UpdatePasswordPage() {
               border: "1px solid rgba(16,185,129,0.25)",
             }}
           >
-            {done ? (
+            {pageState === "done" ? (
               <CheckCircle size={28} className="text-emerald-400" />
+            ) : pageState === "error" ? (
+              <AlertCircle size={28} className="text-red-400" />
             ) : (
               <ShieldCheck size={28} className="text-emerald-400" />
             )}
           </div>
           <h1 className="text-white font-black text-2xl">
-            {done ? "Password Updated!" : "Set New Password"}
+            {pageState === "done"
+              ? "Password Updated!"
+              : pageState === "error"
+                ? "Link Invalid"
+                : "Set New Password"}
           </h1>
           <p className="text-slate-400 text-sm">
-            {done
+            {pageState === "done"
               ? "Redirecting you to sign in…"
-              : "Choose a strong password for your account"}
+              : pageState === "error"
+                ? "This link has expired or already been used"
+                : "Choose a strong password for your account"}
           </p>
         </div>
 
-        {/* Invalid / expired link */}
-        {sessionError && !sessionReady && (
+        {/* ── Loading ── */}
+        {pageState === "loading" && (
           <div
-            className="rounded-2xl p-6 text-center space-y-4"
+            className="rounded-2xl p-6"
+            style={{
+              background: "rgba(15,23,42,0.8)",
+              border: "1px solid rgba(255,255,255,0.07)",
+            }}
+          >
+            <div className="flex items-center justify-center gap-3 py-4">
+              <div className="w-5 h-5 border-2 border-emerald-500/30 border-t-emerald-400 rounded-full animate-spin" />
+              <p className="text-slate-400 text-sm">Verifying reset link…</p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Error ── */}
+        {pageState === "error" && (
+          <div
+            className="rounded-2xl p-6 space-y-4"
             style={{
               background: "rgba(15,23,42,0.8)",
               border: "1px solid rgba(255,255,255,0.07)",
@@ -149,9 +225,8 @@ export default function UpdatePasswordPage() {
                 border: "1px solid rgba(239,68,68,0.2)",
               }}
             >
-              <p className="text-red-400 text-sm leading-relaxed">
-                This reset link is invalid or has expired. Please request a new
-                one.
+              <p className="text-red-400 text-sm leading-relaxed text-center">
+                {errorMsg}
               </p>
             </div>
             <button
@@ -164,10 +239,10 @@ export default function UpdatePasswordPage() {
           </div>
         )}
 
-        {/* Success state */}
-        {done && (
+        {/* ── Done ── */}
+        {pageState === "done" && (
           <div
-            className="rounded-2xl p-6 text-center"
+            className="rounded-2xl p-6"
             style={{
               background: "rgba(15,23,42,0.8)",
               border: "1px solid rgba(255,255,255,0.07)",
@@ -180,15 +255,15 @@ export default function UpdatePasswordPage() {
                 border: "1px solid rgba(16,185,129,0.2)",
               }}
             >
-              <p className="text-emerald-300 text-sm leading-relaxed">
+              <p className="text-emerald-300 text-sm leading-relaxed text-center">
                 Your password has been changed. Taking you to sign in…
               </p>
             </div>
           </div>
         )}
 
-        {/* Form — shown when session is ready and not yet done */}
-        {sessionReady && !done && !sessionError && (
+        {/* ── Form ── */}
+        {pageState === "ready" && (
           <div
             className="rounded-2xl p-6 space-y-5"
             style={{
@@ -210,7 +285,7 @@ export default function UpdatePasswordPage() {
                   type={showPassword ? "text" : "password"}
                   placeholder="Min. 8 characters"
                   {...register("password")}
-                  disabled={loading}
+                  disabled={submitting}
                   className="w-full pl-9 pr-10 py-3 rounded-xl text-white text-sm bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors placeholder-slate-600 disabled:opacity-50"
                 />
                 <button
@@ -226,8 +301,6 @@ export default function UpdatePasswordPage() {
                   {errors.password.message}
                 </p>
               )}
-
-              {/* Strength meter */}
               {password.length > 0 && (
                 <div className="space-y-1 pt-1">
                   <div className="flex gap-1">
@@ -237,7 +310,7 @@ export default function UpdatePasswordPage() {
                         className="h-1 flex-1 rounded-full transition-all duration-300"
                         style={{
                           background:
-                            i < strengthScore
+                            i < score
                               ? strengthColor
                               : "rgba(255,255,255,0.08)",
                         }}
@@ -265,7 +338,7 @@ export default function UpdatePasswordPage() {
                   type={showConfirm ? "text" : "password"}
                   placeholder="Repeat your password"
                   {...register("confirmPassword")}
-                  disabled={loading}
+                  disabled={submitting}
                   className="w-full pl-9 pr-10 py-3 rounded-xl text-white text-sm bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 transition-colors placeholder-slate-600 disabled:opacity-50"
                 />
                 <button
@@ -286,11 +359,11 @@ export default function UpdatePasswordPage() {
             <button
               type="button"
               onClick={handleSubmit(onSubmit)}
-              disabled={loading}
+              disabled={submitting}
               className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
             >
-              {loading ? (
+              {submitting ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Updating…
@@ -299,22 +372,6 @@ export default function UpdatePasswordPage() {
                 "Update Password"
               )}
             </button>
-          </div>
-        )}
-
-        {/* Loading skeleton while waiting for session */}
-        {!sessionReady && !sessionError && !done && (
-          <div
-            className="rounded-2xl p-6 space-y-4"
-            style={{
-              background: "rgba(15,23,42,0.8)",
-              border: "1px solid rgba(255,255,255,0.07)",
-            }}
-          >
-            <div className="flex items-center justify-center gap-3 py-4">
-              <div className="w-5 h-5 border-2 border-emerald-500/30 border-t-emerald-400 rounded-full animate-spin" />
-              <p className="text-slate-400 text-sm">Verifying reset link…</p>
-            </div>
           </div>
         )}
       </div>
