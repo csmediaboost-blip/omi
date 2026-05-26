@@ -66,66 +66,132 @@ import {
 } from "@/lib/mining-service";
 
 // ─── ROI TABLE ────────────────────────────────────────────────────────────────
-// These are the EXACT period ROI percentages per plan.
-// Used everywhere profit is calculated — never shown as % to the user.
-// Only the resulting dollar amount is displayed.
-export const PLAN_ROI: Record<
-  string, // plan short_name key (lowercase, no spaces)
-  { hourly: number; daily: number; weekly: number; monthly: number }
-> = {
-  "foundation-node": {
-    hourly: 0.003, // 0.3%
-    daily: 0.02, // 2%
-    weekly: 0.12, // 12%
-    monthly: 0.45, // 45%
-  },
-  "rtx-4090-node": {
-    hourly: 0.005, // 0.5%
-    daily: 0.03, // 3%
-    weekly: 0.18, // 18%
-    monthly: 0.7, // 70%
-  },
-  "a100-gpu-node": {
-    hourly: 0.008, // 0.8%
-    daily: 0.05, // 5%
-    weekly: 0.35, // 35%
-    monthly: 1.2, // 120%
-  },
-  "h100-pcie-node": {
-    hourly: 0.012, // 1.2%
-    daily: 0.08, // 8%
-    weekly: 0.6, // 60%
-    monthly: 2.5, // 250%
-  },
+// Exact ROI rates per plan tier and period.
+// NEVER shown as % to users — only the resulting $ amount is displayed.
+// Keyed by tier_index (0–3) which is always present on every plan from DB.
+// Also keyed by every possible name/slug variant for maximum compatibility.
+
+type RoiRates = {
+  hourly: number;
+  daily: number;
+  weekly: number;
+  monthly: number;
 };
 
-// Fallback ROI for plans not in the table (uses old daily% approach)
-const FALLBACK_ROI = {
-  hourly: 0.003,
-  daily: 0.02,
-  weekly: 0.12,
-  monthly: 0.45,
+// Tier 0 = Foundation Node  (min $5)
+// Tier 1 = RTX 4090 Node    (min $50)
+// Tier 2 = A100 GPU Node    (min $250)
+// Tier 3 = H100 PCIe Node   (min $1,000)
+const TIER_ROI: RoiRates[] = [
+  { hourly: 0.003, daily: 0.02, weekly: 0.12, monthly: 0.45 }, // Tier 0 — Foundation
+  { hourly: 0.005, daily: 0.03, weekly: 0.18, monthly: 0.7 }, // Tier 1 — RTX 4090
+  { hourly: 0.008, daily: 0.05, weekly: 0.35, monthly: 1.2 }, // Tier 2 — A100
+  { hourly: 0.012, daily: 0.08, weekly: 0.6, monthly: 2.5 }, // Tier 3 — H100 PCIe
+];
+
+// Name → tier_index map — catches any slug/name variant the DB might use
+const NAME_TO_TIER: Record<string, number> = {
+  // Tier 0 variants
+  foundation: 0,
+  "foundation node": 0,
+  "foundation-node": 0,
+  foundationnode: 0,
+  t4: 0,
+  l4: 0,
+  entry: 0,
+  shared: 0,
+  // Tier 1 variants
+  rtx: 1,
+  "rtx 4090": 1,
+  "rtx-4090": 1,
+  rtx4090: 1,
+  "rtx 4090 node": 1,
+  "rtx-4090-node": 1,
+  rtx4090node: 1,
+  "4090": 1,
+  // Tier 2 variants
+  a100: 2,
+  "a100 gpu": 2,
+  "a100-gpu": 2,
+  a100gpu: 2,
+  "a100 gpu node": 2,
+  "a100-gpu-node": 2,
+  a100gpunode: 2,
+  "a100 node": 2,
+  // Tier 3 variants
+  h100: 3,
+  "h100 pcie": 3,
+  "h100-pcie": 3,
+  h100pcie: 3,
+  "h100 pcie node": 3,
+  "h100-pcie-node": 3,
+  h100pcienode: 3,
+  "h100 node": 3,
+  frontier: 3,
 };
 
-// Helper: get ROI rate for a plan + period
-function getPlanRoi(planSlug: string | undefined, period: string): number {
-  const slug = (planSlug ?? "").toLowerCase().replace(/\s+/g, "-");
-  const table = PLAN_ROI[slug] ?? FALLBACK_ROI;
-  return (table as Record<string, number>)[period] ?? table.daily;
+/**
+ * Resolve the correct tier index for a plan.
+ * Priority: tier_index field → name/slug lookup → price_min bracket.
+ */
+function resolveTier(plan: Plan): number {
+  // 1. Use tier_index if it's a valid 0–3 integer
+  if (
+    typeof plan.tier_index === "number" &&
+    plan.tier_index >= 0 &&
+    plan.tier_index <= 3
+  ) {
+    return plan.tier_index;
+  }
+
+  // 2. Try name / short_name lookup (normalise to lowercase, strip punctuation)
+  const normalise = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const candidates = [plan.short_name, plan.name, plan.gpu_model].filter(
+    Boolean,
+  );
+  for (const raw of candidates) {
+    const key = normalise(raw);
+    if (NAME_TO_TIER[key] !== undefined) return NAME_TO_TIER[key];
+    // also try stripping " node" suffix
+    const stripped = key.replace(/\s*node\s*$/, "").trim();
+    if (NAME_TO_TIER[stripped] !== undefined) return NAME_TO_TIER[stripped];
+  }
+
+  // 3. Fall back to price_min bracket
+  if (plan.price_min >= 1000) return 3;
+  if (plan.price_min >= 250) return 2;
+  if (plan.price_min >= 50) return 1;
+  return 0;
 }
 
-// Helper: compute profit amount from capital + plan + period
-function calcProfit(capital: number, planSlug: string, period: string): number {
-  return capital * getPlanRoi(planSlug, period);
+/** Get the ROI rate (decimal) for a plan + period. */
+function getPlanRoi(plan: Plan, period: string): number {
+  const tier = resolveTier(plan);
+  const rates = TIER_ROI[tier] ?? TIER_ROI[0];
+  return (rates as Record<string, number>)[period] ?? rates.daily;
+}
+
+/** Compute profit $ = capital × ROI rate for the given period. */
+function calcProfit(capital: number, plan: Plan, period: string): number {
+  return capital * getPlanRoi(plan, period);
 }
 
 // ─── DB SYNC HELPER ───────────────────────────────────────────────────────────
 // Call this once (e.g. from an admin page or on first load for admin users)
 // to push the new plan rates into the gpu_plans table.
 export async function syncPlanRatesToDB() {
+  // Matches by price_min bracket — works no matter what short_name is in the DB.
+  // Also writes tier_index so the fast lookup path always works going forward.
   const updates = [
     {
-      short_name: "foundation-node",
+      price_min_match: 5,
+      tier_index: 0,
       price_min: 5,
       hourly_pct: 0.003,
       daily_pct: 0.02,
@@ -134,7 +200,8 @@ export async function syncPlanRatesToDB() {
       roi_tier_multiplier: 1.0,
     },
     {
-      short_name: "rtx-4090-node",
+      price_min_match: 50,
+      tier_index: 1,
       price_min: 50,
       hourly_pct: 0.005,
       daily_pct: 0.03,
@@ -143,7 +210,8 @@ export async function syncPlanRatesToDB() {
       roi_tier_multiplier: 1.0,
     },
     {
-      short_name: "a100-gpu-node",
+      price_min_match: 250,
+      tier_index: 2,
       price_min: 250,
       hourly_pct: 0.008,
       daily_pct: 0.05,
@@ -152,7 +220,8 @@ export async function syncPlanRatesToDB() {
       roi_tier_multiplier: 1.0,
     },
     {
-      short_name: "h100-pcie-node",
+      price_min_match: 1000,
+      tier_index: 3,
       price_min: 1000,
       hourly_pct: 0.012,
       daily_pct: 0.08,
@@ -161,19 +230,11 @@ export async function syncPlanRatesToDB() {
       roi_tier_multiplier: 1.0,
     },
   ];
-
-  for (const u of updates) {
+  for (const { price_min_match, ...fields } of updates) {
     await supabase
       .from("gpu_plans")
-      .update({
-        price_min: u.price_min,
-        hourly_pct: u.hourly_pct,
-        daily_pct: u.daily_pct,
-        base_daily_profit_min: u.base_daily_profit_min,
-        base_daily_profit_max: u.base_daily_profit_max,
-        roi_tier_multiplier: u.roi_tier_multiplier,
-      })
-      .eq("short_name", u.short_name);
+      .update(fields)
+      .eq("price_min", price_min_match);
   }
 }
 
@@ -425,17 +486,26 @@ function useLiveMiningEarnings(
   const finalProfit = alloc.final_profit ?? alloc.total_earned ?? 0;
 
   const period = alloc.mining_period ?? "daily";
-  const planSlug = plan?.short_name ?? "";
+  // plan may be undefined for a brief moment — use a safe fallback Plan shell
+  const safePlan =
+    plan ??
+    ({
+      tier_index: 0,
+      price_min: 5,
+      short_name: "",
+      name: "",
+      gpu_model: "",
+    } as unknown as Plan);
 
   // Total profit for this session = capital × exact ROI rate for this period
-  const totalPeriodProfit = calcProfit(alloc.amount_invested, planSlug, period);
+  const totalPeriodProfit = calcProfit(alloc.amount_invested, safePlan, period);
   const periodMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
 
   // Per-second tick rate
   const flexPerSec = totalPeriodProfit / (periodMs / 1000);
   // Contract uses daily rate ticking every second
   const contractDailyProfit =
-    alloc.amount_invested * getPlanRoi(planSlug, "daily");
+    alloc.amount_invested * getPlanRoi(safePlan, "daily");
   const contractPerSec = contractDailyProfit / 86400;
   const perSec = isFlexible ? flexPerSec : contractPerSec;
 
@@ -1331,8 +1401,16 @@ function PortfolioCard({
 
   // Per-second rate for display (using exact ROI)
   const period = alloc.mining_period ?? "daily";
-  const planSlug = plan?.short_name ?? "";
-  const totalProfit = calcProfit(alloc.amount_invested, planSlug, period);
+  const safePlan2 =
+    plan ??
+    ({
+      tier_index: 0,
+      price_min: 5,
+      short_name: "",
+      name: "",
+      gpu_model: "",
+    } as unknown as Plan);
+  const totalProfit = calcProfit(alloc.amount_invested, safePlan2, period);
   const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
   const perSec = miningDone ? 0 : totalProfit / (pMs / 1000);
   const perHour = perSec * 3600;
@@ -1940,13 +2018,11 @@ function PlanCard({
   // ── Estimated profit — single amount, no range, no % shown ────────────────
   // Flexible: capital × exact ROI for selected period
   const flexEstProfit =
-    !amountErr && amount > 0
-      ? calcProfit(amount, plan.short_name, minPeriod.key)
-      : 0;
+    !amountErr && amount > 0 ? calcProfit(amount, plan, minPeriod.key) : 0;
 
   // Contract: use monthly ROI as the base, scale by contract months
   // 6m = 6 × monthly rate, 12m = 12 × monthly rate, 24m = 24 × monthly rate
-  const monthlyRate = getPlanRoi(plan.short_name, "monthly");
+  const monthlyRate = getPlanRoi(plan, "monthly");
   const contractMonths = term.months;
   const contractEstProfit =
     !amountErr && amount > 0 ? amount * monthlyRate * contractMonths : 0;
@@ -2775,7 +2851,7 @@ export default function GPUPlansPage() {
       )) {
         const plan = plans.find((p) => p.id === alloc.plan_id);
         const period = alloc.mining_period ?? "daily";
-        const planSlug = plan?.short_name ?? "";
+        // planSlug removed — use safePlan object directly
         const base = alloc.total_earned ?? 0;
         const elapsed = Math.max(
           0,
@@ -2783,11 +2859,21 @@ export default function GPUPlansPage() {
             1000,
         );
 
+        // planObj is the resolved Plan — calcProfit uses tier_index for correct ROI
+        const planObj =
+          plan ??
+          ({
+            tier_index: 0,
+            price_min: 5,
+            short_name: "",
+            name: "",
+            gpu_model: "",
+          } as unknown as Plan);
         let newEarned: number;
         if (alloc.payment_model === "flexible") {
           const totalProfit = calcProfit(
             alloc.amount_invested,
-            planSlug,
+            planObj,
             period,
           );
           const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
@@ -2799,7 +2885,7 @@ export default function GPUPlansPage() {
           // Contract: daily ROI per second
           const dailyProfit = calcProfit(
             alloc.amount_invested,
-            planSlug,
+            planObj,
             "daily",
           );
           newEarned = base + (dailyProfit / 86400) * elapsed;
@@ -2845,17 +2931,16 @@ export default function GPUPlansPage() {
   ) {
     const plan = plans.find((p) => p.id === planId);
     if (!plan) return;
-    const planSlug = plan.short_name;
 
     if (paymentModel === "contract") {
-      const monthlyRoi = getPlanRoi(planSlug, "monthly");
+      const monthlyRoi = getPlanRoi(plan, "monthly");
       const contractMonths = contractTerm?.months ?? 6;
       const estProfit = amount * monthlyRoi * contractMonths;
       const ps = new URLSearchParams({
         node: planId,
         name: plan.name,
         price: amount.toString(),
-        daily: calcProfit(amount, planSlug, "daily").toFixed(6),
+        daily: calcProfit(amount, plan, "daily").toFixed(6),
         itype,
         gpu: plan.gpu_model,
         vram: plan.vram,
@@ -2873,7 +2958,7 @@ export default function GPUPlansPage() {
       router.push(`/dashboard/checkout?${ps.toString()}`);
     } else {
       const period = miningPeriod ?? "daily";
-      const estProfit = calcProfit(amount, planSlug, period);
+      const estProfit = calcProfit(amount, plan, period);
       const ps = new URLSearchParams({
         node: planId,
         name: plan.name,

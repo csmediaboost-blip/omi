@@ -163,7 +163,6 @@ const COUNTRIES = [
 
 // ─────────────────────────────────────────────────────────────────────────────
 // withTimeout — wraps any promise with a hard deadline.
-// clearTimeout always fires on success so the handle is never leaked.
 // ─────────────────────────────────────────────────────────────────────────────
 function withTimeout<T>(
   promise: Promise<T>,
@@ -191,8 +190,7 @@ function withTimeout<T>(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compressImage — shrinks large camera photos before upload.
-// Mobile camera shots are 3–8 MB. This brings them to ~150–300 KB,
-// making uploads complete in seconds even on weak 4G.
+// Mobile camera shots are 3–8 MB → compressed to ~150–300 KB.
 // ─────────────────────────────────────────────────────────────────────────────
 function compressImage(file: File, maxWidth: number): Promise<File> {
   return new Promise((resolve, reject) => {
@@ -238,21 +236,14 @@ function compressImage(file: File, maxWidth: number): Promise<File> {
 // uploadViaXHR — uploads a file to a pre-signed URL using XMLHttpRequest.
 //
 // WHY XHR AND NOT FETCH:
-// supabase.storage.upload() and createSignedUploadUrl() both use the browser's
-// fetch() API internally. On Android Chrome and iOS Safari, fetch() calls to
-// Supabase Storage endpoints stall indefinitely — they never resolve or reject,
-// so even Promise.race timeouts never fire. This causes the infinite spinner.
+// supabase.storage.upload() and fetch() to Supabase Storage endpoints stall
+// indefinitely on Android Chrome / iOS Safari — they never resolve or reject,
+// so even Promise.race timeouts never fire.
 //
 // XMLHttpRequest is rock-solid on ALL mobile browsers:
-// - .timeout fires natively — no silent stalls
-// - .upload.onprogress gives real percentage (fetch has no upload progress API)
+// - .timeout fires natively (no silent stalls)
+// - .upload.onprogress gives real upload percentage
 // - .onload / .onerror / .ontimeout always fire
-//
-// WHY THE SIGNED URL COMES FROM /api/kyc-upload-url:
-// createSignedUploadUrl() also uses fetch() internally on the client, so
-// calling it from the browser has the same stall problem. We generate the URL
-// server-side (Node.js fetch is reliable), then XHR uploads directly to
-// Supabase Storage using that URL — completely avoiding the mobile fetch bug.
 // ─────────────────────────────────────────────────────────────────────────────
 function uploadViaXHR(
   signedUrl: string,
@@ -266,19 +257,14 @@ function uploadViaXHR(
     xhr.timeout = timeoutMs;
 
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable && onProgress) {
+      if (e.lengthComputable && onProgress)
         onProgress(Math.round((e.loaded / e.total) * 100));
-      }
     };
 
-    xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        resolve();
-      } else {
-        reject(new Error(`Upload failed (${xhr.status}) — please try again`));
-      }
-    };
-
+    xhr.onload = () =>
+      xhr.status >= 200 && xhr.status < 300
+        ? resolve()
+        : reject(new Error(`Upload failed (${xhr.status}) — please try again`));
     xhr.onerror = () =>
       reject(new Error("Network error during upload — check your connection"));
     xhr.ontimeout = () =>
@@ -318,23 +304,22 @@ async function uploadFileForKYC(
   };
   const contentType = file.type || mimeMap[ext] || "application/octet-stream";
 
-  // ── Step 1: Compress images ────────────────────────────────────────────
+  // Step 1: Compress
   let fileToUpload = file;
   if (file.type.startsWith("image/") && file.size > 400 * 1024) {
     try {
       onProgress?.(2);
       fileToUpload = await compressImage(file, 1200);
       console.log(
-        `[KYC] Compressed ${(file.size / 1024).toFixed(0)} KB → ${(fileToUpload.size / 1024).toFixed(0)} KB`,
+        `[KYC] Compressed ${(file.size / 1024).toFixed(0)}KB → ${(fileToUpload.size / 1024).toFixed(0)}KB`,
       );
     } catch {
       fileToUpload = file;
     }
   }
 
-  // ── Step 2: Get signed URL from server (avoids mobile fetch stall) ────
+  // Step 2: Get signed URL from server (avoids mobile fetch stall)
   onProgress?.(5);
-
   const urlRes = await withTimeout(
     fetch("/api/kyc-upload-url", {
       method: "POST",
@@ -359,24 +344,63 @@ async function uploadFileForKYC(
   };
   if (!signedUrl) throw new Error("No signed URL returned from server");
 
-  // ── Step 3: Upload via XHR (real progress, guaranteed mobile timeout) ─
+  // Step 3: Upload via XHR (real progress, guaranteed mobile timeout)
   onProgress?.(8);
-
   await uploadViaXHR(
     signedUrl,
     fileToUpload,
     contentType,
     120_000,
-    (pct) => onProgress?.(8 + Math.round(pct * 0.9)), // map 0–100 → 8–98
+    (pct) => onProgress?.(8 + Math.round(pct * 0.9)), // 8–98%
   );
-
   onProgress?.(100);
 
-  // ── Step 4: Return public URL ──────────────────────────────────────────
   const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(path);
   return urlData?.publicUrl ?? "";
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// submitKycToServer — sends KYC data to /api/kyc-submit server-side route.
+//
+// WHY SERVER-SIDE:
+// Mobile browser fetch() to Supabase PostgREST (the DB API) stalls
+// indefinitely — same bug as Storage. Running DB writes on the server
+// (Node.js fetch) completely eliminates the "Saving KYC record timed out"
+// error on mobile. The server uses the service role key so it bypasses RLS
+// and never stalls on policy evaluation.
+// ─────────────────────────────────────────────────────────────────────────────
+async function submitKycToServer(payload: {
+  documentType: string;
+  documentNumber: string;
+  documentUrl: string;
+  fullName: string;
+  country: string;
+  phone: string;
+  address: string;
+  city: string;
+  gender: string;
+  dateOfBirth: string;
+}): Promise<void> {
+  const res = await withTimeout(
+    fetch("/api/kyc-submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      credentials: "include",
+    }),
+    30_000,
+    "Saving KYC record",
+  );
+
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody?.error ?? `Server error (${res.status})`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Component
+// ─────────────────────────────────────────────────────────────────────────────
 export default function VerificationPage() {
   const router = useRouter();
   const mountedRef = useRef(true);
@@ -520,6 +544,21 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // submitIdentity
+  //
+  // ALL network calls are now server-side:
+  // - /api/kyc-upload-url  → generates signed URL (no mobile fetch stall)
+  // - XHR                  → uploads file (guaranteed timeout on mobile)
+  // - /api/kyc-submit      → saves DB records (no mobile fetch stall)
+  //
+  // The mobile browser only does:
+  //   fetch("/api/kyc-upload-url") — to our own Next.js server (fast, no stall)
+  //   XHR PUT to signed URL        — XHR is reliable on mobile
+  //   fetch("/api/kyc-submit")     — to our own Next.js server (fast, no stall)
+  //
+  // Calls to Supabase endpoints directly from mobile browser are eliminated.
+  // ─────────────────────────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -569,8 +608,7 @@ export default function VerificationPage() {
     setUploadPct(0);
     setUploadProgress("");
 
-    // Nuclear fallback — guarantees spinner stops within 140s even if every
-    // internal timer is suppressed by mobile browser background throttle.
+    // Nuclear fallback — guarantees spinner stops within 150s no matter what
     const nuclearHandle = setTimeout(() => {
       if (mountedRef.current) {
         setSaving(false);
@@ -581,7 +619,7 @@ export default function VerificationPage() {
           false,
         );
       }
-    }, 140_000);
+    }, 150_000);
 
     try {
       const uid = profile.id;
@@ -589,6 +627,7 @@ export default function VerificationPage() {
       const ext = idFile.name.split(".").pop() || "jpg";
       const path = `kyc/${uid}/doc-${ts}.${ext}`;
 
+      // ── Step 1: Upload file (server signed URL + XHR) ─────────────────
       setUploadProgress(
         `Uploading ${DOC_TYPES[idType]?.label}… (${(idFile.size / 1024).toFixed(0)} KB)`,
       );
@@ -600,53 +639,22 @@ export default function VerificationPage() {
         }
       });
 
+      // ── Step 2: Save DB records via server API (no mobile fetch stall) ─
       setUploadProgress("Saving your details…");
       setUploadPct(0);
 
-      const { error: docErr } = await withTimeout(
-        supabase.from("kyc_documents").insert({
-          user_id: uid,
-          document_type: idType,
-          document_number: idNumber.trim(),
-          document_url: docUrl || null,
-          full_name: idFullName.trim(),
-          country: idCountry,
-          phone: idPhone.trim(),
-          address: idAddress.trim(),
-          city: idCity.trim(),
-          gender: idGender,
-          date_of_birth: idDob,
-          status: "pending",
-        }),
-        15_000,
-        "Saving KYC record",
-      );
-
-      if (
-        docErr &&
-        docErr.code !== "42P01" &&
-        !docErr.message?.includes("does not exist")
-      )
-        throw new Error(`Could not save record: ${docErr.message}`);
-
-      const { error: updErr } = await withTimeout(
-        supabase
-          .from("users")
-          .update({
-            full_name: idFullName.trim(),
-            kyc_full_name: idFullName.trim(),
-            kyc_status: "pending",
-            phone: idPhone.trim(),
-            phone_verified: true,
-            country: idCountry,
-          })
-          .eq("id", uid),
-        15_000,
-        "Updating profile",
-      );
-
-      if (updErr)
-        throw new Error(`Could not update profile: ${updErr.message}`);
+      await submitKycToServer({
+        documentType: idType,
+        documentNumber: idNumber.trim(),
+        documentUrl: docUrl,
+        fullName: idFullName.trim(),
+        country: idCountry,
+        phone: idPhone.trim(),
+        address: idAddress.trim(),
+        city: idCity.trim(),
+        gender: idGender,
+        dateOfBirth: idDob,
+      });
 
       setUploadProgress("");
       showToast("Identity submitted — pending review within 24–48 hrs ✓");
@@ -696,6 +704,7 @@ export default function VerificationPage() {
     }
   }
 
+  // ── Loading / error states ───────────────────────────────────────────────
   if (loading)
     return (
       <div className="flex min-h-screen bg-slate-950">
@@ -705,9 +714,7 @@ export default function VerificationPage() {
             <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
             <p className="text-slate-400 text-sm">Loading your profile…</p>
             <button
-              onClick={() => {
-                load();
-              }}
+              onClick={() => load()}
               className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold px-4 py-2 rounded-lg transition-colors"
             >
               Tap to retry
@@ -780,6 +787,7 @@ export default function VerificationPage() {
         )}
 
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-8 pb-28 space-y-6">
+          {/* Header */}
           <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/dashboard")}
@@ -935,6 +943,7 @@ export default function VerificationPage() {
                     </p>
                   </div>
 
+                  {/* Personal Information */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Personal Information
@@ -1039,6 +1048,7 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
+                  {/* Identity Document */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Identity Document
