@@ -1,91 +1,152 @@
 "use client";
 // app/admin/payment-config/page.tsx
-// ROOT CAUSE FIX for duplicate key error:
-// 1. The anon Supabase client CANNOT read payment_config due to RLS
-//    → configs state stays empty → existingKeys set is empty
-//    → handleAddTemplate thinks all keys are new → tries INSERT → duplicate key constraint error
-// FIX: All reads AND writes now go through /api/admin/payment-config
-//    which uses the service role key and bypasses RLS entirely
+// Modern white admin UI — all reads/writes via /api/admin/payment-config (service role)
 
-import { useEffect, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/spinner";
+import { useEffect, useState, useCallback } from "react";
 import { toast } from "sonner";
-import { Edit, Save, Trash2, Plus, Eye, EyeOff, RefreshCw } from "lucide-react";
+import {
+  Eye,
+  EyeOff,
+  Save,
+  Plus,
+  Trash2,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Loader2,
+  Zap,
+  Shield,
+  Wallet,
+  Settings2,
+  KeyRound,
+  CircleDot,
+} from "lucide-react";
 
-interface PaymentConfig {
+interface ConfigRow {
   id: number;
   key: string;
   value: string;
-  updated_at: string;
+  created_at?: string;
 }
 
-const GATEWAY_TEMPLATES: Record<
-  string,
-  { label: string; keys: { key: string; placeholder: string }[] }
-> = {
-  stripe: {
-    label: "Stripe",
-    keys: [
-      { key: "stripe_public_key", placeholder: "pk_live_..." },
-      { key: "stripe_secret_key", placeholder: "sk_live_..." },
-    ],
-  },
-  korapay: {
+const GATEWAYS = [
+  {
+    id: "korapay",
     label: "KoraPay",
+    description: "African payment gateway",
+    icon: Zap,
+    accent: "#f97316",
+    bg: "#fff7ed",
+    border: "#fed7aa",
     keys: [
-      { key: "korapay_public_key", placeholder: "pk_..." },
-      { key: "korapay_secret_key", placeholder: "sk_..." },
+      {
+        key: "korapay_secret_key",
+        label: "Secret Key",
+        placeholder: "sk_live_...",
+        sensitive: true,
+      },
+      {
+        key: "korapay_public_key",
+        label: "Public Key",
+        placeholder: "pk_live_...",
+      },
+      {
+        key: "korapay_payment_link",
+        label: "Payment Link",
+        placeholder: "https://pay.korapay.com/...",
+      },
     ],
   },
-  moonpay: {
-    label: "MoonPay",
+  {
+    id: "stripe",
+    label: "Stripe",
+    description: "Global card payments",
+    icon: Shield,
+    accent: "#6366f1",
+    bg: "#eef2ff",
+    border: "#c7d2fe",
     keys: [
-      { key: "moonpay_api_key", placeholder: "pk_live_..." },
-      { key: "moonpay_secret_key", placeholder: "sk_live_..." },
+      {
+        key: "stripe_secret_key",
+        label: "Secret Key",
+        placeholder: "sk_live_...",
+        sensitive: true,
+      },
+      {
+        key: "stripe_public_key",
+        label: "Public Key",
+        placeholder: "pk_live_...",
+      },
     ],
   },
-  crypto_wallets: {
+  {
+    id: "crypto",
     label: "Crypto Wallets",
+    description: "USDT, BTC addresses",
+    icon: Wallet,
+    accent: "#10b981",
+    bg: "#ecfdf5",
+    border: "#a7f3d0",
     keys: [
-      { key: "crypto_wallet_btc", placeholder: "Bitcoin address..." },
       {
         key: "crypto_wallet_usdt_trc20",
-        placeholder: "USDT TRC-20 address...",
+        label: "USDT TRC-20",
+        placeholder: "T...",
+        sensitive: true,
       },
       {
         key: "crypto_wallet_usdt_erc20",
-        placeholder: "USDT ERC-20 address...",
+        label: "USDT ERC-20",
+        placeholder: "0x...",
+        sensitive: true,
+      },
+      {
+        key: "crypto_wallet_btc",
+        label: "Bitcoin",
+        placeholder: "bc1...",
+        sensitive: true,
+      },
+      {
+        key: "crypto_network_label",
+        label: "Network Label",
+        placeholder: "TRC-20 (TRON)",
+      },
+      {
+        key: "crypto_qr_image_url",
+        label: "QR Image URL",
+        placeholder: "https://...",
+      },
+      { key: "crypto_discount_percent", label: "Discount %", placeholder: "5" },
+    ],
+  },
+  {
+    id: "general",
+    label: "General",
+    description: "Platform settings",
+    icon: Settings2,
+    accent: "#64748b",
+    bg: "#f8fafc",
+    border: "#e2e8f0",
+    keys: [
+      {
+        key: "payments_enabled",
+        label: "Payments Enabled",
+        placeholder: "true",
+      },
+      {
+        key: "maintenance_mode",
+        label: "Maintenance Mode",
+        placeholder: "false",
       },
     ],
   },
-  general: {
-    label: "General Settings",
-    keys: [
-      { key: "crypto_discount_percent", placeholder: "e.g. 5" },
-      { key: "payments_enabled", placeholder: "true / false" },
-    ],
-  },
-};
+];
 
-// ── All API calls go through the admin route (service role) ──────────────────
 async function adminApi(body: object) {
   const res = await fetch("/api/admin/payment-config", {
     method: "POST",
@@ -95,619 +156,561 @@ async function adminApi(body: object) {
   return res.json();
 }
 
-export default function PaymentConfigPage() {
-  const [configs, setConfigs] = useState<PaymentConfig[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [editingConfig, setEditingConfig] = useState<PaymentConfig | null>(
-    null,
+function CopyBtn({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+      className="p-1.5 rounded-md hover:bg-gray-100 transition-colors text-gray-400 hover:text-gray-600"
+    >
+      {copied ? (
+        <Check size={12} className="text-emerald-500" />
+      ) : (
+        <Copy size={12} />
+      )}
+    </button>
   );
-  const [editValue, setEditValue] = useState("");
+}
+
+function KeyField({
+  keyName,
+  label,
+  placeholder,
+  sensitive = false,
+  row,
+  onSaved,
+  onDeleted,
+}: {
+  keyName: string;
+  label: string;
+  placeholder: string;
+  sensitive?: boolean;
+  row?: ConfigRow;
+  onSaved: () => void;
+  onDeleted: () => void;
+}) {
+  const [val, setVal] = useState(row?.value ?? "");
+  const [revealed, setRevealed] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [revealedKeys, setRevealedKeys] = useState<Set<number>>(new Set());
-
-  const [addOpen, setAddOpen] = useState(false);
-  const [newKey, setNewKey] = useState("");
-  const [newValue, setNewValue] = useState("");
-  const [addingGateway, setAddingGateway] = useState(false);
-  const [selectedTemplate, setSelectedTemplate] = useState<string>("");
-  const [templateValues, setTemplateValues] = useState<Record<string, string>>(
-    {},
-  );
-
-  const [deleteTarget, setDeleteTarget] = useState<PaymentConfig | null>(null);
+  const [flash, setFlash] = useState<"saved" | "error" | null>(null);
+  const [confirmDel, setConfirmDel] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  useEffect(() => {
-    fetchConfigs();
-  }, []);
-
-  // FIXED: reads via admin API (service role) — not anon client
-  const fetchConfigs = async () => {
-    try {
-      setLoading(true);
-      const res = await fetch("/api/admin/payment-config");
-      const data = await res.json();
-      if (!res.ok) {
-        toast.error("Failed to fetch: " + (data.error || "Unknown error"));
-        return;
-      }
-      setConfigs(Array.isArray(data) ? data : []);
-    } catch (error) {
-      toast.error("An error occurred");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editingConfig) return;
-    try {
-      setSaving(true);
-      const result = await adminApi({
-        action: "update",
-        id: editingConfig.id,
-        value: editValue,
-      });
-      if (result.error) {
-        toast.error("Failed to update: " + result.error);
-        return;
-      }
-      toast.success("Updated successfully");
-      setEditingConfig(null);
-      setEditValue("");
-      fetchConfigs();
-    } catch {
-      toast.error("An error occurred");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleAddSingle = async () => {
-    if (!newKey.trim()) {
-      toast.error("Key is required");
-      return;
-    }
-    const exists = configs.find((c) => c.key === newKey.trim());
-    if (exists) {
-      toast.error(
-        "Key already exists — use the Edit button to change its value.",
-      );
-      return;
-    }
-    try {
-      setAddingGateway(true);
-      const result = await adminApi({
-        action: "insert",
-        key: newKey.trim(),
-        value: newValue.trim(),
-      });
-      if (result.error) {
-        toast.error("Failed to add: " + result.error);
-        return;
-      }
-      toast.success("Configuration added");
-      setNewKey("");
-      setNewValue("");
-      setAddOpen(false);
-      fetchConfigs();
-    } catch {
-      toast.error("Failed to add");
-    } finally {
-      setAddingGateway(false);
-    }
-  };
-
-  // FIXED: uses upsert_many which does UPDATE for existing keys, INSERT for new ones
-  // This replaces the broken INSERT-only logic that caused the duplicate key error
-  const handleAddTemplate = async () => {
-    if (!selectedTemplate) return;
-    const tpl = GATEWAY_TEMPLATES[selectedTemplate];
-    try {
-      setAddingGateway(true);
-      const result = await adminApi({
-        action: "upsert_many",
-        keys: tpl.keys.map((k) => ({
-          key: k.key,
-          value: templateValues[k.key] || "",
-        })),
-      });
-      if (result.error) {
-        toast.error("Failed: " + result.error);
-        return;
-      }
-      toast.success(`${tpl.label} gateway configured`);
-      setSelectedTemplate("");
-      setTemplateValues({});
-      setAddOpen(false);
-      fetchConfigs();
-    } catch {
-      toast.error("Failed to configure gateway");
-    } finally {
-      setAddingGateway(false);
-    }
-  };
-
-  const handleDelete = async () => {
-    if (!deleteTarget) return;
-    try {
-      setDeleting(true);
-      const result = await adminApi({ action: "delete", id: deleteTarget.id });
-      if (result.error) {
-        toast.error("Delete failed: " + result.error);
-        return;
-      }
-      toast.success(`"${deleteTarget.key}" removed`);
-      setDeleteTarget(null);
-      fetchConfigs();
-    } catch {
-      toast.error("Delete failed");
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const toggleReveal = (id: number) => {
-    setRevealedKeys((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  };
-
-  const isSensitive = (key: string) =>
-    key.toLowerCase().includes("secret") ||
-    key.toLowerCase().includes("key") ||
-    key.toLowerCase().includes("wallet") ||
-    key.toLowerCase().includes("address");
-
-  const maskValue = (value: string, id: number, key: string) => {
-    if (!value || value === "EMPTY" || value === "")
-      return <span className="text-slate-400 italic">EMPTY</span>;
-    if (!isSensitive(key) || revealedKeys.has(id))
-      return <span className="font-mono text-xs">{value}</span>;
-    const masked =
-      value.length <= 8
-        ? "•".repeat(value.length)
-        : value.slice(0, 4) +
-          "•".repeat(Math.max(8, value.length - 8)) +
-          value.slice(-4);
-    return <span className="font-mono text-xs tracking-wider">{masked}</span>;
-  };
-
-  const filteredConfigs = configs.filter(
-    (c) =>
-      c.key?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.value?.toLowerCase().includes(searchTerm.toLowerCase()),
+  const configured = !!(
+    row?.value &&
+    row.value !== "EMPTY" &&
+    row.value !== ""
   );
+  const dirty = val !== (row?.value ?? "");
 
-  const groupOf = (key: string) => {
-    for (const [, tpl] of Object.entries(GATEWAY_TEMPLATES)) {
-      if (tpl.keys.some((k) => k.key === key)) return tpl.label;
+  const save = async () => {
+    if (!dirty || !val.trim()) return;
+    setSaving(true);
+    const res = await adminApi(
+      row
+        ? { action: "update", id: row.id, value: val.trim() }
+        : { action: "insert", key: keyName, value: val.trim() },
+    );
+    setSaving(false);
+    if (res.error) {
+      setFlash("error");
+      toast.error("Save failed: " + res.error);
+    } else {
+      setFlash("saved");
+      onSaved();
+      setTimeout(() => setFlash(null), 3000);
     }
-    return "Other";
   };
+
+  const del = async () => {
+    if (!row) return;
+    setDeleting(true);
+    await adminApi({ action: "delete", id: row.id });
+    setDeleting(false);
+    setConfirmDel(false);
+    setVal("");
+    onDeleted();
+  };
+
+  const maskedDisplay = () => {
+    if (!row?.value || !configured) return null;
+    if (!sensitive || revealed) return row.value;
+    return row.value.slice(0, 6) + "••••••••••••" + row.value.slice(-4);
+  };
+
+  const display = maskedDisplay();
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">
-            Payment Configuration
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            Manage payment gateway credentials and crypto wallet settings
-          </p>
+    <div className="py-4 border-b border-gray-100 last:border-0 group">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-gray-800">{label}</span>
+          {configured && (
+            <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
+              <CircleDot
+                size={8}
+                className="fill-emerald-500 text-emerald-500"
+              />{" "}
+              SET
+            </span>
+          )}
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={fetchConfigs}>
-            <RefreshCw className="h-4 w-4 mr-1" /> Refresh
-          </Button>
-
-          <Dialog open={addOpen} onOpenChange={setAddOpen}>
-            <DialogTrigger asChild>
-              <Button size="sm">
-                <Plus className="h-4 w-4 mr-1" /> Add Gateway / Key
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="max-w-lg">
-              <DialogHeader>
-                <DialogTitle>Add Payment Configuration</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div>
-                  <label className="text-sm font-medium block mb-2">
-                    Quick Add Gateway
-                  </label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {Object.entries(GATEWAY_TEMPLATES).map(([k, tpl]) => (
-                      <button
-                        key={k}
-                        onClick={() => {
-                          setSelectedTemplate(k === selectedTemplate ? "" : k);
-                          setTemplateValues({});
-                        }}
-                        className={`px-3 py-2 rounded-lg border text-sm font-medium transition-all ${selectedTemplate === k ? "border-primary bg-primary/10 text-primary" : "border-border hover:border-primary/50"}`}
-                      >
-                        {tpl.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {selectedTemplate && (
-                  <div className="space-y-3 border rounded-lg p-4 bg-slate-50">
-                    <p className="text-sm font-medium text-slate-700">
-                      {GATEWAY_TEMPLATES[selectedTemplate].label} Keys
-                    </p>
-                    {GATEWAY_TEMPLATES[selectedTemplate].keys.map((k) => {
-                      const existing = configs.find((c) => c.key === k.key);
-                      return (
-                        <div key={k.key}>
-                          <label className="text-xs font-mono text-slate-500 block mb-1">
-                            {k.key}
-                            {existing && (
-                              <span className="ml-2 text-amber-500">
-                                (will overwrite existing)
-                              </span>
-                            )}
-                          </label>
-                          <Input
-                            placeholder={k.placeholder}
-                            value={templateValues[k.key] || ""}
-                            onChange={(e) =>
-                              setTemplateValues((p) => ({
-                                ...p,
-                                [k.key]: e.target.value,
-                              }))
-                            }
-                            className="font-mono text-sm"
-                          />
-                        </div>
-                      );
-                    })}
-                    <Button
-                      onClick={handleAddTemplate}
-                      disabled={addingGateway}
-                      className="w-full gap-2"
-                    >
-                      {addingGateway ? (
-                        <>
-                          <Spinner className="h-4 w-4" /> Saving...
-                        </>
-                      ) : (
-                        <>
-                          <Save className="h-4 w-4" /> Save{" "}
-                          {GATEWAY_TEMPLATES[selectedTemplate].label}
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                )}
-
-                <div className="relative">
-                  <div className="absolute inset-0 flex items-center">
-                    <span className="w-full border-t" />
-                  </div>
-                  <div className="relative flex justify-center text-xs uppercase">
-                    <span className="bg-background px-2 text-muted-foreground">
-                      or add single key
-                    </span>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  <div>
-                    <label className="text-sm font-medium block mb-1">
-                      Key
-                    </label>
-                    <Input
-                      placeholder="e.g. my_custom_key"
-                      value={newKey}
-                      onChange={(e) => setNewKey(e.target.value)}
-                      className="font-mono"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium block mb-1">
-                      Value
-                    </label>
-                    <textarea
-                      value={newValue}
-                      onChange={(e) => setNewValue(e.target.value)}
-                      placeholder="Enter value..."
-                      className="w-full p-2 border rounded-md font-mono text-sm h-20 resize-none"
-                    />
-                  </div>
-                  <Button
-                    onClick={handleAddSingle}
-                    disabled={addingGateway || !newKey.trim()}
-                    className="gap-2"
-                  >
-                    {addingGateway ? (
-                      <>
-                        <Spinner className="h-4 w-4" /> Adding...
-                      </>
-                    ) : (
-                      <>
-                        <Plus className="h-4 w-4" /> Add Key
-                      </>
-                    )}
-                  </Button>
-                </div>
-              </div>
-            </DialogContent>
-          </Dialog>
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          {configured && <CopyBtn text={row!.value} />}
+          {configured && sensitive && (
+            <button
+              onClick={() => setRevealed((v) => !v)}
+              className="p-1.5 rounded-md hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
+            </button>
+          )}
+          {configured && !confirmDel && (
+            <button
+              onClick={() => setConfirmDel(true)}
+              className="p-1.5 rounded-md hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+          {confirmDel && (
+            <div className="flex items-center gap-1 ml-1">
+              <button
+                onClick={del}
+                disabled={deleting}
+                className="text-[10px] font-bold text-white bg-red-500 hover:bg-red-600 px-2 py-1 rounded transition-colors"
+              >
+                {deleting ? "..." : "Delete"}
+              </button>
+              <button
+                onClick={() => setConfirmDel(false)}
+                className="text-[10px] text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-100 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Configuration Settings</CardTitle>
-          <p className="text-sm text-muted-foreground mt-1">
-            {configs.length} keys configured across all gateways
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Input
-            placeholder="Search by key or value..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="max-w-sm"
-          />
+      {display && (
+        <div className="mb-2 px-3 py-2 bg-gray-50 rounded-lg border border-gray-200 font-mono text-xs text-gray-500 select-all">
+          {display}
+        </div>
+      )}
 
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <Spinner className="h-8 w-8" />
-            </div>
-          ) : filteredConfigs.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              {searchTerm
-                ? "No configurations found matching your search"
-                : "No configurations found. Add your first gateway above."}
-            </div>
+      <div className="flex gap-2">
+        <input
+          type={sensitive && !revealed ? "password" : "text"}
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && save()}
+          placeholder={configured ? "Type new value to update…" : placeholder}
+          className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg font-mono placeholder:font-sans placeholder:text-gray-400
+            focus:outline-none focus:ring-2 focus:ring-orange-400/20 focus:border-orange-400 transition-all"
+        />
+        <button
+          onClick={save}
+          disabled={!dirty || !val.trim() || saving}
+          className={`h-9 px-4 rounded-lg text-sm font-semibold flex items-center gap-1.5 transition-all
+            ${
+              dirty && val.trim()
+                ? "bg-gray-900 hover:bg-gray-800 text-white shadow-sm"
+                : "bg-gray-100 text-gray-400 cursor-not-allowed"
+            }`}
+        >
+          {saving ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : flash === "saved" ? (
+            <CheckCircle2 size={13} className="text-emerald-400" />
+          ) : flash === "error" ? (
+            <XCircle size={13} className="text-red-400" />
           ) : (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-8">#</TableHead>
-                    <TableHead>Key</TableHead>
-                    <TableHead>Gateway</TableHead>
-                    <TableHead>Value</TableHead>
-                    <TableHead>Last Updated</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredConfigs.map((config) => (
-                    <TableRow key={config.id}>
-                      <TableCell className="text-muted-foreground text-xs">
-                        {config.id}
-                      </TableCell>
-                      <TableCell className="font-medium font-mono text-sm">
-                        {config.key}
-                      </TableCell>
-                      <TableCell>
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
-                          {groupOf(config.key)}
-                        </span>
-                      </TableCell>
-                      <TableCell className="max-w-xs">
-                        <div className="flex items-center gap-2">
-                          {maskValue(config.value, config.id, config.key)}
-                          {isSensitive(config.key) &&
-                            config.value &&
-                            config.value !== "EMPTY" && (
-                              <button
-                                onClick={() => toggleReveal(config.id)}
-                                className="text-slate-400 hover:text-slate-600"
-                              >
-                                {revealedKeys.has(config.id) ? (
-                                  <EyeOff className="h-3 w-3" />
-                                ) : (
-                                  <Eye className="h-3 w-3" />
-                                )}
-                              </button>
-                            )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {config.updated_at
-                          ? new Date(config.updated_at).toLocaleDateString(
-                              "en-US",
-                              {
-                                month: "short",
-                                day: "numeric",
-                                year: "numeric",
-                              },
-                            )
-                          : "—"}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          <Dialog
-                            open={editingConfig?.id === config.id}
-                            onOpenChange={(open) => {
-                              if (!open) {
-                                setEditingConfig(null);
-                                setEditValue("");
-                              }
-                            }}
-                          >
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                  setEditingConfig(config);
-                                  setEditValue(config.value);
-                                }}
-                              >
-                                <Edit className="h-3 w-3 mr-1" /> Edit
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-lg">
-                              <DialogHeader>
-                                <DialogTitle>Edit Configuration</DialogTitle>
-                              </DialogHeader>
-                              <div className="space-y-4">
-                                <div>
-                                  <label className="text-sm font-medium">
-                                    Key
-                                  </label>
-                                  <div className="font-mono text-sm bg-slate-100 p-3 rounded mt-1">
-                                    {editingConfig?.key}
-                                  </div>
-                                </div>
-                                <div>
-                                  <label className="text-sm font-medium">
-                                    Value
-                                  </label>
-                                  <textarea
-                                    value={editValue}
-                                    onChange={(e) =>
-                                      setEditValue(e.target.value)
-                                    }
-                                    className="w-full mt-1 p-2 border rounded-md font-mono text-sm h-32 resize-none"
-                                    placeholder="Enter value..."
-                                  />
-                                </div>
-                                <div className="flex gap-2">
-                                  <Button
-                                    onClick={handleSaveEdit}
-                                    disabled={
-                                      saving ||
-                                      editValue === editingConfig?.value
-                                    }
-                                    className="gap-2"
-                                  >
-                                    {saving ? (
-                                      <>
-                                        <Spinner className="h-4 w-4" />{" "}
-                                        Saving...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Save className="h-4 w-4" /> Save
-                                        Changes
-                                      </>
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    onClick={() => {
-                                      setEditingConfig(null);
-                                      setEditValue("");
-                                    }}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            </DialogContent>
-                          </Dialog>
+            <Save size={13} />
+          )}
+          {saving ? "Saving" : flash === "saved" ? "Saved!" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
-                          <Dialog
-                            open={deleteTarget?.id === config.id}
-                            onOpenChange={(open) => {
-                              if (!open) setDeleteTarget(null);
-                            }}
-                          >
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="text-red-500 hover:text-red-700 hover:border-red-300"
-                                onClick={() => setDeleteTarget(config)}
-                              >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="max-w-sm">
-                              <DialogHeader>
-                                <DialogTitle>
-                                  Delete Configuration Key
-                                </DialogTitle>
-                              </DialogHeader>
-                              <div className="space-y-4">
-                                <p className="text-sm text-muted-foreground">
-                                  Are you sure you want to permanently delete{" "}
-                                  <span className="font-mono font-bold text-foreground">
-                                    "{deleteTarget?.key}"
-                                  </span>
-                                  ? This cannot be undone.
-                                </p>
-                                <div className="flex gap-2">
-                                  <Button
-                                    variant="destructive"
-                                    onClick={handleDelete}
-                                    disabled={deleting}
-                                    className="gap-2"
-                                  >
-                                    {deleting ? (
-                                      <>
-                                        <Spinner className="h-4 w-4" />{" "}
-                                        Deleting...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Trash2 className="h-4 w-4" /> Delete
-                                      </>
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    onClick={() => setDeleteTarget(null)}
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            </DialogContent>
-                          </Dialog>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+function GatewaySection({
+  gateway,
+  configs,
+  onRefresh,
+}: {
+  gateway: (typeof GATEWAYS)[0];
+  configs: ConfigRow[];
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(gateway.id === "korapay");
+  const Icon = gateway.icon;
+
+  const configured = gateway.keys.filter((k) => {
+    const r = configs.find((c) => c.key === k.key);
+    return r?.value && r.value !== "EMPTY" && r.value !== "";
+  }).length;
+  const total = gateway.keys.length;
+  const pct = Math.round((configured / total) * 100);
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200/80 shadow-sm overflow-hidden transition-all">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-4 px-6 py-5 hover:bg-gray-50/80 transition-colors text-left"
+      >
+        <div
+          className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 transition-all"
+          style={{
+            background: gateway.bg,
+            border: `1px solid ${gateway.border}`,
+          }}
+        >
+          <Icon size={18} style={{ color: gateway.accent }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="font-semibold text-gray-900 text-sm">
+              {gateway.label}
+            </span>
+            <span className="text-xs text-gray-400">{gateway.description}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden max-w-[120px]">
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{
+                  width: `${pct}%`,
+                  background:
+                    pct === 100
+                      ? "#10b981"
+                      : pct > 0
+                        ? gateway.accent
+                        : "#e5e7eb",
+                }}
+              />
+            </div>
+            <span className="text-xs text-gray-400">
+              {configured}/{total} keys
+            </span>
+            {pct === 100 && (
+              <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
+                ✓ Ready
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="text-gray-400 flex-shrink-0">
+          {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-6 pb-2 border-t border-gray-100">
+          {gateway.keys.map((k) => (
+            <KeyField
+              key={k.key}
+              keyName={k.key}
+              label={k.label}
+              placeholder={k.placeholder}
+              sensitive={k.sensitive}
+              row={configs.find((c) => c.key === k.key)}
+              onSaved={onRefresh}
+              onDeleted={onRefresh}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CustomKeysSection({
+  configs,
+  onRefresh,
+}: {
+  configs: ConfigRow[];
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [newKey, setNewKey] = useState("");
+  const [newVal, setNewVal] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [err, setErr] = useState("");
+
+  const knownKeys = GATEWAYS.flatMap((g) => g.keys.map((k) => k.key));
+  const customRows = configs.filter((c) => !knownKeys.includes(c.key));
+
+  const add = async () => {
+    if (!newKey.trim()) {
+      setErr("Key name required.");
+      return;
+    }
+    if (configs.find((c) => c.key === newKey.trim())) {
+      setErr("Key already exists.");
+      return;
+    }
+    setAdding(true);
+    setErr("");
+    const res = await adminApi({
+      action: "insert",
+      key: newKey.trim(),
+      value: newVal.trim(),
+    });
+    setAdding(false);
+    if (res.error) {
+      setErr(res.error);
+    } else {
+      setNewKey("");
+      setNewVal("");
+      onRefresh();
+      toast.success("Key added");
+    }
+  };
+
+  return (
+    <div className="bg-white rounded-2xl border border-gray-200/80 shadow-sm overflow-hidden">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-4 px-6 py-5 hover:bg-gray-50/80 transition-colors text-left"
+      >
+        <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-gray-50 border border-gray-200">
+          <KeyRound size={16} className="text-gray-500" />
+        </div>
+        <div className="flex-1">
+          <span className="font-semibold text-gray-900 text-sm">
+            Custom Keys
+          </span>
+          <span className="text-xs text-gray-400 ml-2">
+            {customRows.length} custom
+          </span>
+        </div>
+        {open ? (
+          <ChevronUp size={16} className="text-gray-400" />
+        ) : (
+          <ChevronDown size={16} className="text-gray-400" />
+        )}
+      </button>
+
+      {open && (
+        <div className="px-6 pb-5 border-t border-gray-100 pt-4 space-y-4">
+          {customRows.length > 0 && (
+            <div className="space-y-2">
+              {customRows.map((row) => (
+                <div
+                  key={row.id}
+                  className="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-xl border border-gray-200 group"
+                >
+                  <div>
+                    <p className="font-mono text-xs text-gray-700 font-medium">
+                      {row.key}
+                    </p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">
+                      {row.value ? row.value.slice(0, 8) + "••••" : "empty"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <CopyBtn text={row.value} />
+                    <button
+                      onClick={async () => {
+                        await adminApi({ action: "delete", id: row.id });
+                        onRefresh();
+                      }}
+                      className="p-1.5 rounded-md hover:bg-red-50 text-gray-300 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
-        </CardContent>
-      </Card>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        {Object.entries(GATEWAY_TEMPLATES).map(([gKey, tpl]) => {
-          const filled = tpl.keys.filter((k) => {
-            const cfg = configs.find((c) => c.key === k.key);
-            return (
-              cfg && cfg.value && cfg.value !== "EMPTY" && cfg.value !== ""
-            );
-          });
-          const complete = filled.length === tpl.keys.length;
-          const partial = filled.length > 0 && !complete;
-          return (
-            <Card
-              key={gKey}
-              className={`border-2 ${complete ? "border-green-200 bg-green-50" : partial ? "border-amber-200 bg-amber-50" : "border-slate-200"}`}
-            >
-              <CardContent className="pt-4 pb-4">
-                <p className="font-semibold text-sm">{tpl.label}</p>
-                <p
-                  className={`text-xs mt-1 ${complete ? "text-green-600" : partial ? "text-amber-600" : "text-slate-400"}`}
-                >
-                  {complete
-                    ? "✓ Configured"
-                    : partial
-                      ? `${filled.length}/${tpl.keys.length} keys set`
-                      : "Not configured"}
-                </p>
-              </CardContent>
-            </Card>
-          );
-        })}
+          <div className="pt-2 border-t border-gray-100">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+              Add New Key
+            </p>
+            <div className="flex gap-2 mb-2">
+              <input
+                value={newKey}
+                onChange={(e) => {
+                  setNewKey(e.target.value);
+                  setErr("");
+                }}
+                placeholder="key_name"
+                className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg
+                  font-mono focus:outline-none focus:ring-2 focus:ring-orange-400/20 focus:border-orange-400"
+              />
+              <input
+                value={newVal}
+                onChange={(e) => setNewVal(e.target.value)}
+                placeholder="value"
+                className="flex-1 h-9 px-3 text-sm border border-gray-200 rounded-lg
+                  focus:outline-none focus:ring-2 focus:ring-orange-400/20 focus:border-orange-400"
+              />
+              <button
+                onClick={add}
+                disabled={adding || !newKey.trim()}
+                className="h-9 px-4 bg-gray-900 hover:bg-gray-800 disabled:bg-gray-200 disabled:text-gray-400
+                  text-white text-sm font-semibold rounded-lg flex items-center gap-1.5 transition-all"
+              >
+                {adding ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <Plus size={13} />
+                )}
+                Add
+              </button>
+            </div>
+            {err && <p className="text-red-500 text-xs">{err}</p>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function PaymentConfigPage() {
+  const [configs, setConfigs] = useState<ConfigRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
+
+  const load = useCallback(async (silent = false) => {
+    silent ? setRefreshing(true) : setLoading(true);
+    try {
+      const res = await fetch("/api/admin/payment-config");
+      if (res.ok) {
+        const data = await res.json();
+        setConfigs(Array.isArray(data) ? data : []);
+        setLastSync(new Date());
+      } else {
+        toast.error("Failed to load config");
+      }
+    } catch {
+      toast.error("Network error");
+    }
+    silent ? setRefreshing(false) : setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const totalKeys = configs.filter(
+    (c) => c.value && c.value !== "EMPTY" && c.value !== "",
+  ).length;
+
+  const overallStatus = GATEWAYS.map((g) => ({
+    label: g.label,
+    accent: g.accent,
+    ok: g.keys.every((k) => {
+      const r = configs.find((c) => c.key === k.key);
+      return r?.value && r.value !== "EMPTY";
+    }),
+    partial: g.keys.some((k) => {
+      const r = configs.find((c) => c.key === k.key);
+      return r?.value && r.value !== "EMPTY";
+    }),
+  }));
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#fafafa] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 size={24} className="text-orange-500 animate-spin" />
+          <p className="text-sm text-gray-400">Loading configuration…</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#fafafa]">
+      <div className="max-w-2xl mx-auto px-4 py-10">
+        {/* ── Header ── */}
+        <div className="mb-8 flex items-start justify-between">
+          <div>
+            <h1 className="text-[22px] font-bold text-gray-900 tracking-tight">
+              Payment Configuration
+            </h1>
+            <p className="text-sm text-gray-500 mt-1">
+              Gateway credentials and wallet addresses
+            </p>
+          </div>
+          <button
+            onClick={() => load(true)}
+            disabled={refreshing}
+            className="flex items-center gap-1.5 h-9 px-3 text-sm text-gray-600 bg-white border border-gray-200
+              rounded-xl hover:border-gray-300 hover:text-gray-900 shadow-sm transition-all"
+          >
+            <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+            Refresh
+          </button>
+        </div>
+
+        {/* ── Status strip ── */}
+        <div className="bg-white rounded-2xl border border-gray-200/80 shadow-sm p-4 mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+              Gateway Status
+            </span>
+            <span className="text-xs text-gray-400">
+              {totalKeys} {totalKeys === 1 ? "key" : "keys"} stored
+              {lastSync && ` · synced ${lastSync.toLocaleTimeString()}`}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {overallStatus.map((s) => (
+              <div
+                key={s.label}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                  s.ok
+                    ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+                    : s.partial
+                      ? "bg-amber-50 border-amber-200 text-amber-700"
+                      : "bg-gray-50 border-gray-200 text-gray-500"
+                }`}
+              >
+                {s.ok ? (
+                  <CheckCircle2 size={11} />
+                ) : s.partial ? (
+                  <AlertTriangle size={11} />
+                ) : (
+                  <XCircle size={11} />
+                )}
+                {s.label}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Gateway sections ── */}
+        <div className="space-y-3">
+          {GATEWAYS.map((g) => (
+            <GatewaySection
+              key={g.id}
+              gateway={g}
+              configs={configs}
+              onRefresh={() => load(true)}
+            />
+          ))}
+          <CustomKeysSection configs={configs} onRefresh={() => load(true)} />
+        </div>
+
+        {/* ── Footer ── */}
+        <div className="mt-6 flex items-start gap-2.5 px-4 py-3 bg-amber-50 border border-amber-200/80 rounded-xl">
+          <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
+          <p className="text-amber-700 text-xs leading-relaxed">
+            Keys are read server-side via the service role and never exposed to
+            the browser. Changes take effect immediately — no redeploy needed.
+          </p>
+        </div>
       </div>
     </div>
   );
