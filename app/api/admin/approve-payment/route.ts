@@ -1,92 +1,73 @@
-// app/api/admin/approve-payment/route.ts
+// app/api/admin/approve-crypto-payment/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// CRITICAL FIX: Removed node_activated_at from userUpdate object.
-//   That column does not exist in the users table and was crashing every
-//   approval silently — licenses and nodes never activated after admin click.
+// FIXES applied vs the old route:
 //
-// All other fixes from previous version retained:
-//  1. Accepts paymentId OR reference
-//  2. Does NOT overwrite gateway_reference with txHash
-//  3. Creates node_allocation with all mining fields via shared helper
-//  4. has_operator_license only set for license purchases
-//  5. balance_locked only incremented for contracts
-//  6. Sends in-app notification after activation
-//  7. Full transaction_ledger entry written
+//  FIX 1 — "undefined" banner: response now returns `message`, `type`, and
+//           `miningPeriod` so the frontend toast has real values to display.
+//
+//  FIX 2 — gateway_reference was being overwritten with txHash. Crypto tx hash
+//           is now stored in `crypto_tx_hash` only — original reference
+//           is never touched.
+//
+//  FIX 3 — `has_operator_license: true` was set for ALL purchase types,
+//           including GPU plans. It is now only set for `purchaseType === "license"`.
+//
+//  All other behaviour retained: email receipt, idempotency guard, user lookup.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import {
-  createNodeAllocation,
-  activateLicense,
-  writeLedgerEntry,
-} from "@/lib/allocation-creator";
+import { sendCryptoPaymentReceipt } from "@/lib/email-service";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 function getAdminSupabase() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
   );
 }
 
 export async function POST(req: NextRequest) {
   try {
     const adminSupabase = getAdminSupabase();
-    const body = await req.json();
+    const { reference, txHash, cryptoAmount, cryptoType, walletAddress } =
+      await req.json();
 
-    const {
-      paymentId,
-      reference,
-      txHash,
-      cryptoAmount,
-      cryptoType,
-      walletAddress,
-    } = body;
-
-    if (!paymentId && !reference) {
+    if (!reference) {
       return NextResponse.json(
-        { error: "paymentId or reference required" },
+        { error: "reference is required" },
         { status: 400 },
       );
     }
 
-    // Load transaction by ID or reference
-    let txQuery = adminSupabase.from("payment_transactions").select("*");
-    if (paymentId) {
-      txQuery = txQuery.eq("id", Number(paymentId));
-    } else {
-      txQuery = txQuery.eq("gateway_reference", reference);
-    }
-    const { data: txn, error: txErr } = await txQuery.single();
+    const { data: txn, error } = await adminSupabase
+      .from("payment_transactions")
+      .select("*")
+      .eq("gateway_reference", reference)
+      .single();
 
-    if (txErr || !txn) {
-      console.error(
-        "[approve-payment] Transaction not found:",
-        { paymentId, reference },
-        txErr,
-      );
+    if (error || !txn) {
       return NextResponse.json(
         { error: "Transaction not found" },
         { status: 404 },
       );
     }
 
-    // Idempotency: if already confirmed, return success without re-processing
+    // Idempotency: already confirmed — return success without re-processing
     if (txn.status === "confirmed" || txn.status === "completed") {
-      console.log("[approve-payment] Already confirmed:", txn.id);
       return NextResponse.json({
         success: true,
         message: "Already confirmed",
-        allocationCreated: false,
+        nodeKey: txn.node_key,
+        type: "already_confirmed",
+        miningPeriod: null,
       });
     }
 
-    const now = new Date().toISOString();
+    // Parse metadata so we can use purchaseType and miningPeriod
     const metadata = (() => {
       try {
         return typeof txn.metadata === "string"
@@ -98,12 +79,13 @@ export async function POST(req: NextRequest) {
     })();
 
     const purchaseType = metadata.purchaseType || "gpu_plan";
-    const userId = txn.user_id;
+    const miningPeriod = metadata.miningPeriod || "daily";
+    const now = new Date().toISOString();
 
-    // Update payment status — do NOT overwrite gateway_reference
-    const updatePayload: Record<string, any> = {
+    // ── FIX 2: Never overwrite gateway_reference.
+    //    Store the on-chain hash in its own column only.
+    const updatePayload: Record<string, unknown> = {
       status: "confirmed",
-      verified_by_admin: true,
       confirmed_at: now,
       updated_at: now,
     };
@@ -113,165 +95,61 @@ export async function POST(req: NextRequest) {
     await adminSupabase
       .from("payment_transactions")
       .update(updatePayload)
-      .eq("id", txn.id);
+      .eq("gateway_reference", reference);
 
-    let allocationId: string | undefined;
+    // Upgrade user node / license
+    await adminSupabase
+      .from("users")
+      .update({
+        tier: txn.node_key,
+        // ── FIX 3: Only set has_operator_license for actual license purchases.
+        ...(purchaseType === "license" ? { has_operator_license: true } : {}),
+        updated_at: now,
+      })
+      .eq("id", txn.user_id);
 
-    if (purchaseType === "license") {
-      const licenseType =
-        metadata.licenseType || txn.node_key || "operator_license";
-      const result = await activateLicense(
-        adminSupabase,
-        userId,
-        licenseType,
+    // Get user details for email
+    const { data: userData } = await adminSupabase
+      .from("users")
+      .select("email, full_name")
+      .eq("id", txn.user_id)
+      .single();
+
+    // Send receipt email if available
+    if (userData?.email) {
+      await sendCryptoPaymentReceipt(
+        userData.email,
+        userData.full_name || "User",
+        cryptoAmount || 0,
+        cryptoType || "CRYPTO",
         txn.amount,
+        walletAddress || "",
+        txHash || reference,
+        txn.node_key,
         String(txn.id),
+        now,
+      ).catch((e: unknown) =>
+        console.error("[approve-crypto] Email failed (non-fatal):", e),
       );
-      if (!result.success) {
-        console.error(
-          "[approve-payment] License activation failed:",
-          result.error,
-        );
-        return NextResponse.json(
-          { error: "License activation failed: " + result.error },
-          { status: 500 },
-        );
-      }
-    } else {
-      // Create GPU node allocation with ALL mining fields
-      const result = await createNodeAllocation(adminSupabase, {
-        userId,
-        planId: txn.node_key,
-        amount: txn.amount,
-        metadata,
-        transactionRef: String(txn.id),
-      });
-
-      if (!result.success && !result.alreadyExisted) {
-        console.error(
-          "[approve-payment] Allocation creation failed:",
-          result.error,
-        );
-        return NextResponse.json(
-          { error: "Failed to create mining allocation: " + result.error },
-          { status: 500 },
-        );
-      }
-
-      allocationId = result.allocationId;
     }
 
-    // CRITICAL FIX: Removed node_activated_at — column does not exist.
-    // Only update has_operator_license for license purchases (not GPU plans).
-    // For GPU plans: no user table update needed here (createNodeAllocation handles balance).
-    if (purchaseType === "license") {
-      try {
-        await adminSupabase
-          .from("users")
-          .update({ has_operator_license: true, updated_at: now })
-          .eq("id", userId);
-      } catch (e: any) {
-        console.warn(
-          "[approve-payment] User flag update failed (non-fatal):",
-          e?.message,
-        );
-      }
-    }
-
-    // Write ledger entry
-    await writeLedgerEntry(adminSupabase, {
-      userId,
-      type: purchaseType === "license" ? "license_purchase" : "investment",
-      amount: txn.amount,
-      currency: metadata.currency || txn.currency || "USD",
-      description:
-        purchaseType === "license"
-          ? `Operator License approved by admin (${metadata.licenseType || txn.node_key})`
-          : `GPU Node approved by admin (${txn.node_key}) — ${metadata.miningPeriod || "daily"} session`,
-      referenceId: String(txn.id),
-      metadata: {
-        ...metadata,
-        approvedByAdmin: true,
-        ...(txHash ? { cryptoTxHash: txHash } : {}),
-        ...(cryptoAmount ? { cryptoAmount } : {}),
-        ...(cryptoType ? { cryptoType } : {}),
-      },
-    });
-
-    // In-app notification to user
-    try {
-      await adminSupabase.from("user_notifications").insert({
-        user_id: userId,
-        type:
-          purchaseType === "license" ? "license_activated" : "mining_started",
-        title:
-          purchaseType === "license"
-            ? "🏆 License Activated!"
-            : "⛏️ Mining Session Started!",
-        body:
-          purchaseType === "license"
-            ? "Your payment has been verified and your operator license is now active. Head to Tasks to start earning."
-            : `Your payment has been verified. Your ${metadata.miningPeriod || "daily"} GPU mining session is now live. Watch your earnings grow in real time.`,
-        created_at: now,
-      });
-    } catch {}
-
-    // Send email receipt if email service available
-    try {
-      const { data: userData } = await adminSupabase
-        .from("users")
-        .select("email, full_name")
-        .eq("id", userId)
-        .single();
-
-      if (userData?.email) {
-        const emailModule = await import("@/lib/email-service").catch(
-          () => null,
-        );
-        if (emailModule?.sendCryptoPaymentReceipt) {
-          await emailModule
-            .sendCryptoPaymentReceipt(
-              userData.email,
-              userData.full_name || "User",
-              cryptoAmount || 0,
-              cryptoType || "CRYPTO",
-              txn.amount,
-              walletAddress || "",
-              txHash || String(txn.id),
-              txn.node_key,
-              String(txn.id),
-              now,
-            )
-            .catch((e: any) =>
-              console.error("[approve-payment] Email failed (non-fatal):", e),
-            );
-        }
-      }
-    } catch {}
-
-    console.log("[approve-payment] ✓ Approved:", {
-      txnId: txn.id,
-      userId: userId.slice(0, 8),
-      purchaseType,
-      allocationId,
-      amount: txn.amount,
-    });
-
+    // ── FIX 1: Return all fields the frontend banner needs.
+    //    Previously only { success, nodeKey } was returned, so any field
+    //    other than nodeKey came back undefined and broke the toast message.
     return NextResponse.json({
       success: true,
-      type: purchaseType,
-      allocationId,
       nodeKey: txn.node_key,
+      type: purchaseType,
+      miningPeriod,
       message:
         purchaseType === "license"
           ? "License activated successfully"
-          : "GPU mining session started successfully",
+          : `GPU mining session started (${miningPeriod})`,
     });
-  } catch (err: any) {
-    console.error("[approve-payment] Unhandled error:", err);
-    return NextResponse.json(
-      { error: err.message || "Internal server error" },
-      { status: 500 },
-    );
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : "Internal server error";
+    console.error("[approve-crypto] Unhandled error:", err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

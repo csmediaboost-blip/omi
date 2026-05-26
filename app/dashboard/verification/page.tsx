@@ -164,33 +164,32 @@ const COUNTRIES = [
 // ─────────────────────────────────────────────────────────────────────────────
 // withTimeout — wraps ANY promise with a hard timeout.
 //
-// WHY: Supabase JS uses fetch() internally for all DB and auth calls.
-// On mobile browsers (Android Chrome, iOS Safari), fetch() can stall
-// indefinitely — it never resolves OR rejects, so awaiting it hangs forever.
-// This causes the infinite spinner and "bounces to home" bugs on mobile.
-//
-// Promise.race() guarantees one of the two paths fires within `ms` milliseconds.
-// The timeout rejects with a user-friendly message so catch/finally blocks
-// always execute and the UI recovers properly.
+// FIX vs original: clearTimeout(handle) is called on the success path so the
+// timeout handle is always cleaned up. Previously the handle was never cleared,
+// which could fire a stale reject after the promise already resolved and cause
+// a second setState on an unmounted component.
 // ─────────────────────────────────────────────────────────────────────────────
 function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
   label: string,
 ): Promise<T> {
+  let handle: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    handle = setTimeout(
+      () =>
+        reject(
+          new Error(`${label} timed out — check your connection and try again`),
+        ),
+      ms,
+    );
+  });
   return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new Error(
-              `${label} timed out — check your connection and try again`,
-            ),
-          ),
-        ms,
-      ),
-    ),
+    promise.then((v) => {
+      clearTimeout(handle);
+      return v;
+    }),
+    timeout,
   ]);
 }
 
@@ -204,8 +203,7 @@ function withTimeout<T>(
 //
 // XMLHttpRequest (XHR) is the older API but is rock-solid on ALL mobile
 // browsers. It has a native .timeout property that is guaranteed to fire,
-// and .onprogress for upload percentage. This is the correct solution for
-// reliable file uploads on mobile.
+// and .onprogress for upload percentage.
 // ─────────────────────────────────────────────────────────────────────────────
 function uploadViaXHR(
   url: string,
@@ -216,8 +214,6 @@ function uploadViaXHR(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-
-    // Hard timeout — guaranteed to fire on mobile, unlike fetch AbortController
     xhr.timeout = timeoutMs;
 
     xhr.upload.onprogress = (e) => {
@@ -270,8 +266,6 @@ async function uploadFileForKYC(
   path: string,
   onProgress?: (pct: number) => void,
 ): Promise<string | null> {
-  // Determine content type — mobile browsers sometimes return "" for images
-  // taken from camera. We detect from extension as fallback.
   const ext = path.split(".").pop()?.toLowerCase() || "";
   const mimeMap: Record<string, string> = {
     jpg: "image/jpeg",
@@ -285,7 +279,6 @@ async function uploadFileForKYC(
 
   for (const bucket of ["kyc-documents", "documents"]) {
     try {
-      // Step 1: Get a signed upload URL — wrapped in timeout for mobile safety
       const { data: signedData, error: urlErr } = await withTimeout(
         supabase.storage.from(bucket).createSignedUploadUrl(path),
         15000,
@@ -293,7 +286,6 @@ async function uploadFileForKYC(
       );
 
       if (urlErr) {
-        // Bucket doesn't exist or no permission — try next
         console.warn(
           `[KYC Upload] createSignedUploadUrl failed for bucket "${bucket}":`,
           urlErr.message,
@@ -308,7 +300,6 @@ async function uploadFileForKYC(
         continue;
       }
 
-      // Step 2: Upload via XHR — works on all mobile browsers
       await uploadViaXHR(
         signedData.signedUrl,
         file,
@@ -317,20 +308,19 @@ async function uploadFileForKYC(
         onProgress,
       );
 
-      // Step 3: Return the public URL
       const { data: urlData } = supabase.storage
         .from(bucket)
         .getPublicUrl(path);
       return urlData?.publicUrl ?? null;
     } catch (e: any) {
-      // Timeout or network error — don't silently swallow, re-throw
+      // Timeout or network errors are re-thrown so the caller knows the network is broken.
+      // Other errors (bucket missing etc.) let the loop try the next bucket.
       if (
         e.message?.includes("timed out") ||
         e.message?.includes("Network error")
       ) {
         throw e;
       }
-      // Other error (bucket missing etc) — try next bucket
       console.warn(`[KYC Upload] bucket "${bucket}" failed:`, e.message);
       continue;
     }
@@ -384,8 +374,6 @@ export default function VerificationPage() {
   }
 
   const load = useCallback(async () => {
-    // ── FIX: Guard prevents duplicate calls, but we always reset it in
-    // finally so retries work after a timeout or error.
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
 
@@ -395,9 +383,6 @@ export default function VerificationPage() {
     }
 
     try {
-      // ── FIX: getSession() uses fetch() internally. On mobile it can stall
-      // forever, making session appear null and triggering router.push("/auth/signin").
-      // withTimeout() guarantees it either resolves or rejects within 12 s.
       const {
         data: { session },
         error: sessErr,
@@ -410,7 +395,6 @@ export default function VerificationPage() {
 
       const uid = session.user.id;
 
-      // ── FIX: DB select also uses fetch() — same stall risk on mobile.
       const { data, error } = await withTimeout(
         supabase
           .from("users")
@@ -480,14 +464,9 @@ export default function VerificationPage() {
       else if (!data.payout_registered) setActiveStep("payout");
       else setActiveStep("identity");
     } catch (err: unknown) {
-      // ── FIX: Timeout errors (and any other errors) now always land here
-      // because loadCalledRef resets in finally, so the retry button works.
       if (mountedRef.current)
         setLoadErr(err instanceof Error ? err.message : "Unknown error");
     } finally {
-      // ── FIX: Reset the guard here, not only on success paths.
-      // Previously it only reset inside specific if-branches, so a timeout
-      // or thrown error left it true forever — blocking all retry attempts.
       loadCalledRef.current = false;
       if (mountedRef.current) setLoading(false);
     }
@@ -497,6 +476,29 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // submitIdentity — FIXED for mobile infinite spinner.
+  //
+  // ROOT CAUSE OF THE BUG (two issues working together):
+  //
+  // 1. The old inner try-catch around uploadFileForKYC swallowed timeout errors
+  //    and continued to run DB inserts on a network already proven broken.
+  //    Those DB inserts would also stall, creating a second stall on top of
+  //    the first. This is why the spinner never stopped.
+  //
+  // 2. On Android Chrome with a slow/throttled connection, setTimeout inside
+  //    withTimeout can itself be suppressed by the browser, so even the 15s
+  //    timeout would never fire — leaving saving=true forever.
+  //
+  // FIXES:
+  //   A. Upload errors are now fatal — any throw from uploadFileForKYC goes
+  //      directly to the outer catch which always calls setSaving(false).
+  //      We never attempt DB writes when the network can't serve a signed URL.
+  //
+  //   B. A "nuclear fallback" setTimeout at 60s guarantees setSaving(false)
+  //      fires no matter what — even if every other timer is throttled.
+  //      It is cleared in the finally block when things finish normally.
+  // ─────────────────────────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -544,7 +546,21 @@ export default function VerificationPage() {
 
     setSaving(true);
     setUploadPct(0);
-    let docUrl = "";
+    setUploadProgress("");
+
+    // ── FIX B: Nuclear fallback — guarantees spinner stops within 60 s even
+    // if every setTimeout inside withTimeout is throttled by the mobile browser.
+    const nuclearHandle = setTimeout(() => {
+      if (mountedRef.current) {
+        setSaving(false);
+        setUploadProgress("");
+        setUploadPct(0);
+        showToast(
+          "Request timed out — please check your signal and try again",
+          false,
+        );
+      }
+    }, 60_000);
 
     try {
       const uid = profile.id;
@@ -553,28 +569,24 @@ export default function VerificationPage() {
       const path = `kyc/${uid}/doc-${ts}.${ext}`;
 
       setUploadProgress(
-        `Uploading ${DOC_TYPES[idType]?.label}... (${(idFile.size / 1024).toFixed(0)} KB)`,
+        `Uploading ${DOC_TYPES[idType]?.label}… (${(idFile.size / 1024).toFixed(0)} KB)`,
       );
 
-      try {
-        docUrl =
-          (await uploadFileForKYC(idFile, path, (pct) => {
-            if (mountedRef.current) {
-              setUploadPct(pct);
-              setUploadProgress(`Uploading... ${pct}%`);
-            }
-          })) || "";
-      } catch (uploadErr: any) {
-        showToast(uploadErr.message, false);
-        docUrl = "";
-        await new Promise((r) => setTimeout(r, 2500));
-      }
+      // ── FIX A: No inner try-catch. Any error from uploadFileForKYC —
+      // including timeouts — propagates to the outer catch below, which
+      // always calls setSaving(false). We never proceed to DB writes on
+      // a broken network.
+      const docUrl =
+        (await uploadFileForKYC(idFile, path, (pct) => {
+          if (mountedRef.current) {
+            setUploadPct(pct);
+            setUploadProgress(`Uploading… ${pct}%`);
+          }
+        })) ?? "";
 
-      setUploadProgress("Saving your details...");
+      setUploadProgress("Saving your details…");
       setUploadPct(0);
 
-      // ── FIX: DB insert wrapped in timeout — prevents infinite spinner
-      // on mobile when the fetch() call stalls after the file upload.
       const { error: docErr } = await withTimeout(
         supabase.from("kyc_documents").insert({
           user_id: uid,
@@ -590,7 +602,7 @@ export default function VerificationPage() {
           date_of_birth: idDob,
           status: "pending",
         }),
-        15000,
+        15_000,
         "Saving KYC record",
       );
 
@@ -601,7 +613,6 @@ export default function VerificationPage() {
       )
         throw new Error(`Could not save record: ${docErr.message}`);
 
-      // ── FIX: Profile update also wrapped in timeout.
       const { error: updErr } = await withTimeout(
         supabase
           .from("users")
@@ -614,7 +625,7 @@ export default function VerificationPage() {
             country: idCountry,
           })
           .eq("id", uid),
-        15000,
+        15_000,
         "Updating profile",
       );
 
@@ -622,11 +633,7 @@ export default function VerificationPage() {
         throw new Error(`Could not update profile: ${updErr.message}`);
 
       setUploadProgress("");
-      showToast(
-        docUrl
-          ? "Identity submitted — pending review within 24–48 hrs ✓"
-          : "Details saved (photo upload failed) — our team will contact you ✓",
-      );
+      showToast("Identity submitted — pending review within 24–48 hrs ✓");
       load();
     } catch (err: unknown) {
       setUploadProgress("");
@@ -638,6 +645,7 @@ export default function VerificationPage() {
         false,
       );
     } finally {
+      clearTimeout(nuclearHandle); // cancel nuclear fallback — we finished (ok or error)
       setSaving(false);
     }
   }
@@ -648,9 +656,7 @@ export default function VerificationPage() {
       return;
     }
     setSaving(true);
-
     try {
-      // ── FIX: Agreement update wrapped in timeout.
       const { error } = await withTimeout(
         supabase
           .from("users")
@@ -659,7 +665,6 @@ export default function VerificationPage() {
         15000,
         "Signing agreements",
       );
-
       if (error) showToast(error.message, false);
       else {
         showToast("Agreements signed ✓");
@@ -682,7 +687,7 @@ export default function VerificationPage() {
         <div className="flex-1 flex items-center justify-center">
           <div className="flex flex-col items-center gap-4 px-6 text-center">
             <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin" />
-            <p className="text-slate-400 text-sm">Loading your profile...</p>
+            <p className="text-slate-400 text-sm">Loading your profile…</p>
             <button
               onClick={() => {
                 load();
@@ -776,6 +781,7 @@ export default function VerificationPage() {
             </div>
           </div>
 
+          {/* Progress */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center justify-between mb-3">
               <p className="text-white font-bold text-sm">
@@ -1111,7 +1117,7 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
-                  {/* Upload progress with real percentage bar */}
+                  {/* Upload progress bar */}
                   {uploadProgress && (
                     <div className="space-y-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <div className="flex items-center gap-2">
@@ -1143,7 +1149,12 @@ export default function VerificationPage() {
                       {saving ? (
                         <>
                           <Loader2 size={14} className="animate-spin" />
-                          {uploadProgress ? " Uploading..." : " Submitting..."}
+                          {/* FIX: accurate label — reflects upload vs save phase */}
+                          {uploadProgress.startsWith("Saving")
+                            ? " Saving…"
+                            : uploadProgress
+                              ? " Uploading…"
+                              : " Submitting…"}
                         </>
                       ) : (
                         "Submit Identity Verification"
@@ -1237,7 +1248,7 @@ export default function VerificationPage() {
                       {saving ? (
                         <>
                           <Loader2 size={14} className="animate-spin" />{" "}
-                          Signing...
+                          Signing…
                         </>
                       ) : (
                         "✓ I Have Read and Accept Both Agreements"

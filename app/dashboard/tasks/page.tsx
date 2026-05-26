@@ -1,16 +1,14 @@
 "use client";
 // app/dashboard/tasks/page.tsx
-// FIXES:
-//  1. GPU: Close & Settle immediately removes contract from local state + stops timer atomically
-//  2. GPU: Removed gain/loss preview (was leaking internal logic)
-//  3. GPU: Tick fires one last time after close — guarded by status check before processing
-//  4. RLHF: Duplicate key race fixed — optimistic local lock before DB insert
-//  5. RLHF: Daily rotation via get_daily_questions RPC (3-4/day, cycles after all answered)
-//  6. RLHF: Answered question disappears immediately from UI (optimistic removal)
-//  7. Thermal: .catch() replaced with async IIFE (supabase builder doesn't support .catch())
-//  8. All: fire-and-forget inserts use void (async () => {})() pattern
-//  9. Security: no internal probability/logic exposed to UI anywhere
-// 10. General: all loading states have finally{} guards
+// FIXES APPLIED (v2):
+//  [FIX-1] GPU Allocation license fee reduced to $10; $5 capital credited on license activation
+//  [FIX-2] "Add Funds" button in GPU Allocation section routes to deposit/checkout
+//  [FIX-3] Thermal calibration double-credit fixed: cooldown is read fresh from DB on every load,
+//           and completion insert uses an upsert-style guard so refreshing can't bypass the 24h lock
+//  [FIX-4] "Get License" button now navigates to the license page (not checkout directly)
+//  [FIX-5] Thermal calibration license price raised to $300 in PurchaseModal
+//  [FIX-6] Sign Contract validates amount ≥ $5, shows inline error, button always renders with
+//           visible disabled state + tooltip so users know exactly what is wrong
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -35,6 +33,8 @@ import {
   Eye,
   HelpCircle,
   DollarSign,
+  PlusCircle,
+  AlertTriangle,
 } from "lucide-react";
 
 type LicenseType =
@@ -93,8 +93,16 @@ type ThermalTask = {
 
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
-// Internal only — never exposed to UI
 const LOSS_PROBABILITY = 0.3;
+
+// [FIX-1] GPU allocation license fee reduced to $10
+const GPU_LICENSE_PRICE = 10;
+// [FIX-1] Capital bonus credited to user on GPU license activation
+const GPU_LICENSE_CAPITAL_BONUS = 5;
+// [FIX-5] Thermal license price raised to $300
+const THERMAL_LICENSE_PRICE = 300;
+// RLHF license price unchanged
+const RLHF_LICENSE_PRICE = 200;
 
 const PROVISIONING_PHRASES = [
   "Synchronising node fabric…",
@@ -152,7 +160,6 @@ function generateTickPnL(currentValue: number): {
   return { type: "gain", pct, amount: (currentValue * pct) / 100 };
 }
 
-// FIX: All supabase fire-and-forget use this pattern (not .catch())
 function fireAndForget(fn: () => Promise<any>) {
   void (async () => {
     try {
@@ -520,6 +527,9 @@ function GPUAllocationPreview() {
 }
 
 // ─── PURCHASE MODAL ───────────────────────────────────────────────────────────
+// [FIX-4] "Get License" now goes to /dashboard/license page, not directly to checkout
+// [FIX-1] GPU license price = $10 (GPU_LICENSE_PRICE constant)
+// [FIX-5] Thermal license price = $300 (THERMAL_LICENSE_PRICE constant)
 function PurchaseModal({
   type,
   onClose,
@@ -528,27 +538,40 @@ function PurchaseModal({
   onClose: () => void;
 }) {
   const router = useRouter();
+
   const info = {
     thermal_optimization: {
       name: "Thermal & Neural Operator License",
       icon: Thermometer,
       color: "#f59e0b",
       node: "thermal_optimization",
+      price: THERMAL_LICENSE_PRICE, // [FIX-5] $300
     },
     rlhf_validation: {
       name: "RLHF Validation Operator License",
       icon: Brain,
       color: "#8b5cf6",
       node: "rlhf_validation",
+      price: RLHF_LICENSE_PRICE, // $200 unchanged
     },
     gpu_allocation: {
       name: "GPU Allocation Operator License",
       icon: Server,
       color: "#10b981",
       node: "gpu_allocation",
+      price: GPU_LICENSE_PRICE, // [FIX-1] $10
     },
   }[type];
+
   const Icon = info.icon;
+
+  // [FIX-4] Route to license page so user goes through proper license flow
+  function goToLicensePage() {
+    onClose();
+    router.push(`/dashboard/license?licenseType=${type}`);
+  }
+
+  // Direct checkout is kept as a secondary CTA only visible for quick path
   function goToCheckout() {
     onClose();
     const params = new URLSearchParams({
@@ -556,10 +579,11 @@ function PurchaseModal({
       licenseType: type,
       node: info.node,
       name: info.name,
-      price: "200",
+      price: String(info.price),
     });
     router.push(`/dashboard/checkout?${params.toString()}`);
   }
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -612,24 +636,56 @@ function PurchaseModal({
             }}
           >
             {[
-              ["License Fee", "$200"],
+              ["License Fee", `$${info.price}`],
               ["Duration", "4 Years"],
               ["Task Access", "Full"],
               ["Renewal", "Eligible"],
+              ...(type === "gpu_allocation"
+                ? [
+                    [
+                      "Starter Capital Bonus",
+                      `+$${GPU_LICENSE_CAPITAL_BONUS} on activation`,
+                    ],
+                  ]
+                : []),
             ].map(([l, v]) => (
               <div key={l} className="flex justify-between text-sm">
                 <span className="text-slate-500">{l}</span>
-                <span className="text-white font-bold">{v}</span>
+                <span
+                  className="font-bold"
+                  style={{
+                    color: l === "Starter Capital Bonus" ? "#10b981" : "#fff",
+                  }}
+                >
+                  {v}
+                </span>
               </div>
             ))}
           </div>
+
+          {/* [FIX-4] Primary CTA goes to the license page for proper flow */}
           <button
-            onClick={goToCheckout}
+            onClick={goToLicensePage}
             className="w-full py-3.5 rounded-2xl font-black text-slate-950 text-sm flex items-center justify-center gap-2"
             style={{ background: info.color }}
           >
-            <FileCheck size={16} /> Get License — $200 <ArrowRight size={14} />
+            <FileCheck size={16} /> View License Details
+            <ArrowRight size={14} />
           </button>
+
+          {/* Quick direct checkout as secondary option */}
+          <button
+            onClick={goToCheckout}
+            className="w-full py-2.5 rounded-xl font-bold text-xs flex items-center justify-center gap-2 border"
+            style={{
+              color: info.color,
+              borderColor: `${info.color}30`,
+              background: `${info.color}08`,
+            }}
+          >
+            Skip to Checkout — ${info.price}
+          </button>
+
           <button
             onClick={onClose}
             className="w-full py-2.5 text-slate-600 text-xs hover:text-slate-400"
@@ -655,7 +711,6 @@ function RLHFSection({
   onBalanceChange: (b: number) => void;
 }) {
   const [questions, setQuestions] = useState<RLHFQuestion[]>([]);
-  // FIX 5: Local submitted set — prevents duplicate submission race
   const submittedRef = useRef<Set<string>>(new Set());
   const [answering, setAnswering] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -670,7 +725,6 @@ function RLHFSection({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // FIX 3: Use RPC for daily rotation (3-4 questions/day, cycles after all answered)
       const { data: dailyQs, error } = await supabase.rpc(
         "get_daily_questions",
         {
@@ -682,25 +736,19 @@ function RLHFSection({
       if (error) throw new Error(error.message);
       setQuestions((dailyQs || []) as RLHFQuestion[]);
 
-      // Stats
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      const [{ count: todayCount }, { count: totalCount }, { count: totalQs }] =
-        await Promise.all([
-          supabase
-            .from("rlhf_answers")
-            .select("*", { count: "exact", head: true })
-            .eq("user_id", userId)
-            .gte("created_at", today.toISOString()),
-          supabase
-            .from("rlhf_answers")
-            .select("*", { count: "exact", head: true })
-            .eq("user_id", userId),
-          supabase
-            .from("rlhf_questions")
-            .select("*", { count: "exact", head: true })
-            .eq("is_active", true),
-        ]);
+      const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
+        supabase
+          .from("rlhf_answers")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .gte("created_at", today.toISOString()),
+        supabase
+          .from("rlhf_answers")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", userId),
+      ]);
       setStats({
         today: todayCount || 0,
         total: totalCount || 0,
@@ -715,19 +763,16 @@ function RLHFSection({
     load();
   }, [load]);
 
-  // FIX 4: answering is now per-question and cleared in finally
   async function submitAnswer(
     questionId: string,
     chosen: "A" | "B",
     reward: number,
   ) {
-    // FIX 5: Double-submit guard
     if (submittedRef.current.has(questionId)) return;
     if (answering === questionId) return;
     submittedRef.current.add(questionId);
     setAnswering(questionId);
 
-    // FIX 6: Optimistic removal — remove from UI immediately
     setQuestions((prev) => prev.filter((q) => q.id !== questionId));
 
     try {
@@ -737,7 +782,6 @@ function RLHFSection({
         chosen_option: chosen,
         reward_earned: reward,
       });
-      // FIX 4: If duplicate key (already answered), treat as success silently
       if (ansErr && !ansErr.message.includes("duplicate"))
         throw new Error(ansErr.message);
 
@@ -757,7 +801,6 @@ function RLHFSection({
         flash(`+$${reward.toFixed(2)} credited — response recorded!`);
         onEarned(reward);
       }
-      // Reload stats but don't reload questions (already removed optimistically)
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
@@ -778,10 +821,9 @@ function RLHFSection({
         remaining: questions.length - 1,
       }));
     } catch (e: any) {
-      // On error, add question back to UI
       flash("Error: " + e.message);
       submittedRef.current.delete(questionId);
-      load(); // full reload to restore correct state
+      load();
     } finally {
       setAnswering(null);
     }
@@ -982,6 +1024,8 @@ function RLHFSection({
 }
 
 // ─── GPU ALLOCATION SECTION ───────────────────────────────────────────────────
+// [FIX-2] "Add Funds" button added
+// [FIX-6] Sign Contract validates amount ≥ $5 with visible inline errors; button always renders
 function GPUAllocationSection({
   userId,
   license,
@@ -995,6 +1039,7 @@ function GPUAllocationSection({
   userBalance: number;
   onBalanceChange: (b: number) => void;
 }) {
+  const router = useRouter();
   const [contracts, setContracts] = useState<GPUContract[]>([]);
   const [ticks, setTicks] = useState<Record<string, GPUTick[]>>({});
   const [loading, setLoading] = useState(true);
@@ -1008,9 +1053,26 @@ function GPUAllocationSection({
   const [expanded, setExpanded] = useState<string | null>(null);
   const tickTimers = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const runningTicks = useRef<Set<string>>(new Set());
-  // FIX 1: Track closed contracts to prevent final tick from processing
   const closedContracts = useRef<Set<string>>(new Set());
   const isMounted = useRef(true);
+
+  // [FIX-6] Minimum allocation lowered to $5
+  const MIN_ALLOC = 5;
+  const amt = parseFloat(allocAmount) || 0;
+
+  // Compute a human-readable reason the Sign Contract button is disabled
+  function getSignBlockReason(): string | null {
+    if (!allocAmount || allocAmount.trim() === "")
+      return "Enter an amount to allocate.";
+    if (isNaN(amt) || amt <= 0) return "Enter a valid amount.";
+    if (amt < MIN_ALLOC) return `Minimum allocation is $${MIN_ALLOC}.`;
+    if (amt > userBalance)
+      return `Insufficient balance — you have $${userBalance.toFixed(2)}.`;
+    return null;
+  }
+
+  const signBlockReason = getSignBlockReason();
+  const canSign = !signBlockReason && !creating;
 
   useEffect(() => {
     isMounted.current = true;
@@ -1077,7 +1139,6 @@ function GPUAllocationSection({
 
   async function runTickById(contractId: string) {
     if (runningTicks.current.has(contractId)) return;
-    // FIX 1: Skip if closed locally
     if (closedContracts.current.has(contractId)) {
       if (tickTimers.current[contractId]) {
         clearInterval(tickTimers.current[contractId]);
@@ -1092,7 +1153,6 @@ function GPUAllocationSection({
         .select("*")
         .eq("id", contractId)
         .single();
-      // FIX 1: Check both local closed set and DB status
       if (
         error ||
         !fresh ||
@@ -1112,7 +1172,6 @@ function GPUAllocationSection({
   }
 
   async function runTick(contract: GPUContract) {
-    // FIX 1: Final guard before processing tick
     if (closedContracts.current.has(contract.id)) return;
 
     const currentValue = contract.current_value || contract.allocated_amount;
@@ -1185,11 +1244,12 @@ function GPUAllocationSection({
   }
 
   async function createContract() {
-    const amt = parseFloat(allocAmount);
-    if (!amt || amt < 100) {
-      flash("Minimum allocation is $100", "loss");
+    // [FIX-6] Always validate with clear message before doing anything
+    if (signBlockReason) {
+      flash(signBlockReason, "loss");
       return;
     }
+
     const { data: freshUser } = await supabase
       .from("users")
       .select("balance_available")
@@ -1198,7 +1258,7 @@ function GPUAllocationSection({
     const freshBalance = (freshUser as any)?.balance_available ?? 0;
     if (freshBalance < amt) {
       flash(
-        `Insufficient balance. You have $${freshBalance.toFixed(2)}.`,
+        `Insufficient balance. You have $${freshBalance.toFixed(2)}. Add funds to continue.`,
         "loss",
       );
       return;
@@ -1273,7 +1333,6 @@ function GPUAllocationSection({
     }
   }
 
-  // FIX 1: Close & Settle — immediately stops timer and removes from UI
   async function closeContract(id: string) {
     if (
       !confirm(
@@ -1284,14 +1343,12 @@ function GPUAllocationSection({
     const contract = contracts.find((c) => c.id === id);
     if (!contract) return;
 
-    // FIX 1: Mark closed BEFORE any async operations to stop any pending tick
     closedContracts.current.add(id);
     if (tickTimers.current[id]) {
       clearInterval(tickTimers.current[id]);
       delete tickTimers.current[id];
     }
 
-    // FIX 1: Optimistic UI update — mark as closed immediately
     setContracts((prev) =>
       prev.map((c) => (c.id === id ? { ...c, status: "closed" } : c)),
     );
@@ -1335,7 +1392,6 @@ function GPUAllocationSection({
     0,
   );
   const totalPnL = totalValue - totalInvested;
-  const amt = parseFloat(allocAmount) || 0;
 
   return (
     <div className="space-y-4">
@@ -1412,6 +1468,7 @@ function GPUAllocationSection({
             </div>
           )}
 
+          {/* [FIX-2] Balance row with Add Funds button */}
           <div
             className="rounded-2xl p-5 space-y-4"
             style={{
@@ -1429,16 +1486,39 @@ function GPUAllocationSection({
                 seconds.
               </p>
             </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-slate-500">Available balance</span>
-              <span className="text-white font-black">
-                ${userBalance.toFixed(2)}
-              </span>
+
+            {/* Balance row + Add Funds */}
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-slate-500 text-sm">
+                  Available balance
+                </span>
+                <span className="text-white font-black text-sm ml-2">
+                  ${userBalance.toFixed(2)}
+                </span>
+              </div>
+              {/* [FIX-2] Add Funds CTA */}
+              <button
+                onClick={() =>
+                  router.push(
+                    "/dashboard/checkout?purchaseType=deposit&name=Add+Funds&price=",
+                  )
+                }
+                className="flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-lg transition-all"
+                style={{
+                  background: "rgba(16,185,129,0.12)",
+                  border: "1px solid rgba(16,185,129,0.3)",
+                  color: "#10b981",
+                }}
+              >
+                <PlusCircle size={11} /> Add Funds
+              </button>
             </div>
-            <div className="flex gap-3 items-end">
+
+            <div className="flex gap-3 items-start">
               <div className="flex-1">
                 <label className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1.5">
-                  Allocation Amount (min $100)
+                  Allocation Amount (min ${MIN_ALLOC})
                 </label>
                 <div className="relative">
                   <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold">
@@ -1446,19 +1526,32 @@ function GPUAllocationSection({
                   </span>
                   <input
                     type="number"
-                    min="100"
+                    min={MIN_ALLOC}
                     value={allocAmount}
                     onChange={(e) => setAllocAmount(e.target.value)}
                     className="w-full pl-8 pr-4 py-3 rounded-xl text-white font-black bg-slate-900 border border-slate-700 focus:outline-none focus:border-emerald-500 text-lg"
+                    style={{
+                      borderColor:
+                        signBlockReason && allocAmount
+                          ? "#ef444480"
+                          : undefined,
+                    }}
                   />
                 </div>
-                {amt > userBalance && amt > 0 && (
-                  <p className="text-red-400 text-xs mt-1">
-                    Insufficient balance. You have ${userBalance.toFixed(2)}.
-                  </p>
+
+                {/* [FIX-6] Always show a clear inline validation message */}
+                {signBlockReason && allocAmount && !creating && (
+                  <div className="flex items-center gap-1.5 mt-1.5">
+                    <AlertTriangle
+                      size={11}
+                      className="text-red-400 shrink-0"
+                    />
+                    <p className="text-red-400 text-xs">{signBlockReason}</p>
+                  </div>
                 )}
-                <div className="flex gap-1.5 mt-2">
-                  {[100, 500, 1000, 5000].map((v) => (
+
+                <div className="flex gap-1.5 mt-2 flex-wrap">
+                  {[5, 50, 100, 500].map((v) => (
                     <button
                       key={v}
                       onClick={() => setAllocAmount(String(v))}
@@ -1469,25 +1562,41 @@ function GPUAllocationSection({
                   ))}
                 </div>
               </div>
-              <button
-                onClick={createContract}
-                disabled={creating || amt > userBalance || amt < 100}
-                className="px-5 py-3 rounded-xl font-black text-sm text-slate-950 flex items-center gap-2 disabled:opacity-50 shrink-0 min-w-[140px] justify-center"
-                style={{ background: "#10b981" }}
-              >
-                {creating ? (
-                  <>
-                    <RefreshCw size={14} className="animate-spin" />
-                    <span className="text-[11px] text-left leading-tight">
-                      {provisioningPhrase || "Processing…"}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <Zap size={14} /> Sign Contract
-                  </>
+
+              {/* [FIX-6] Button always visible; disabled state clearly styled with title tooltip */}
+              <div className="shrink-0 flex flex-col items-stretch mt-6">
+                <button
+                  onClick={createContract}
+                  disabled={!canSign}
+                  title={signBlockReason ?? undefined}
+                  className="px-5 py-3 rounded-xl font-black text-sm flex items-center gap-2 justify-center min-w-[140px] transition-all"
+                  style={{
+                    background: canSign ? "#10b981" : "rgba(16,185,129,0.15)",
+                    color: canSign ? "#0a0f1a" : "rgba(16,185,129,0.4)",
+                    border: canSign ? "none" : "1px solid rgba(16,185,129,0.2)",
+                    cursor: canSign ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {creating ? (
+                    <>
+                      <RefreshCw size={14} className="animate-spin" />
+                      <span className="text-[11px] text-left leading-tight">
+                        {provisioningPhrase || "Processing…"}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Zap size={14} /> Sign Contract
+                    </>
+                  )}
+                </button>
+                {/* [FIX-6] Show reason below button if disabled */}
+                {!canSign && !creating && signBlockReason && (
+                  <p className="text-[10px] text-red-400 mt-1 text-center max-w-[140px]">
+                    {signBlockReason}
+                  </p>
                 )}
-              </button>
+              </div>
             </div>
           </div>
 
@@ -1712,6 +1821,9 @@ function GPUAllocationSection({
 }
 
 // ─── THERMAL SECTION ──────────────────────────────────────────────────────────
+// [FIX-3] Double-credit fix: cooldown is read fresh from DB on every load.
+//         completeTask now checks DB-backed cooldown BEFORE inserting, preventing
+//         a page-refresh from bypassing the in-memory cooldown map.
 function ThermalSection({
   userId,
   license,
@@ -1724,6 +1836,7 @@ function ThermalSection({
   onBalanceChange: (b: number) => void;
 }) {
   const [tasks, setTasks] = useState<ThermalTask[]>([]);
+  // [FIX-3] cooldowns stores the LATEST completion time per task fetched directly from DB
   const [cooldowns, setCooldowns] = useState<Record<string, Date>>({});
   const [completing, setCompleting] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -1734,6 +1847,8 @@ function ThermalSection({
     setTimeout(() => setToast(null), 3000);
   }
 
+  // [FIX-3] load() always fetches the LATEST completion from DB,
+  //         so refreshing the page restores the real cooldown state.
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1742,14 +1857,22 @@ function ThermalSection({
         .select("*")
         .eq("is_active", true)
         .order("created_at");
+
+      // [FIX-3] Fetch the MOST RECENT completion per task for this user
+      //         so cooldowns survive page refresh.
       const { data: completions } = await supabase
         .from("thermal_completions")
         .select("task_id, created_at")
         .eq("user_id", userId)
         .order("created_at", { ascending: false });
+
+      // Build cooldown map from most recent completion per task
       const cdMap: Record<string, Date> = {};
       (completions || []).forEach((c: any) => {
-        if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
+        // Only keep the first (most recent) entry per task_id
+        if (!cdMap[c.task_id]) {
+          cdMap[c.task_id] = new Date(c.created_at);
+        }
       });
       setCooldowns(cdMap);
       setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
@@ -1776,12 +1899,38 @@ function ThermalSection({
     return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
   }
 
-  // FIX 4: Thermal uses fireAndForget for non-critical inserts
+  // [FIX-3] Before inserting a new completion, re-check the DB to confirm
+  //         no completion exists within the cooldown window. This prevents
+  //         double-credits if the in-memory state is stale (e.g. after refresh).
   async function completeTask(task: ThermalTask) {
     const cd = isOnCooldown(task.id, task.cooldown_minutes);
     if (cd.on || completing) return;
+
     setCompleting(task.id);
     try {
+      // [FIX-3] Re-fetch DB cooldown to prevent bypass via page refresh
+      const windowStart = new Date(
+        Date.now() - task.cooldown_minutes * 60000,
+      ).toISOString();
+      const { data: recentCompletions, error: checkErr } = await supabase
+        .from("thermal_completions")
+        .select("id, created_at")
+        .eq("user_id", userId)
+        .eq("task_id", task.id)
+        .gte("created_at", windowStart)
+        .limit(1);
+
+      if (checkErr) throw new Error(checkErr.message);
+
+      if (recentCompletions && recentCompletions.length > 0) {
+        // Already completed within cooldown window — update local state and bail
+        const lastAt = new Date(recentCompletions[0].created_at);
+        setCooldowns((prev) => ({ ...prev, [task.id]: lastAt }));
+        flash("Task already completed — come back after the cooldown.");
+        return;
+      }
+
+      // Safe to insert
       const { error: compErr } = await supabase
         .from("thermal_completions")
         .insert({
@@ -1796,7 +1945,6 @@ function ThermalSection({
       if (!result.success) throw new Error(result.error);
       onBalanceChange(result.newBalance);
 
-      // FIX 7: fireAndForget instead of .catch()
       fireAndForget(() =>
         supabase.from("transaction_ledger").insert({
           user_id: userId,
@@ -1809,7 +1957,7 @@ function ThermalSection({
 
       flash(`+$${task.reward.toFixed(2)} credited to your balance!`);
       onEarned(task.reward);
-      // Optimistic cooldown update
+      // [FIX-3] Update local cooldown so UI reflects new state immediately
       setCooldowns((prev) => ({ ...prev, [task.id]: new Date() }));
     } catch (e: any) {
       flash("Error: " + e.message);
@@ -2044,6 +2192,7 @@ export default function TasksPage() {
   const thermalLic = getLicense("thermal_optimization");
   const licCount = licenses.length;
 
+  // [FIX-1] GPU license price shown as $10; [FIX-5] Thermal as $300
   const TABS = [
     {
       id: "rlhf" as const,
@@ -2053,6 +2202,7 @@ export default function TasksPage() {
       hasLic: !!rlhfLic,
       licType: "rlhf_validation" as LicenseType,
       earning: "$0.50 / answer",
+      licPrice: RLHF_LICENSE_PRICE,
     },
     {
       id: "gpu" as const,
@@ -2062,6 +2212,7 @@ export default function TasksPage() {
       hasLic: !!gpuLic,
       licType: "gpu_allocation" as LicenseType,
       earning: "Variable / 30s",
+      licPrice: GPU_LICENSE_PRICE,
     },
     {
       id: "thermal" as const,
@@ -2071,6 +2222,7 @@ export default function TasksPage() {
       hasLic: !!thermalLic,
       licType: "thermal_optimization" as LicenseType,
       earning: "$2.00 / day",
+      licPrice: THERMAL_LICENSE_PRICE,
     },
   ];
 
@@ -2171,7 +2323,7 @@ export default function TasksPage() {
                         <p className="text-slate-600 text-xs mt-0.5">
                           {tab.hasLic
                             ? `Licensed · Active · ${tab.earning}`
-                            : `${tab.earning} · $200 license required`}
+                            : `${tab.earning} · $${tab.licPrice} license required`}
                         </p>
                       </div>
                     </div>
@@ -2188,6 +2340,7 @@ export default function TasksPage() {
                           LICENSED
                         </span>
                       ) : (
+                        // [FIX-4] Opens the PurchaseModal which now routes to /dashboard/license
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

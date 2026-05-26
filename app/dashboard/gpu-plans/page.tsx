@@ -1,21 +1,12 @@
 "use client";
-// app/dashboard/gpu-plans/page.tsx — FINAL FIXED VERSION
+// app/dashboard/gpu-plans/page.tsx — ROI UPDATED VERSION
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue #1  FIXED: No pre-purchase earnings shown. Portfolio shows live ticker only.
-// Issue #2  FIXED: Capital scaling — profit = amount × (pct/100) × tier × period
-// Issue #3  FIXED: Contract % removed from term selector UI entirely
-// Issue #4  FIXED: "Pay-As-You-Go (Flexible)" replaces "Mining (Flexible)"
-// Issue #5  FIXED: Live earnings only shown post-purchase in portfolio tab
-// Issue #6  FIXED: Rate factor properly scales with amount_invested
-// Issue #7  FIXED: Cron race condition — atomic .eq("mining_completed",false) guard
-// Issue #8  FIXED: Double-credit blocked by atomic DB guard
-// Issue #9  FIXED: Contract accrual written to DB server-side every 60s sync
-// Issue #10 FIXED: balance_available .gte() guard prevents overdraft on withdrawal
-// Issue #11 FIXED: Mobile UI — 2-col grids, proper spacing, thumb-friendly targets
-// Issue #12 FIXED: Quick-select only shows values ≥ plan.price_min
-// Issue #13 FIXED: X icon imported from lucide-react
-// Issue #14 FIXED: Stale closure in useLiveMiningEarnings fixed with liveRef
-// Issue #15 ADDED: EstimatedProfitBanner — live estimate range, reacts to capital + period/term
+// CHANGES IN THIS VERSION:
+// • New ROI rates per plan/period (exact % from spec)
+// • EstimatedProfitBanner now shows a SINGLE dollar amount (no low/high range)
+// • % never shown to user — only calculated dollar values displayed
+// • DB update helper included (run once to sync plan rates)
+// • All profit calculations use the exact period ROI %
 // ─────────────────────────────────────────────────────────────────────────────
 
 import React, { useEffect, useState, useRef, useCallback } from "react";
@@ -74,6 +65,118 @@ import {
   type MiningPeriodInfo,
 } from "@/lib/mining-service";
 
+// ─── ROI TABLE ────────────────────────────────────────────────────────────────
+// These are the EXACT period ROI percentages per plan.
+// Used everywhere profit is calculated — never shown as % to the user.
+// Only the resulting dollar amount is displayed.
+export const PLAN_ROI: Record<
+  string, // plan short_name key (lowercase, no spaces)
+  { hourly: number; daily: number; weekly: number; monthly: number }
+> = {
+  "foundation-node": {
+    hourly: 0.003, // 0.3%
+    daily: 0.02, // 2%
+    weekly: 0.12, // 12%
+    monthly: 0.45, // 45%
+  },
+  "rtx-4090-node": {
+    hourly: 0.005, // 0.5%
+    daily: 0.03, // 3%
+    weekly: 0.18, // 18%
+    monthly: 0.7, // 70%
+  },
+  "a100-gpu-node": {
+    hourly: 0.008, // 0.8%
+    daily: 0.05, // 5%
+    weekly: 0.35, // 35%
+    monthly: 1.2, // 120%
+  },
+  "h100-pcie-node": {
+    hourly: 0.012, // 1.2%
+    daily: 0.08, // 8%
+    weekly: 0.6, // 60%
+    monthly: 2.5, // 250%
+  },
+};
+
+// Fallback ROI for plans not in the table (uses old daily% approach)
+const FALLBACK_ROI = {
+  hourly: 0.003,
+  daily: 0.02,
+  weekly: 0.12,
+  monthly: 0.45,
+};
+
+// Helper: get ROI rate for a plan + period
+function getPlanRoi(planSlug: string | undefined, period: string): number {
+  const slug = (planSlug ?? "").toLowerCase().replace(/\s+/g, "-");
+  const table = PLAN_ROI[slug] ?? FALLBACK_ROI;
+  return (table as Record<string, number>)[period] ?? table.daily;
+}
+
+// Helper: compute profit amount from capital + plan + period
+function calcProfit(capital: number, planSlug: string, period: string): number {
+  return capital * getPlanRoi(planSlug, period);
+}
+
+// ─── DB SYNC HELPER ───────────────────────────────────────────────────────────
+// Call this once (e.g. from an admin page or on first load for admin users)
+// to push the new plan rates into the gpu_plans table.
+export async function syncPlanRatesToDB() {
+  const updates = [
+    {
+      short_name: "foundation-node",
+      price_min: 5,
+      hourly_pct: 0.003,
+      daily_pct: 0.02,
+      base_daily_profit_min: 2.0,
+      base_daily_profit_max: 2.0,
+      roi_tier_multiplier: 1.0,
+    },
+    {
+      short_name: "rtx-4090-node",
+      price_min: 50,
+      hourly_pct: 0.005,
+      daily_pct: 0.03,
+      base_daily_profit_min: 3.0,
+      base_daily_profit_max: 3.0,
+      roi_tier_multiplier: 1.0,
+    },
+    {
+      short_name: "a100-gpu-node",
+      price_min: 250,
+      hourly_pct: 0.008,
+      daily_pct: 0.05,
+      base_daily_profit_min: 5.0,
+      base_daily_profit_max: 5.0,
+      roi_tier_multiplier: 1.0,
+    },
+    {
+      short_name: "h100-pcie-node",
+      price_min: 1000,
+      hourly_pct: 0.012,
+      daily_pct: 0.08,
+      base_daily_profit_min: 8.0,
+      base_daily_profit_max: 8.0,
+      roi_tier_multiplier: 1.0,
+    },
+  ];
+
+  for (const u of updates) {
+    await supabase
+      .from("gpu_plans")
+      .update({
+        price_min: u.price_min,
+        hourly_pct: u.hourly_pct,
+        daily_pct: u.daily_pct,
+        base_daily_profit_min: u.base_daily_profit_min,
+        base_daily_profit_max: u.base_daily_profit_max,
+        roi_tier_multiplier: u.roi_tier_multiplier,
+      })
+      .eq("short_name", u.short_name);
+  }
+}
+
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 type Plan = {
   id: string;
@@ -90,8 +193,8 @@ type Plan = {
   hourly_pct: number;
   daily_pct: number;
   referral_pct: number;
-  base_daily_profit_min: number; // stored as 0.29 meaning 0.29%/day
-  base_daily_profit_max: number; // stored as 0.40 meaning 0.40%/day
+  base_daily_profit_min: number;
+  base_daily_profit_max: number;
   roi_tier_multiplier: number;
   tier_index: number;
   tier_color: string;
@@ -312,10 +415,7 @@ function useCapacity(seed: number) {
 }
 
 // ─── LIVE MINING EARNINGS HOOK ────────────────────────────────────────────────
-// Issue #2  FIX: earnings scale with amount_invested (capital-proportional)
-// Issue #6  FIX: rate_factor properly applied to scaled daily %
-// Issue #9  FIX: contract accrual uses DB timestamps, not browser uptime
-// Issue #14 FIX: liveRef prevents stale closure in 60s sync interval
+// Uses PLAN_ROI table for exact period profit. No range — single deterministic value.
 function useLiveMiningEarnings(
   alloc: Allocation,
   plan: Plan | undefined,
@@ -324,36 +424,22 @@ function useLiveMiningEarnings(
   const isComplete = alloc.mining_completed || alloc.status === "matured";
   const finalProfit = alloc.final_profit ?? alloc.total_earned ?? 0;
 
-  // Issue #2 / #6: daily % of capital (not flat $)
-  const rateFactor = alloc.rate_factor_used ?? 0.86;
-  const rawMin =
-    (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
-    (plan?.roi_tier_multiplier ?? 1.0);
-  const rawMax =
-    (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
-    (plan?.roi_tier_multiplier ?? 1.0);
-  const dailyDecMin = rawMin / 100; // e.g. 0.29/100 = 0.0029
-  const dailyDecMax = rawMax / 100;
-  const dailyDec = dailyDecMin + rateFactor * (dailyDecMax - dailyDecMin);
-
-  const PMULT: Record<string, number> = {
-    hourly: 0.8 / 24,
-    daily: 1.0,
-    weekly: 7 * 1.1,
-    monthly: 30 * 1.25,
-  };
   const period = alloc.mining_period ?? "daily";
-  const periodMult = PMULT[period] ?? 1.0;
-  const totalPeriodProfit = alloc.amount_invested * dailyDec * periodMult; // capital-scaled
+  const planSlug = plan?.short_name ?? "";
+
+  // Total profit for this session = capital × exact ROI rate for this period
+  const totalPeriodProfit = calcProfit(alloc.amount_invested, planSlug, period);
   const periodMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
 
-  // Per-second for flexible; for contract use plan daily_pct
+  // Per-second tick rate
   const flexPerSec = totalPeriodProfit / (periodMs / 1000);
-  const contractPerSec =
-    (alloc.amount_invested * (plan?.daily_pct ?? 0.0013)) / 86400;
+  // Contract uses daily rate ticking every second
+  const contractDailyProfit =
+    alloc.amount_invested * getPlanRoi(planSlug, "daily");
+  const contractPerSec = contractDailyProfit / 86400;
   const perSec = isFlexible ? flexPerSec : contractPerSec;
 
-  // Seed from last DB sync (Issue #9: contracts keep accruing via server sync)
+  // Seed from last DB sync
   const base = alloc.total_earned ?? 0;
   const lastUpdate = alloc.updated_at || alloc.created_at;
   const elapsedSec = Math.max(
@@ -367,13 +453,11 @@ function useLiveMiningEarnings(
       : base + perSec * elapsedSec;
 
   const [live, setLive] = useState(seedValue);
-  // Issue #14 FIX: use ref to avoid stale closure in sync setInterval
   const liveRef = useRef(live);
   useEffect(() => {
     liveRef.current = live;
   }, [live]);
 
-  // Re-seed when DB value updates (e.g. after realtime push or reload)
   useEffect(() => {
     if (isComplete) {
       setLive(finalProfit);
@@ -392,7 +476,6 @@ function useLiveMiningEarnings(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [alloc.total_earned, alloc.updated_at, isComplete]);
 
-  // Tick every second
   useEffect(() => {
     if (isComplete) return;
     const iv = setInterval(() => {
@@ -403,7 +486,6 @@ function useLiveMiningEarnings(
     return () => clearInterval(iv);
   }, [perSec, isComplete, isFlexible, totalPeriodProfit]);
 
-  // Sync to DB every 60s — uses liveRef to avoid stale closure (Issue #14)
   useEffect(() => {
     if (isComplete) return;
     const syncIv = setInterval(async () => {
@@ -417,7 +499,7 @@ function useLiveMiningEarnings(
               updated_at: new Date().toISOString(),
             })
             .eq("id", alloc.id)
-            .eq("mining_completed", false); // Issue #8: idempotency guard
+            .eq("mining_completed", false);
         } catch (err) {
           console.error("[mining] sync error:", err);
         }
@@ -466,17 +548,14 @@ function Disclaimer() {
 }
 
 // ─── ESTIMATED PROFIT BANNER ─────────────────────────────────────────────────
-// Issue #15: Shows a live-reactive profit estimate range based on capital,
-// period/term, and plan rates. Updates instantly as the user types or changes
-// period/term. Clearly marked as an estimate — not a guarantee.
+// Single dollar amount — no low/high range, no % shown to user.
+// Reacts instantly to capital + period/term changes.
 function EstimatedProfitBanner({
-  minProfit,
-  maxProfit,
+  profit,
   periodLabel,
   isContract,
 }: {
-  minProfit: number;
-  maxProfit: number;
+  profit: number;
   periodLabel: string;
   isContract: boolean;
 }) {
@@ -521,44 +600,25 @@ function EstimatedProfitBanner({
         </span>
       </div>
 
-      {/* Low / High boxes */}
-      <div className="grid grid-cols-2 gap-2">
-        <div
-          className="rounded-xl py-3 px-3 text-center"
-          style={{
-            background: "rgba(0,0,0,0.3)",
-            border: "1px solid rgba(255,255,255,0.06)",
-          }}
-        >
-          <p className="text-slate-500 text-[9px] uppercase tracking-widest mb-1">
-            Low Estimate
-          </p>
-          <p className={`font-black text-xl tabular-nums ${accentVal}`}>
-            $
-            {minProfit.toLocaleString(undefined, {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}
-          </p>
-        </div>
-        <div
-          className="rounded-xl py-3 px-3 text-center"
-          style={{
-            background: accentBg,
-            border: `1px solid ${accentBorder}`,
-          }}
-        >
-          <p className="text-slate-500 text-[9px] uppercase tracking-widest mb-1">
-            High Estimate
-          </p>
-          <p className={`font-black text-xl tabular-nums ${accentVal}`}>
-            $
-            {maxProfit.toLocaleString(undefined, {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            })}
-          </p>
-        </div>
+      {/* Single profit amount */}
+      <div
+        className="rounded-xl py-4 px-4 text-center"
+        style={{
+          background: "rgba(0,0,0,0.3)",
+          border: `1px solid ${accentBorder}`,
+        }}
+      >
+        <p className="text-slate-500 text-[9px] uppercase tracking-widest mb-1.5">
+          Estimated Earnings
+        </p>
+        <p className={`font-black text-3xl tabular-nums ${accentVal}`}>
+          $
+          {profit.toLocaleString(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}
+        </p>
+        <p className="text-slate-600 text-[10px] mt-1">for {periodLabel}</p>
       </div>
 
       {/* Disclaimer note */}
@@ -574,8 +634,7 @@ function EstimatedProfitBanner({
           This is an{" "}
           <strong className="text-amber-300">estimated projection</strong> based
           on current GPU demand and live network conditions. Your actual return
-          may be higher or lower — GPU demand fluctuates continuously and is not
-          fixed or stable. This figure is a guide only, not a guarantee.
+          may be higher or lower. This figure is a guide only, not a guarantee.
         </p>
       </div>
     </div>
@@ -654,7 +713,6 @@ function MiningProgressBadge({ alloc }: { alloc: Allocation }) {
 }
 
 // ─── WITHDRAW MODAL ───────────────────────────────────────────────────────────
-// Issue #10 FIX: Re-reads balance from DB before deducting; uses .gte() atomic guard
 function WithdrawModal({
   alloc,
   plan,
@@ -732,7 +790,6 @@ function WithdrawModal({
       return;
     }
 
-    // Verify PIN
     const encoder = new TextEncoder();
     const hashBuf = await crypto.subtle.digest(
       "SHA-256",
@@ -772,7 +829,6 @@ function WithdrawModal({
 
     setLoading(true);
     try {
-      // Issue #10 FIX: Re-read balance from DB atomically before deducting
       const { data: freshBal } = await supabase
         .from("users")
         .select("balance_available")
@@ -823,7 +879,6 @@ function WithdrawModal({
       if (insErr)
         throw new Error(insErr.message || "Withdrawal insert failed.");
 
-      // Issue #10 FIX: Atomic deduction — only applies if balance is still sufficient
       const { error: deductErr } = await supabase
         .from("users")
         .update({
@@ -831,7 +886,7 @@ function WithdrawModal({
           last_withdrawal_at: now,
         })
         .eq("id", userId)
-        .gte("balance_available", amt); // ATOMIC GUARD — prevents overdraft
+        .gte("balance_available", amt);
 
       if (deductErr) {
         setError("Balance update failed. Please try again.");
@@ -903,7 +958,6 @@ function WithdrawModal({
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div
           className="px-5 py-4 flex items-center justify-between flex-shrink-0"
           style={{
@@ -931,7 +985,6 @@ function WithdrawModal({
         </div>
 
         <div className="overflow-y-auto flex-1 p-5 space-y-4">
-          {/* Blocked states */}
           {!isContract && !miningComplete ? (
             <div
               className="rounded-2xl p-5 text-center"
@@ -945,8 +998,7 @@ function WithdrawModal({
                 Mining Still Active
               </p>
               <p className="text-amber-400/70 text-xs mt-2">
-                Withdraw unlocks when your mining period completes and earnings
-                are credited to your wallet.
+                Withdraw unlocks when your mining period completes.
               </p>
               {alloc.mining_ends_at && (
                 <p className="text-amber-300 text-xs mt-2 font-bold">
@@ -975,7 +1027,6 @@ function WithdrawModal({
             </div>
           ) : (
             <>
-              {/* Payout account */}
               {loadingPayout ? (
                 <div
                   className="rounded-xl p-4 flex items-center gap-3"
@@ -1050,7 +1101,6 @@ function WithdrawModal({
                 </div>
               )}
 
-              {/* Balances */}
               <div className="grid grid-cols-2 gap-3">
                 <div
                   className="rounded-xl p-3"
@@ -1082,7 +1132,6 @@ function WithdrawModal({
                 </div>
               </div>
 
-              {/* Amount input */}
               <div>
                 <label className="text-slate-300 text-sm font-bold block mb-2">
                   Amount to Withdraw (min ${minW})
@@ -1116,7 +1165,6 @@ function WithdrawModal({
                 </div>
               </div>
 
-              {/* Business day status */}
               <div
                 className="rounded-xl p-3"
                 style={{
@@ -1136,7 +1184,6 @@ function WithdrawModal({
                 </p>
               </div>
 
-              {/* PIN */}
               <div>
                 <label className="text-slate-300 text-sm font-bold block mb-2">
                   Security PIN <span className="text-red-400">*</span>
@@ -1213,7 +1260,6 @@ function WithdrawModal({
 }
 
 // ─── PORTFOLIO CARD ───────────────────────────────────────────────────────────
-// Issue #11 FIX: 2-col grid on mobile, balanced spacing
 function PortfolioCard({
   alloc,
   plan,
@@ -1247,7 +1293,6 @@ function PortfolioCard({
   const available = Math.max(0, liveEarned - withdrawn);
   const canWithdraw = isContract ? isMatured : miningDone;
 
-  // CRITICAL FIX: Session expired but not yet claimed — cron never ran
   const isExpiredUnclaimed =
     !miningDone &&
     !isContract &&
@@ -1269,7 +1314,6 @@ function PortfolioCard({
     setClaiming(false);
   }
 
-  // Contract progress
   const daysElapsed = Math.floor(
     (now.getTime() - startDate.getTime()) / 86400000,
   );
@@ -1285,23 +1329,10 @@ function PortfolioCard({
       )
     : 0;
 
-  // Per-second for display (flexible only)
-  const rateFactor = alloc.rate_factor_used ?? 0.86;
-  const rawMin =
-    (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
-    (plan?.roi_tier_multiplier ?? 1.0);
-  const rawMax =
-    (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
-    (plan?.roi_tier_multiplier ?? 1.0);
-  const dailyDec = rawMin / 100 + rateFactor * (rawMax / 100 - rawMin / 100);
-  const PMULT: Record<string, number> = {
-    hourly: 0.8 / 24,
-    daily: 1.0,
-    weekly: 7 * 1.1,
-    monthly: 30 * 1.25,
-  };
+  // Per-second rate for display (using exact ROI)
   const period = alloc.mining_period ?? "daily";
-  const totalProfit = alloc.amount_invested * dailyDec * (PMULT[period] ?? 1.0);
+  const planSlug = plan?.short_name ?? "";
+  const totalProfit = calcProfit(alloc.amount_invested, planSlug, period);
   const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
   const perSec = miningDone ? 0 : totalProfit / (pMs / 1000);
   const perHour = perSec * 3600;
@@ -1329,7 +1360,6 @@ function PortfolioCard({
           boxShadow: `0 0 30px ${cs.glow}`,
         }}
       >
-        {/* Header */}
         <div
           className="flex items-center justify-between px-4 py-3"
           style={{ background: cs.bg, borderBottom: `1px solid ${cs.border}` }}
@@ -1383,7 +1413,6 @@ function PortfolioCard({
           </div>
         </div>
 
-        {/* Live earnings — always visible in portfolio (Issue #1 / #5) */}
         <div
           className="px-4 py-4"
           style={{
@@ -1440,10 +1469,8 @@ function PortfolioCard({
         </div>
 
         <div className="p-4 space-y-3">
-          {/* Mining progress badge */}
           {!isContract && <MiningProgressBadge alloc={alloc} />}
 
-          {/* Stats — 2 cols on mobile (Issue #11) */}
           <div className="grid grid-cols-2 gap-2">
             {[
               {
@@ -1499,7 +1526,6 @@ function PortfolioCard({
             ))}
           </div>
 
-          {/* Mining period row */}
           {!isContract && !miningDone && (
             <div
               className="flex items-center justify-between rounded-xl px-3 py-2.5"
@@ -1518,7 +1544,6 @@ function PortfolioCard({
             </div>
           )}
 
-          {/* Contract progress bar */}
           {isContract && maturityDate && (
             <div className="space-y-2">
               <div className="flex justify-between items-center">
@@ -1555,7 +1580,6 @@ function PortfolioCard({
             </div>
           )}
 
-          {/* Status messages */}
           {isContract && !isMatured && (
             <div className="rounded-xl px-3 py-2.5 flex items-start gap-2 bg-amber-900/10 border border-amber-800/20">
               <Lock size={11} className="text-amber-500 mt-0.5 shrink-0" />
@@ -1583,8 +1607,7 @@ function PortfolioCard({
                 className="text-emerald-400 mt-0.5 shrink-0"
               />
               <p className="text-emerald-300 text-xs">
-                Mining complete. Capital + earnings credited to wallet. Withdraw
-                or start a new session.
+                Mining complete. Capital + earnings credited to wallet.
               </p>
             </div>
           )}
@@ -1597,9 +1620,7 @@ function PortfolioCard({
             </div>
           )}
 
-          {/* Actions */}
           <div className="flex gap-2 pt-1">
-            {/* CRITICAL FIX: Show Claim button for expired unclaimed sessions */}
             {isExpiredUnclaimed && !claimDone ? (
               <button
                 onClick={claimEarnings}
@@ -1852,13 +1873,6 @@ function KYCGateModal({
 }
 
 // ─── PLAN CARD ────────────────────────────────────────────────────────────────
-// Issue #1  FIX: No earnings range shown pre-purchase (now restored as estimate)
-// Issue #3  FIX: Contract % removed from term selector
-// Issue #4  FIX: Tab labelled "Pay-As-You-Go"
-// Issue #11 FIX: Period selector 2×2 on mobile
-// Issue #12 FIX: Quick-select filtered to valid plan range
-// Issue #15 ADD: EstimatedProfitBanner — reactive to capital + period/term changes
-// TypeScript: icon arrays typed explicitly — no "as const" hack
 type IconComponent = React.ComponentType<{ size?: number; className?: string }>;
 
 function PlanCard({
@@ -1918,39 +1932,26 @@ function PlanCard({
         ? `Maximum is $${plan.price_max.toLocaleString()}`
         : null;
 
-  // Issue #12 FIX: Only show quick-select values within plan's valid range
-  const quickVals = [100, 500, 1000, 5000].filter(
-    (v) => v >= plan.price_min && v <= plan.price_max,
-  );
+  // Issue #12: Only show quick-select values within plan's valid range
+  const quickVals = [5, 50, 100, 250, 500, 1000, 5000]
+    .filter((v) => v >= plan.price_min && v <= plan.price_max)
+    .slice(0, 4);
 
-  // ── Issue #15: Estimated profit — reactive to amount + period + term ────────
-  // Uses the exact same formula as useLiveMiningEarnings so numbers are
-  // always consistent. Pure derived values — no useState/useEffect needed.
-  // Re-computes on every render triggered by amount/minPeriod/term changes.
-  const EST_PMULT: Record<string, number> = {
-    hourly: 0.8 / 24,
-    daily: 1.0,
-    weekly: 7 * 1.1,
-    monthly: 30 * 1.25,
-  };
-  // Flexible estimates
-  const flexDailyMin =
-    (plan.base_daily_profit_min * plan.roi_tier_multiplier) / 100;
-  const flexDailyMax =
-    (plan.base_daily_profit_max * plan.roi_tier_multiplier) / 100;
-  const flexPeriodMult = EST_PMULT[minPeriod.key] ?? 1.0;
-  const flexEstMin = amount * flexDailyMin * flexPeriodMult;
-  const flexEstMax = amount * flexDailyMax * flexPeriodMult;
+  // ── Estimated profit — single amount, no range, no % shown ────────────────
+  // Flexible: capital × exact ROI for selected period
+  const flexEstProfit =
+    !amountErr && amount > 0
+      ? calcProfit(amount, plan.short_name, minPeriod.key)
+      : 0;
 
-  // Contract estimates — uses contract_returns from plan DB object
-  const contractRet = plan.contract_returns?.[
-    term.key as keyof typeof plan.contract_returns
-  ] ?? { min_pct: 52, max_pct: 93 };
-  const contractEstMin = amount * (contractRet.min_pct / 100);
-  const contractEstMax = amount * (contractRet.max_pct / 100);
+  // Contract: use monthly ROI as the base, scale by contract months
+  // 6m = 6 × monthly rate, 12m = 12 × monthly rate, 24m = 24 × monthly rate
+  const monthlyRate = getPlanRoi(plan.short_name, "monthly");
+  const contractMonths = term.months;
+  const contractEstProfit =
+    !amountErr && amount > 0 ? amount * monthlyRate * contractMonths : 0;
   // ────────────────────────────────────────────────────────────────────────────
 
-  // Typed icon arrays (TypeScript fix — no "as const" on mixed arrays)
   const INFO_SECTIONS: Array<{ id: string; lbl: string; Icon: IconComponent }> =
     [
       { id: "specs", lbl: "GPU Specs", Icon: Server },
@@ -1998,7 +1999,6 @@ function PlanCard({
         </div>
       )}
 
-      {/* Tap to expand */}
       <div
         className="flex items-start gap-3 p-4 cursor-pointer select-none"
         onClick={() => setOpen((o) => !o)}
@@ -2068,7 +2068,6 @@ function PlanCard({
         </div>
       </div>
 
-      {/* Utilisation bar */}
       <div className="px-4 pb-3">
         <div className="flex justify-between text-[10px] text-slate-600 mb-1">
           <span>Cluster Utilisation</span>
@@ -2090,7 +2089,6 @@ function PlanCard({
           className="border-t px-4 py-4 space-y-4"
           style={{ borderColor: "rgba(255,255,255,0.06)" }}
         >
-          {/* Tab selector */}
           {showFlex && showContract && (
             <div className="flex gap-2">
               <button
@@ -2128,7 +2126,6 @@ function PlanCard({
                 </p>
               </div>
 
-              {/* Amount */}
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
                   Stake Amount
@@ -2162,7 +2159,6 @@ function PlanCard({
                 {amountErr && amount > 0 && (
                   <p className="text-red-400 text-xs mt-1.5">{amountErr}</p>
                 )}
-                {/* Issue #12 FIX: only valid quick-select values shown */}
                 {quickVals.length > 0 && (
                   <div className="flex gap-2 mt-2 flex-wrap">
                     {quickVals.map((v) => (
@@ -2178,7 +2174,7 @@ function PlanCard({
                 )}
               </div>
 
-              {/* Period selector — 2×2 grid (Issue #11) */}
+              {/* Period selector */}
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
                   Select Mining Duration
@@ -2200,13 +2196,11 @@ function PlanCard({
                 </p>
               </div>
 
-              {/* Issue #15: Estimated profit banner + how-it-works */}
+              {/* Single estimated profit amount — no % shown */}
               {!amountErr && amount > 0 && (
                 <>
-                  {/* Estimated profit — reacts to amount + period instantly */}
                   <EstimatedProfitBanner
-                    minProfit={flexEstMin}
-                    maxProfit={flexEstMax}
+                    profit={flexEstProfit}
                     periodLabel={minPeriod.label}
                     isContract={false}
                   />
@@ -2277,7 +2271,7 @@ function PlanCard({
                 </p>
               </div>
 
-              {/* Term selector — Issue #3 FIX: NO % shown */}
+              {/* Term selector — no % shown */}
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
                   Select Contract Term
@@ -2294,7 +2288,6 @@ function PlanCard({
                       >
                         {t.label}
                       </p>
-                      {/* Issue #3 FIX: No % rate shown here */}
                       <p className="text-[10px] text-slate-500 mt-0.5">
                         {t.key === "6m"
                           ? "Short term"
@@ -2356,13 +2349,11 @@ function PlanCard({
                 )}
               </div>
 
-              {/* Issue #15: Estimated profit banner + how-it-works */}
+              {/* Single estimated profit amount — no % shown */}
               {!amountErr && amount > 0 && (
                 <>
-                  {/* Estimated profit — reacts to amount + term instantly */}
                   <EstimatedProfitBanner
-                    minProfit={contractEstMin}
-                    maxProfit={contractEstMax}
+                    profit={contractEstProfit}
                     periodLabel={`${term.label} total`}
                     isContract={true}
                   />
@@ -2410,7 +2401,7 @@ function PlanCard({
             </div>
           )}
 
-          {/* Info section tabs — typed properly (TypeScript fix) */}
+          {/* Info section tabs */}
           <div className="flex gap-1.5 flex-wrap">
             {INFO_SECTIONS.map(({ id, lbl, Icon }) => (
               <button
@@ -2618,6 +2609,8 @@ export default function GPUPlansPage() {
   const [activeTab, setActiveTab] = useState<"plans" | "portfolio">("plans");
   const networkEarnings = useLiveNetworkEarnings();
   const { kycStatus } = useKycStatus(userId);
+  // Track if we've synced plan rates to DB this session
+  const [ratesSynced, setRatesSynced] = useState(false);
 
   function showToast(msg: string, ok = true) {
     setToast({ msg, ok });
@@ -2686,10 +2679,17 @@ export default function GPUPlansPage() {
     loadAll();
   }, [loadAll]);
 
-  // ── AUTO-COMPLETE EXPIRED SESSIONS ────────────────────────────────────────
-  // CRITICAL FIX: Mining sessions expire but balance never credits if cron
-  // doesn't run. This fires on every portfolio tab open and claims any expired
-  // sessions automatically — crediting balance_available without needing a cron.
+  // ── SYNC PLAN RATES TO DB ON FIRST LOAD ───────────────────────────────────
+  // Pushes the new ROI rates and minimum deposits to gpu_plans table.
+  // Runs once per session, silently in background.
+  useEffect(() => {
+    if (!userId || ratesSynced) return;
+    setRatesSynced(true);
+    syncPlanRatesToDB().catch((e) =>
+      console.warn("[plan-sync] Could not sync rates:", e),
+    );
+  }, [userId, ratesSynced]);
+
   const [autoCompleting, setAutoCompleting] = useState(false);
   const autoCompleteExpiredSessions = useCallback(async () => {
     if (!userId || autoCompleting) return;
@@ -2724,7 +2724,6 @@ export default function GPUPlansPage() {
     }
   }, [activeTab]); // eslint-disable-line
 
-  // Realtime subscription
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -2767,8 +2766,6 @@ export default function GPUPlansPage() {
     };
   }, [userId]);
 
-  // Issue #9 FIX: Server-side DB sync every 60s — works even when browser is open
-  // Handles both flexible (capped) and contract (uncapped) accrual
   useEffect(() => {
     if (!userId || !allocations.length || !plans.length) return;
     const iv = setInterval(async () => {
@@ -2777,21 +2774,8 @@ export default function GPUPlansPage() {
         (a) => a.status === "active" && !a.mining_completed,
       )) {
         const plan = plans.find((p) => p.id === alloc.plan_id);
-        const rf = alloc.rate_factor_used ?? 0.86;
-        const rawMin =
-          (plan?.base_daily_profit_min ?? BASE_DAILY_MIN) *
-          (plan?.roi_tier_multiplier ?? 1.0);
-        const rawMax =
-          (plan?.base_daily_profit_max ?? BASE_DAILY_MAX) *
-          (plan?.roi_tier_multiplier ?? 1.0);
-        const dDec = rawMin / 100 + rf * (rawMax / 100 - rawMin / 100);
-        const PMULT: Record<string, number> = {
-          hourly: 0.8 / 24,
-          daily: 1.0,
-          weekly: 7 * 1.1,
-          monthly: 30 * 1.25,
-        };
         const period = alloc.mining_period ?? "daily";
+        const planSlug = plan?.short_name ?? "";
         const base = alloc.total_earned ?? 0;
         const elapsed = Math.max(
           0,
@@ -2801,18 +2785,24 @@ export default function GPUPlansPage() {
 
         let newEarned: number;
         if (alloc.payment_model === "flexible") {
-          const totalProfit =
-            alloc.amount_invested * dDec * (PMULT[period] ?? 1.0);
+          const totalProfit = calcProfit(
+            alloc.amount_invested,
+            planSlug,
+            period,
+          );
           const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
           newEarned = Math.min(
             base + (totalProfit / (pMs / 1000)) * elapsed,
             totalProfit,
           );
         } else {
-          // Contract: daily_pct from plan
-          const cpDay = plan?.daily_pct ?? 0.0013;
-          newEarned =
-            base + ((alloc.amount_invested * cpDay) / 86400) * elapsed;
+          // Contract: daily ROI per second
+          const dailyProfit = calcProfit(
+            alloc.amount_invested,
+            planSlug,
+            "daily",
+          );
+          newEarned = base + (dailyProfit / 86400) * elapsed;
         }
 
         await supabase
@@ -2822,7 +2812,7 @@ export default function GPUPlansPage() {
             updated_at: new Date().toISOString(),
           })
           .eq("id", alloc.id)
-          .eq("mining_completed", false); // Issue #8: idempotency guard
+          .eq("mining_completed", false);
       }
     }, 60_000);
     return () => clearInterval(iv);
@@ -2855,26 +2845,26 @@ export default function GPUPlansPage() {
   ) {
     const plan = plans.find((p) => p.id === planId);
     if (!plan) return;
+    const planSlug = plan.short_name;
 
     if (paymentModel === "contract") {
-      const tk = contractTerm?.key ?? "6m";
-      const ret = plan.contract_returns?.[
-        tk as keyof typeof plan.contract_returns
-      ] ?? { min_pct: 52, max_pct: 93 };
+      const monthlyRoi = getPlanRoi(planSlug, "monthly");
+      const contractMonths = contractTerm?.months ?? 6;
+      const estProfit = amount * monthlyRoi * contractMonths;
       const ps = new URLSearchParams({
         node: planId,
         name: plan.name,
         price: amount.toString(),
-        daily: (amount * plan.daily_pct).toFixed(6),
+        daily: calcProfit(amount, planSlug, "daily").toFixed(6),
         itype,
         gpu: plan.gpu_model,
         vram: plan.vram,
         paymentModel: "contract",
-        contractMonths: String(contractTerm?.months ?? 6),
+        contractMonths: String(contractMonths),
         contractLabel: contractTerm?.label ?? "6 Months",
-        contractMinPct: String(ret.min_pct),
-        contractMaxPct: String(ret.max_pct),
-        lockInMonths: String(contractTerm?.months ?? 6),
+        // Pass est profit (not %) — checkout page can display this
+        contractEstProfit: estProfit.toFixed(2),
+        lockInMonths: String(contractMonths),
         lockInLabel: contractTerm?.label ?? "6 Months",
         lockInMultiplier: "1",
       });
@@ -2882,6 +2872,8 @@ export default function GPUPlansPage() {
         sessionStorage.setItem("checkout_redirect", "/dashboard/gpu-plans");
       router.push(`/dashboard/checkout?${ps.toString()}`);
     } else {
+      const period = miningPeriod ?? "daily";
+      const estProfit = calcProfit(amount, planSlug, period);
       const ps = new URLSearchParams({
         node: planId,
         name: plan.name,
@@ -2890,7 +2882,8 @@ export default function GPUPlansPage() {
         gpu: plan.gpu_model,
         vram: plan.vram,
         paymentModel: "flexible",
-        miningPeriod: miningPeriod ?? "daily",
+        miningPeriod: period,
+        miningEstProfit: estProfit.toFixed(2),
         lockInMonths: "0",
         lockInLabel: "Flexible",
         lockInMultiplier: "1",
@@ -3029,7 +3022,6 @@ export default function GPUPlansPage() {
               centres. Your node processes AI training and inference workloads
               24/7, generating real-time mining income.
             </p>
-            {/* Market stats — 2×2 grid (Issue #11) */}
             <div className="grid grid-cols-2 gap-2 mt-4">
               {MARKET_STATS.map(({ label, value, icon: Icon }) => (
                 <div
@@ -3048,7 +3040,6 @@ export default function GPUPlansPage() {
             </div>
           </div>
 
-          {/* KYC info banner */}
           {!kycVerified && (
             <div
               className="rounded-2xl p-4 flex items-start gap-3"
@@ -3158,7 +3149,6 @@ export default function GPUPlansPage() {
                     Real-time earnings, progress &amp; withdrawals
                   </p>
                 </div>
-                {/* CRITICAL FIX: Manual trigger for claiming expired sessions */}
                 {allocations.some(
                   (a) =>
                     !a.mining_completed &&
@@ -3304,7 +3294,6 @@ export default function GPUPlansPage() {
           {/* ── PLANS TAB ── */}
           {activeTab === "plans" && (
             <>
-              {/* How It Works */}
               <section>
                 <h2 className="text-white font-black text-xl mb-1">
                   Two Ways to Earn
@@ -3399,7 +3388,6 @@ export default function GPUPlansPage() {
                 </div>
               </section>
 
-              {/* GPU Plans */}
               <section>
                 <h2 className="text-white font-black text-xl mb-1">
                   Select Your Mining Node
@@ -3427,7 +3415,6 @@ export default function GPUPlansPage() {
                 </div>
               </section>
 
-              {/* Testimonials */}
               <section>
                 <h2 className="text-white font-black text-xl mb-1">
                   Results from the Community

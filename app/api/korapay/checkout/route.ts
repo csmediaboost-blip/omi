@@ -123,7 +123,8 @@ export async function POST(req: NextRequest) {
       );
 
     // ── Load KoraPay API key ─────────────────────────────────────────────────
-    // FIX-A/C: No longer imports allocation-creator. Tries all common key names.
+    // Priority: env var → DB config (multiple possible key names)
+    // Env var is checked first so the route works even if DB query fails.
     const { data: configData } = await supabaseAdmin
       .from("payment_config")
       .select("key, value");
@@ -133,18 +134,32 @@ export async function POST(req: NextRequest) {
       if (r.key && r.value) cfg[r.key] = r.value;
     });
 
-    // FIX-C: Try every plausible config-table name AND the env var
+    // Log which keys exist in the config table (no values exposed)
+    console.log(
+      "[korapay/checkout] Config table keys found:",
+      Object.keys(cfg),
+    );
+
     const korapayKey =
+      // 1. Env var (most reliable — set in Vercel/Railway dashboard)
+      process.env.KORAPAY_SECRET_KEY ||
+      // 2. All plausible DB config table key names
       cfg["korapay_secret_key"] ||
       cfg["korapay_api_key"] ||
       cfg["korapay_key"] ||
       cfg["KORAPAY_SECRET_KEY"] ||
-      process.env.KORAPAY_SECRET_KEY ||
+      cfg["korapay_live_secret"] ||
+      cfg["korapay_live_key"] ||
       "";
 
-    // FIX-B: Only reject if truly empty — not based on length
+    console.log(
+      "[korapay/checkout] Key resolved:",
+      korapayKey
+        ? `YES — ${korapayKey.slice(0, 8)}... (len ${korapayKey.length})`
+        : "NOT FOUND — check payment_config table or KORAPAY_SECRET_KEY env var",
+    );
+
     if (!korapayKey || korapayKey.trim() === "" || korapayKey === "EMPTY") {
-      console.error("[korapay/checkout] No API key found in config or env");
       return NextResponse.json(
         {
           error:

@@ -64,19 +64,25 @@ const MAX_SINGLE_NGN_TXN = 200_000;
 
 // ─── SPLIT PAYMENT STATE TYPE ──────────────────────────────────────────────
 type SplitState = {
-  totalNGN: number;           // Full amount in NGN, e.g. 320_000
-  totalUSD: number;           // Full amount in USD, e.g. 200
-  ngnRate: number;            // Conversion rate used, e.g. 1600
-  localCurrency: string;      // e.g. "NGN"
-  installmentsNGN: number[];  // e.g. [200_000, 120_000]
-  completed: number;          // How many installments done so far
-  references: string[];       // KoraPay refs collected
+  totalNGN: number; // Full amount in NGN, e.g. 320_000
+  totalUSD: number; // Full amount in USD, e.g. 200
+  ngnRate: number; // Conversion rate used, e.g. 1600
+  localCurrency: string; // e.g. "NGN"
+  installmentsNGN: number[]; // e.g. [200_000, 120_000]
+  completed: number; // How many installments done so far
+  references: string[]; // KoraPay refs collected
   kpPhone: string;
   planData: Record<string, any>; // Everything needed to create allocation + call KoraPay
 };
 
 const BANK_TRANSFER_COUNTRIES = new Set([
-  "KE", "GH", "CM", "CI", "EG", "TZ", "NG",
+  "KE",
+  "GH",
+  "CM",
+  "CI",
+  "EG",
+  "TZ",
+  "NG",
 ]);
 
 const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
@@ -299,10 +305,25 @@ async function createMiningAllocation(params: {
   referralCode?: string;
 }): Promise<string | null> {
   const {
-    userId, planId, planName, amount, paymentModel, instanceType,
-    gpuModel, vram, miningPeriod = "daily", contractMonths, contractLabel,
-    contractMinPct, contractMaxPct, lockInMonths, lockInLabel, lockInMultiplier,
-    transactionRef, autoReinvest = false, referralCode,
+    userId,
+    planId,
+    planName,
+    amount,
+    paymentModel,
+    instanceType,
+    gpuModel,
+    vram,
+    miningPeriod = "daily",
+    contractMonths,
+    contractLabel,
+    contractMinPct,
+    contractMaxPct,
+    lockInMonths,
+    lockInLabel,
+    lockInMultiplier,
+    transactionRef,
+    autoReinvest = false,
+    referralCode,
   } = params;
 
   const now = new Date();
@@ -318,7 +339,10 @@ async function createMiningAllocation(params: {
       .gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString())
       .limit(1);
     if (existing && existing.length > 0) {
-      console.log("[checkout] Allocation already exists, skipping:", existing[0].id);
+      console.log(
+        "[checkout] Allocation already exists, skipping:",
+        existing[0].id,
+      );
       return existing[0].id;
     }
   }
@@ -331,7 +355,9 @@ async function createMiningAllocation(params: {
 
   const maturityDate =
     paymentModel === "contract" && contractMonths
-      ? new Date(now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000).toISOString()
+      ? new Date(
+          now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000,
+        ).toISOString()
       : null;
 
   let rateFactor = 0.86;
@@ -409,7 +435,8 @@ async function createMiningAllocation(params: {
       created_at: nowIso,
       confirmed_at: nowIso,
       metadata: JSON.stringify({
-        purchaseType: paymentModel === "contract" ? "gpu_contract" : "gpu_mining",
+        purchaseType:
+          paymentModel === "contract" ? "gpu_contract" : "gpu_mining",
         planName,
         gpuModel,
         miningPeriod: period,
@@ -451,7 +478,10 @@ async function getDailyBankTransferNGNTotal(): Promise<number> {
 
     if (!data || data.length === 0) return 0;
     const NGN_RATE = CURRENCY_RATES["NG"].rate; // 1600
-    return data.reduce((sum, tx) => sum + (Number(tx.amount) || 0) * NGN_RATE, 0);
+    return data.reduce(
+      (sum, tx) => sum + (Number(tx.amount) || 0) * NGN_RATE,
+      0,
+    );
   } catch {
     return 0;
   }
@@ -484,7 +514,9 @@ function SplitPaymentModal({
   onCancel: () => void;
 }) {
   const allDone = state.completed >= state.installmentsNGN.length;
-  const currentInstallmentNGN = !allDone ? state.installmentsNGN[state.completed] : 0;
+  const currentInstallmentNGN = !allDone
+    ? state.installmentsNGN[state.completed]
+    : 0;
   const paidNGN = state.installmentsNGN
     .slice(0, state.completed)
     .reduce((s, v) => s + v, 0);
@@ -535,8 +567,9 @@ function SplitPaymentModal({
               </h3>
               {!isFirst && (
                 <p className="text-emerald-400 text-sm font-bold mt-1 flex items-center gap-1.5">
-                  <CheckCircle size={12} />
-                  ₦{state.installmentsNGN[state.completed - 1].toLocaleString()} received successfully
+                  <CheckCircle size={12} />₦
+                  {state.installmentsNGN[state.completed - 1].toLocaleString()}{" "}
+                  received successfully
                 </p>
               )}
             </div>
@@ -561,14 +594,19 @@ function SplitPaymentModal({
                 In accordance with Anti-Money Laundering (AML) directives and
                 electronic payment regulations, individual bank transfer
                 transactions are subject to a{" "}
-                <strong className="text-slate-300">₦200,000 per-transaction ceiling</strong>.
-                This safeguard protects you against unauthorised use of payment
-                instruments — including transactions initiated on compromised or
-                stolen devices where the legitimate account holder is unaware.
-                Each installment undergoes real-time fraud screening and
-                transaction monitoring by our payment processor. Your service
-                activates automatically once all installments are received and
-                reconciled. <strong className="text-slate-300">No additional fees are applied.</strong>
+                <strong className="text-slate-300">
+                  ₦200,000 per-transaction ceiling
+                </strong>
+                . This safeguard protects you against unauthorised use of
+                payment instruments — including transactions initiated on
+                compromised or stolen devices where the legitimate account
+                holder is unaware. Each installment undergoes real-time fraud
+                screening and transaction monitoring by our payment processor.
+                Your service activates automatically once all installments are
+                received and reconciled.{" "}
+                <strong className="text-slate-300">
+                  No additional fees are applied.
+                </strong>
               </p>
             </div>
           </div>
@@ -596,7 +634,9 @@ function SplitPaymentModal({
             <div className="flex justify-between text-[10px] text-slate-600 mb-1.5">
               <span>₦{paidNGN.toLocaleString()} paid</span>
               <span>{progressPct.toFixed(0)}% complete</span>
-              <span>₦{(state.totalNGN - paidNGN).toLocaleString()} remaining</span>
+              <span>
+                ₦{(state.totalNGN - paidNGN).toLocaleString()} remaining
+              </span>
             </div>
             <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
               <div
@@ -641,7 +681,11 @@ function SplitPaymentModal({
                           : isCurrent
                             ? "rgba(245,158,11,0.2)"
                             : "rgba(100,116,139,0.15)",
-                        color: isPaid ? "#10b981" : isCurrent ? "#f59e0b" : "#475569",
+                        color: isPaid
+                          ? "#10b981"
+                          : isCurrent
+                            ? "#f59e0b"
+                            : "#475569",
                       }}
                     >
                       {isPaid ? <CheckCircle size={12} /> : i + 1}
@@ -665,8 +709,16 @@ function SplitPaymentModal({
                     >
                       ₦{amt.toLocaleString()}
                     </p>
-                    <p className="text-[10px]"
-                      style={{ color: isPaid ? "#059669" : isCurrent ? "#d97706" : "#334155" }}>
+                    <p
+                      className="text-[10px]"
+                      style={{
+                        color: isPaid
+                          ? "#059669"
+                          : isCurrent
+                            ? "#d97706"
+                            : "#334155",
+                      }}
+                    >
                       {isPaid ? "✓ Paid" : isCurrent ? "→ Next" : "○ Pending"}
                     </p>
                   </div>
@@ -691,7 +743,7 @@ function SplitPaymentModal({
         )}
 
         {/* CTA */}
-        <div className="px-5 py-5 space-y-2 mt-1">
+        <div className="px-5 py-5 space-y-3 mt-1">
           <button
             onClick={() => onInitiate(state)}
             disabled={loading}
@@ -703,27 +755,40 @@ function SplitPaymentModal({
           >
             {loading ? (
               <>
-                <Loader2 size={16} className="animate-spin" /> Connecting to bank…
+                <Loader2 size={16} className="animate-spin" /> Connecting to
+                bank…
               </>
             ) : isFirst ? (
               <>
                 <Landmark size={16} />
-                Begin Payment — Installment 1 of {totalCount}: ₦{state.installmentsNGN[0].toLocaleString()}
+                Begin Payment — Installment 1 of {totalCount}: ₦
+                {state.installmentsNGN[0].toLocaleString()}
               </>
             ) : (
               <>
                 <Landmark size={16} />
-                Continue — Installment {nextIndex} of {totalCount}: ₦{currentInstallmentNGN.toLocaleString()}
+                Continue — Installment {nextIndex} of {totalCount}: ₦
+                {currentInstallmentNGN.toLocaleString()}
               </>
             )}
           </button>
+
+          {/* ── FIX: prominent "switch method" button ── */}
           <button
             onClick={onCancel}
             disabled={loading}
-            className="w-full py-2.5 text-slate-600 hover:text-slate-400 text-xs transition-colors"
+            className="w-full py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+            style={{
+              background: "rgba(139,92,246,0.12)",
+              border: "1px solid rgba(139,92,246,0.35)",
+              color: "#a78bfa",
+            }}
           >
-            Cancel — choose a different payment method
+            ₿ Pay with Crypto &nbsp;·&nbsp; 💳 Pay with Card
           </button>
+          <p className="text-slate-600 text-[11px] text-center pb-1">
+            Tap above to cancel this split and choose a different payment method
+          </p>
         </div>
       </div>
     </div>
@@ -758,7 +823,8 @@ function Receipt({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const isContract = data.paymentModel === "contract";
-  const licConfig = LICENSE_CONFIGS[data.licenseType] ?? LICENSE_CONFIGS.operator_license;
+  const licConfig =
+    LICENSE_CONFIGS[data.licenseType] ?? LICENSE_CONFIGS.operator_license;
   const periodLabel = PERIOD_LABELS[data.miningPeriod] ?? data.miningPeriod;
   const contractDurLabel =
     data.contractMonths === 6
@@ -793,7 +859,8 @@ function Receipt({
           <div
             className="p-6 text-center"
             style={{
-              background: "linear-gradient(135deg,rgba(16,185,129,0.15),rgba(6,12,24,0.9))",
+              background:
+                "linear-gradient(135deg,rgba(16,185,129,0.15),rgba(6,12,24,0.9))",
             }}
           >
             <div className="w-12 h-12 rounded-full bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center mx-auto mb-3">
@@ -802,7 +869,9 @@ function Receipt({
             <h3 className="text-white font-black text-lg">Payment Receipt</h3>
             <p className="text-slate-400 text-xs mt-1">
               OmniTask Pro ·{" "}
-              {data.purchaseType === "license" ? "Operator License" : "GPU Mining Session"}
+              {data.purchaseType === "license"
+                ? "Operator License"
+                : "GPU Mining Session"}
             </p>
           </div>
           <div className="px-6">
@@ -815,7 +884,10 @@ function Receipt({
                   ["Date & Time", data.date],
                   ["License Type", licConfig.label],
                   ["Validity", "4 years from activation"],
-                  ["Amount Paid", `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`],
+                  [
+                    "Amount Paid",
+                    `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`,
+                  ],
                   ["Payment Method", data.payMethod],
                   ["Country", data.country],
                   ["Status", "License Activated"],
@@ -826,18 +898,33 @@ function Receipt({
                   ["Node Allocated", data.nodeName],
                   ["GPU Model", data.gpu],
                   ["VRAM", data.vram],
-                  ["Payment Model", isContract ? `Contract — ${contractDurLabel}` : "Pay-As-You-Go"],
-                  ["Mining Session", isContract ? contractDurLabel : periodLabel],
-                  ["Amount Paid", `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`],
+                  [
+                    "Payment Model",
+                    isContract
+                      ? `Contract — ${contractDurLabel}`
+                      : "Pay-As-You-Go",
+                  ],
+                  [
+                    "Mining Session",
+                    isContract ? contractDurLabel : periodLabel,
+                  ],
+                  [
+                    "Amount Paid",
+                    `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`,
+                  ],
                   ["Payment Method", data.payMethod],
-                  ...(data.walletAddress ? [["Sender Wallet", data.walletAddress]] : []),
+                  ...(data.walletAddress
+                    ? [["Sender Wallet", data.walletAddress]]
+                    : []),
                   ["Country", data.country],
                   ["Status", "Mining Active"],
                 ]
             ).map(([l, v]) => (
               <div key={l} className="flex justify-between items-start">
                 <span className="text-slate-500 shrink-0 mr-4">{l}</span>
-                <span className="text-white font-semibold text-right break-all">{v}</span>
+                <span className="text-white font-semibold text-right break-all">
+                  {v}
+                </span>
               </div>
             ))}
           </div>
@@ -875,9 +962,20 @@ function Receipt({
 
 // ─── ORDER SUMMARY ────────────────────────────────────────────────────────────
 function OrderSummary({
-  purchaseType, nodeName, gpu, vram, itype, paymentModel, contractLabel,
-  contractMonths, price, licenseType, effectivePrice, cryptoDiscount,
-  payMethod, miningPeriod,
+  purchaseType,
+  nodeName,
+  gpu,
+  vram,
+  itype,
+  paymentModel,
+  contractLabel,
+  contractMonths,
+  price,
+  licenseType,
+  effectivePrice,
+  cryptoDiscount,
+  payMethod,
+  miningPeriod,
 }: {
   purchaseType: PurchaseType;
   nodeName: string;
@@ -896,11 +994,15 @@ function OrderSummary({
 }) {
   const isContract = paymentModel === "contract";
   const contractDurLabel =
-    contractMonths === 6 ? "6 months"
-    : contractMonths === 12 ? "12 months"
-    : contractMonths === 24 ? "2 years"
-    : `${contractMonths} months`;
-  const licConfig = LICENSE_CONFIGS[licenseType] ?? LICENSE_CONFIGS.operator_license;
+    contractMonths === 6
+      ? "6 months"
+      : contractMonths === 12
+        ? "12 months"
+        : contractMonths === 24
+          ? "2 years"
+          : `${contractMonths} months`;
+  const licConfig =
+    LICENSE_CONFIGS[licenseType] ?? LICENSE_CONFIGS.operator_license;
   const LicIcon = licConfig.icon;
   const periodLabel = PERIOD_LABELS[miningPeriod] ?? miningPeriod;
 
@@ -922,21 +1024,32 @@ function OrderSummary({
                 ["Plan", nodeName],
                 ["GPU", gpu],
                 ["VRAM", vram],
-                ["Payment Model", isContract ? "Contract-Based" : "Pay-As-You-Go (Flexible)"],
+                [
+                  "Payment Model",
+                  isContract ? "Contract-Based" : "Pay-As-You-Go (Flexible)",
+                ],
                 ...(!isContract
                   ? [
                       ["Mining Duration", periodLabel],
-                      ["Earnings", "Live — visible in your portfolio after activation"],
+                      [
+                        "Earnings",
+                        "Live — visible in your portfolio after activation",
+                      ],
                     ]
                   : [
                       ["Contract Term", contractDurLabel],
-                      ["Earnings", "Accumulate daily — visible in your portfolio"],
+                      [
+                        "Earnings",
+                        "Accumulate daily — visible in your portfolio",
+                      ],
                     ]),
                 ["Instance Type", itype.replace(/_/g, " ")],
               ].map(([l, v]) => (
                 <div key={l} className="flex justify-between items-start">
                   <span className="text-slate-400 text-sm">{l}</span>
-                  <span className="text-white font-semibold text-right max-w-[55%] text-sm">{v}</span>
+                  <span className="text-white font-semibold text-right max-w-[55%] text-sm">
+                    {v}
+                  </span>
                 </div>
               ))}
             </div>
@@ -964,12 +1077,17 @@ function OrderSummary({
                 border: "1px solid rgba(245,158,11,0.2)",
               }}
             >
-              <p className="text-amber-400 text-xs font-bold mb-1.5">Contract Investment Notice</p>
+              <p className="text-amber-400 text-xs font-bold mb-1.5">
+                Contract Investment Notice
+              </p>
               <p className="text-amber-400/80 text-xs leading-relaxed">
-                Capital of <strong className="text-amber-300">${price.toFixed(2)}</strong> is locked
-                for <strong className="text-amber-300">{contractDurLabel}</strong>. Earnings
-                accumulate every second and are visible in your portfolio. Capital released at
-                maturity. <strong className="text-white">Returns not guaranteed.</strong>
+                Capital of{" "}
+                <strong className="text-amber-300">${price.toFixed(2)}</strong>{" "}
+                is locked for{" "}
+                <strong className="text-amber-300">{contractDurLabel}</strong>.
+                Earnings accumulate every second and are visible in your
+                portfolio. Capital released at maturity.{" "}
+                <strong className="text-white">Returns not guaranteed.</strong>
               </p>
             </div>
           ) : (
@@ -980,11 +1098,14 @@ function OrderSummary({
                 border: "1px solid rgba(16,185,129,0.15)",
               }}
             >
-              <p className="text-emerald-400 text-xs font-bold mb-1.5">Pay-As-You-Go Terms</p>
+              <p className="text-emerald-400 text-xs font-bold mb-1.5">
+                Pay-As-You-Go Terms
+              </p>
               <p className="text-emerald-400/70 text-xs leading-relaxed">
-                Mining runs for <strong className="text-emerald-300">{periodLabel}</strong>. When
-                done, your capital + earnings are credited to your wallet automatically. Returns not
-                guaranteed.
+                Mining runs for{" "}
+                <strong className="text-emerald-300">{periodLabel}</strong>.
+                When done, your capital + earnings are credited to your wallet
+                automatically. Returns not guaranteed.
               </p>
             </div>
           )}
@@ -1011,14 +1132,22 @@ function OrderSummary({
                 <LicIcon size={22} style={{ color: licConfig.color }} />
               </div>
               <div>
-                <p className="text-white font-black text-sm">{licConfig.label}</p>
-                <p className="text-slate-500 text-xs mt-1">Certified AI Operator Program</p>
+                <p className="text-white font-black text-sm">
+                  {licConfig.label}
+                </p>
+                <p className="text-slate-500 text-xs mt-1">
+                  Certified AI Operator Program
+                </p>
               </div>
             </div>
             <div className="space-y-2.5 mb-5">
               {licConfig.features.map((f) => (
                 <div key={f} className="flex items-center gap-2.5">
-                  <CheckCircle size={13} style={{ color: licConfig.color }} className="shrink-0" />
+                  <CheckCircle
+                    size={13}
+                    style={{ color: licConfig.color }}
+                    className="shrink-0"
+                  />
                   <span className="text-slate-300 text-sm">{f}</span>
                 </div>
               ))}
@@ -1031,7 +1160,9 @@ function OrderSummary({
               ].map(([l, v]) => (
                 <div key={l} className="flex justify-between items-start">
                   <span className="text-slate-400 text-sm">{l}</span>
-                  <span className="text-white font-semibold text-right text-sm">{v}</span>
+                  <span className="text-white font-semibold text-right text-sm">
+                    {v}
+                  </span>
                 </div>
               ))}
             </div>
@@ -1126,7 +1257,9 @@ function CheckoutInner() {
   const itype = params.get("itype") || "on_demand";
   const gpu = params.get("gpu") || "Shared Pool (NVIDIA T4)";
   const vram = params.get("vram") || "16 GB GDDR6";
-  const paymentModel = (params.get("paymentModel") || "flexible") as "flexible" | "contract";
+  const paymentModel = (params.get("paymentModel") || "flexible") as
+    | "flexible"
+    | "contract";
   const isContract = paymentModel === "contract";
   const miningPeriod = params.get("miningPeriod") ?? "daily";
   const contractMonths = parseInt(params.get("contractMonths") || "6");
@@ -1134,10 +1267,14 @@ function CheckoutInner() {
   const contractMinPct = parseFloat(params.get("contractMinPct") || "52");
   const contractMaxPct = parseFloat(params.get("contractMaxPct") || "93");
   const lockInMonths = parseInt(params.get("lockInMonths") || "0");
-  const lockInLabel = params.get("lockInLabel") || (isContract ? contractLabel : "Flexible");
+  const lockInLabel =
+    params.get("lockInLabel") || (isContract ? contractLabel : "Flexible");
   const lockInMultiplier = parseFloat(params.get("lockInMultiplier") || "1");
   const licenseType =
-    params.get("licenseType") || params.get("type") || nodeKey || "operator_license";
+    params.get("licenseType") ||
+    params.get("type") ||
+    nodeKey ||
+    "operator_license";
 
   const discountedPrice = +(price * (1 - cryptoDiscount / 100)).toFixed(2);
   const effectivePrice = (() => {
@@ -1147,13 +1284,28 @@ function CheckoutInner() {
     return p;
   })();
 
+  // ── FIX-STALE: On a fresh visit (no ?status= redirect), wipe any leftover
+  // split/pending session so the user always starts clean.
+  useEffect(() => {
+    const hasRedirect =
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("status");
+    if (!hasRedirect) {
+      sessionStorage.removeItem("korapay_split_checkout");
+      sessionStorage.removeItem("korapay_pending_checkout");
+    }
+  }, []); // eslint-disable-line
+
   // ── INIT: auth + config in parallel ────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
     supabase.auth.getUser().then(({ data: { user } }: any) => {
       if (cancelled) return;
-      if (!user) { router.push("/auth/signin"); return; }
+      if (!user) {
+        router.push("/auth/signin");
+        return;
+      }
       setUserId(user.id);
     });
 
@@ -1161,20 +1313,27 @@ function CheckoutInner() {
       .from("payment_config")
       .select("key,value")
       .then(({ data }: any) => {
-        if (cancelled || !data) { setConfigLoaded(true); return; }
-        const get = (k: string) => data.find((d: any) => d.key === k)?.value || "";
+        if (cancelled || !data) {
+          setConfigLoaded(true);
+          return;
+        }
+        const get = (k: string) =>
+          data.find((d: any) => d.key === k)?.value || "";
         const disc = get("crypto_discount_percent");
         const wallet = get("crypto_wallet_usdt_trc20");
         const network = get("crypto_network_label");
         const qr = get("crypto_qr_image_url");
-        if (disc && !isNaN(parseFloat(disc))) setCryptoDiscount(parseFloat(disc));
+        if (disc && !isNaN(parseFloat(disc)))
+          setCryptoDiscount(parseFloat(disc));
         if (wallet && wallet !== "EMPTY") setCryptoWalletAddress(wallet);
         if (network && network !== "EMPTY") setCryptoNetwork(network);
         if (qr && qr !== "EMPTY") setCryptoQrImageUrl(qr);
         setConfigLoaded(true);
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []); // eslint-disable-line
 
   // ── F1: Check daily bank transfer limit on mount ────────────────────────
@@ -1275,7 +1434,10 @@ function CheckoutInner() {
             });
             if (id) setAllocationId(id);
           } catch (e) {
-            console.error("[checkout] Failed to create allocation after KoraPay:", e);
+            console.error(
+              "[checkout] Failed to create allocation after KoraPay:",
+              e,
+            );
           }
         });
       }
@@ -1291,7 +1453,9 @@ function CheckoutInner() {
   useEffect(() => {
     if (!countryCode) return;
     setPayMethod(
-      BANK_TRANSFER_COUNTRIES.has(countryCode) ? "bank_transfer" : "crypto_wallet",
+      BANK_TRANSFER_COUNTRIES.has(countryCode)
+        ? "bank_transfer"
+        : "crypto_wallet",
     );
   }, [countryCode]);
 
@@ -1330,7 +1494,9 @@ function CheckoutInner() {
     setSplitError("");
 
     const installmentNGN = state.installmentsNGN[state.completed];
-    const installmentUSD = parseFloat((installmentNGN / state.ngnRate).toFixed(2));
+    const installmentUSD = parseFloat(
+      (installmentNGN / state.ngnRate).toFixed(2),
+    );
 
     try {
       // Save split state to sessionStorage so we can restore after redirect
@@ -1373,7 +1539,9 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_split_checkout");
-        setSplitError(data.error || "Payment initiation failed. Please try again.");
+        setSplitError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
         setSplitLoading(false);
         return;
       }
@@ -1381,7 +1549,9 @@ function CheckoutInner() {
       window.location.href = data.checkoutUrl;
     } catch (err: any) {
       sessionStorage.removeItem("korapay_split_checkout");
-      setSplitError("Connection error. Please check your internet and try again.");
+      setSplitError(
+        "Connection error. Please check your internet and try again.",
+      );
       setSplitLoading(false);
     }
   }
@@ -1520,7 +1690,9 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_pending_checkout");
-        setKpError(data.error || "Payment initiation failed. Please try again.");
+        setKpError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
         setKpLoading(false);
         return;
       }
@@ -1536,7 +1708,10 @@ function CheckoutInner() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!userId) { setErrorMsg("Session not ready. Please wait a moment."); return; }
+    if (!userId) {
+      setErrorMsg("Session not ready. Please wait a moment.");
+      return;
+    }
     if (isSubmittingRef.current) return;
 
     if (payMethod === "bank_transfer") {
@@ -1546,9 +1721,14 @@ function CheckoutInner() {
 
     if (payMethod === "crypto_wallet") {
       setCryptoError("");
-      if (!twConfirmed) { setCryptoError("Please confirm you will send the payment."); return; }
+      if (!twConfirmed) {
+        setCryptoError("Please confirm you will send the payment.");
+        return;
+      }
       if (!cryptoWalletAddress) {
-        setCryptoError("Payment wallet not configured. Please contact support.");
+        setCryptoError(
+          "Payment wallet not configured. Please contact support.",
+        );
         return;
       }
     }
@@ -1564,29 +1744,42 @@ function CheckoutInner() {
       await new Promise((r) => setTimeout(r, 800));
       try {
         const txId = `CRYPTO-${Date.now()}`;
-        const { error: insertErr } = await supabase.from("payment_transactions").insert({
-          user_id: userId,
-          node_key: nodeKey,
-          amount: discountedPrice,
-          currency: "USDT",
-          gateway: "crypto",
-          status: "pending",
-          gateway_reference: txId,
-          receiving_wallet: cryptoWalletAddress,
-          crypto_wallet: twSenderAddress || null,
-          crypto_network: cryptoNetwork,
-          crypto_currency: "USDT",
-          verified_by_admin: false,
-          metadata: JSON.stringify({
-            purchaseType, licenseType, nodeName, gpu, vram,
-            originalAmount: price, discountPercent: cryptoDiscount,
-            paymentModel, miningPeriod, contractMonths, contractLabel,
-            contractMinPct, contractMaxPct,
-            lockInMonths: isContract ? contractMonths : lockInMonths,
-            lockInLabel: isContract ? contractLabel : lockInLabel,
-            countryCode, countryName, autoReinvest,
-          }),
-        });
+        const { error: insertErr } = await supabase
+          .from("payment_transactions")
+          .insert({
+            user_id: userId,
+            node_key: nodeKey,
+            amount: discountedPrice,
+            currency: "USDT",
+            gateway: "crypto",
+            status: "pending",
+            gateway_reference: txId,
+            receiving_wallet: cryptoWalletAddress,
+            crypto_wallet: twSenderAddress || null,
+            crypto_network: cryptoNetwork,
+            crypto_currency: "USDT",
+            verified_by_admin: false,
+            metadata: JSON.stringify({
+              purchaseType,
+              licenseType,
+              nodeName,
+              gpu,
+              vram,
+              originalAmount: price,
+              discountPercent: cryptoDiscount,
+              paymentModel,
+              miningPeriod,
+              contractMonths,
+              contractLabel,
+              contractMinPct,
+              contractMaxPct,
+              lockInMonths: isContract ? contractMonths : lockInMonths,
+              lockInLabel: isContract ? contractLabel : lockInLabel,
+              countryCode,
+              countryName,
+              autoReinvest,
+            }),
+          });
         if (insertErr) throw insertErr;
         setTransactionId(txId);
         setStep("pending_crypto");
@@ -1611,9 +1804,22 @@ function CheckoutInner() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          userId, nodeKey, amount: price, currency: "USD", itype, payMethod,
-          countryCode, gateway: "card", purchaseType, licenseType, paymentModel,
-          miningPeriod, contractMonths, contractLabel, contractMinPct, contractMaxPct,
+          userId,
+          nodeKey,
+          amount: price,
+          currency: "USD",
+          itype,
+          payMethod,
+          countryCode,
+          gateway: "card",
+          purchaseType,
+          licenseType,
+          paymentModel,
+          miningPeriod,
+          contractMonths,
+          contractLabel,
+          contractMinPct,
+          contractMaxPct,
           lockInMonths: isContract ? contractMonths : lockInMonths,
           lockInMultiplier,
           lockInLabel: isContract ? contractLabel : lockInLabel,
@@ -1625,10 +1831,19 @@ function CheckoutInner() {
       if (!res.ok) throw new Error(data.error || "Payment failed");
 
       const id = await createMiningAllocation({
-        userId, planId: nodeKey, planName: nodeName, amount: price,
+        userId,
+        planId: nodeKey,
+        planName: nodeName,
+        amount: price,
         paymentModel: paymentModel as "flexible" | "contract",
-        instanceType: itype, gpuModel: gpu, vram, miningPeriod,
-        contractMonths, contractLabel, contractMinPct, contractMaxPct,
+        instanceType: itype,
+        gpuModel: gpu,
+        vram,
+        miningPeriod,
+        contractMonths,
+        contractLabel,
+        contractMinPct,
+        contractMaxPct,
         lockInMonths: isContract ? contractMonths : lockInMonths,
         lockInLabel: isContract ? contractLabel : lockInLabel,
         lockInMultiplier,
@@ -1667,7 +1882,10 @@ function CheckoutInner() {
           ? "Crypto Payment (USDT)"
           : "Credit / Debit Card",
     country: countryName,
-    date: new Date().toLocaleString("en-US", { dateStyle: "long", timeStyle: "short" }),
+    date: new Date().toLocaleString("en-US", {
+      dateStyle: "long",
+      timeStyle: "short",
+    }),
     discounted: payMethod === "crypto_wallet",
     originalAmount: price,
     walletAddress: payMethod === "crypto_wallet" ? twSenderAddress : undefined,
@@ -1677,11 +1895,16 @@ function CheckoutInner() {
     c.name.toLowerCase().includes(countrySearch.toLowerCase()),
   );
   const conversionInfo = CURRENCY_RATES[countryCode];
-  const localAmount = conversionInfo ? Math.round(price * conversionInfo.rate) : null;
+  const localAmount = conversionInfo
+    ? Math.round(price * conversionInfo.rate)
+    : null;
 
   if (userId === undefined) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "#0d1117" }}>
+      <div
+        className="min-h-screen flex items-center justify-center"
+        style={{ background: "#0d1117" }}
+      >
         <div className="flex flex-col items-center gap-4">
           <div className="w-10 h-10 border-2 border-t-emerald-400 border-slate-700 rounded-full animate-spin" />
           <p className="text-slate-400 text-sm">Loading secure checkout…</p>
@@ -1695,13 +1918,16 @@ function CheckoutInner() {
   // F1: Payment methods filtered by daily limit
   const availablePayMethods = (() => {
     const methods = getPaymentMethodsForCountry(countryCode, price);
-    if (bankTransferBlocked) return methods.filter((m) => m !== "bank_transfer");
+    if (bankTransferBlocked)
+      return methods.filter((m) => m !== "bank_transfer");
     return methods;
   })();
 
   return (
     <div className="min-h-screen py-8 px-4" style={{ background: "#0d1117" }}>
-      {showReceipt && <Receipt data={receiptData} onClose={() => setShowReceipt(false)} />}
+      {showReceipt && (
+        <Receipt data={receiptData} onClose={() => setShowReceipt(false)} />
+      )}
 
       {/* ── F2: Split Payment Modal ── */}
       {splitState !== null && step === "details" && (
@@ -1714,13 +1940,17 @@ function CheckoutInner() {
             sessionStorage.removeItem("korapay_split_checkout");
             setSplitState(null);
             setSplitError("");
+            // ── FIX: switch to crypto so user sees an immediately usable option
+            setPayMethod("crypto_wallet");
           }}
         />
       )}
 
       <div className="max-w-[960px] mx-auto mb-6">
         <button
-          onClick={() => step === "details" ? setStep("country") : router.back()}
+          onClick={() =>
+            step === "details" ? setStep("country") : router.back()
+          }
           className="flex items-center gap-1.5 text-slate-500 hover:text-slate-300 transition-colors text-sm"
         >
           <ArrowLeft size={14} /> Back
@@ -1744,8 +1974,12 @@ function CheckoutInner() {
               Payment Details Submitted
             </h2>
             <p className="text-slate-400 text-sm text-center mb-6 leading-relaxed">
-              Send your USDT to the wallet address below. Our team will verify and{" "}
-              <strong className="text-violet-300">activate your mining session within 30 minutes</strong>.
+              Send your USDT to the wallet address below. Our team will verify
+              and{" "}
+              <strong className="text-violet-300">
+                activate your mining session within 30 minutes
+              </strong>
+              .
             </p>
             <div
               className="rounded-2xl p-5 mb-5 space-y-4"
@@ -1766,7 +2000,9 @@ function CheckoutInner() {
                     style={{ background: "white", padding: "8px" }}
                   />
                 ) : (
-                  cryptoWalletAddress && <QRCode value={cryptoWalletAddress} size={160} />
+                  cryptoWalletAddress && (
+                    <QRCode value={cryptoWalletAddress} size={160} />
+                  )
                 )}
               </div>
               <div
@@ -1780,7 +2016,9 @@ function CheckoutInner() {
                   <p className="text-white font-mono text-xs break-all flex-1 select-all">
                     {cryptoWalletAddress || "Loading…"}
                   </p>
-                  {cryptoWalletAddress && <CopyButton text={cryptoWalletAddress} />}
+                  {cryptoWalletAddress && (
+                    <CopyButton text={cryptoWalletAddress} />
+                  )}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3 text-xs">
@@ -1790,9 +2028,15 @@ function CheckoutInner() {
                   ["Currency", "USDT (Tether)"],
                   ["Transaction Ref", transactionId.slice(-12) + "…"],
                 ].map(([l, v]) => (
-                  <div key={l} className="rounded-lg p-2.5" style={{ background: "rgba(0,0,0,0.3)" }}>
+                  <div
+                    key={l}
+                    className="rounded-lg p-2.5"
+                    style={{ background: "rgba(0,0,0,0.3)" }}
+                  >
                     <p className="text-slate-500 text-[10px] mb-0.5">{l}</p>
-                    <p className="text-white font-bold text-xs break-all">{v}</p>
+                    <p className="text-white font-bold text-xs break-all">
+                      {v}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -1807,7 +2051,8 @@ function CheckoutInner() {
               <p className="text-amber-400 text-xs leading-relaxed">
                 <strong>Important:</strong> Send exactly{" "}
                 <strong>{discountedPrice.toFixed(2)} USDT</strong> on the{" "}
-                <strong>{cryptoNetwork}</strong> network only. Wrong network = lost funds.
+                <strong>{cryptoNetwork}</strong> network only. Wrong network =
+                lost funds.
               </p>
             </div>
             <button
@@ -1833,7 +2078,9 @@ function CheckoutInner() {
             <div className="w-16 h-16 rounded-full bg-red-500/15 border-2 border-red-500/40 flex items-center justify-center mx-auto mb-5">
               <AlertCircle size={28} className="text-red-400" />
             </div>
-            <h2 className="text-white font-black text-2xl text-center mb-2">Payment Declined</h2>
+            <h2 className="text-white font-black text-2xl text-center mb-2">
+              Payment Declined
+            </h2>
             <p className="text-slate-400 text-sm text-center mb-5">
               Your payment was declined or cancelled. Please try again.
             </p>
@@ -1859,8 +2106,12 @@ function CheckoutInner() {
       {step === "country" && (
         <div className="max-w-[960px] mx-auto">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-black text-white mb-2">Select Your Country</h1>
-            <p className="text-slate-400">Determines your available payment methods</p>
+            <h1 className="text-3xl font-black text-white mb-2">
+              Select Your Country
+            </h1>
+            <p className="text-slate-400">
+              Determines your available payment methods
+            </p>
           </div>
           <div
             className="rounded-2xl p-8"
@@ -1870,7 +2121,10 @@ function CheckoutInner() {
             }}
           >
             <div className="mb-6 relative">
-              <Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <Globe
+                size={16}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+              />
               <input
                 type="text"
                 placeholder="Search countries…"
@@ -1883,7 +2137,10 @@ function CheckoutInner() {
               {filteredCountries.map((c) => (
                 <button
                   key={c.code}
-                  onClick={() => { setCountryCode(c.code); setCountryName(c.name); }}
+                  onClick={() => {
+                    setCountryCode(c.code);
+                    setCountryName(c.name);
+                  }}
                   className={`p-3 rounded-lg text-left transition-all border ${
                     countryCode === c.code
                       ? "bg-emerald-600/20 border-emerald-500 text-emerald-100"
@@ -1933,7 +2190,9 @@ function CheckoutInner() {
 
             <div className="space-y-5">
               <div>
-                <div className="text-xl font-bold text-white mb-1">Choose Payment Method</div>
+                <div className="text-xl font-bold text-white mb-1">
+                  Choose Payment Method
+                </div>
                 <p className="text-slate-400 text-xs mb-4">
                   Crypto offers faster processing &amp; exclusive discounts
                 </p>
@@ -1948,16 +2207,20 @@ function CheckoutInner() {
                     border: "1px solid rgba(239,68,68,0.25)",
                   }}
                 >
-                  <AlertTriangle size={15} className="text-red-400 shrink-0 mt-0.5" />
+                  <AlertTriangle
+                    size={15}
+                    className="text-red-400 shrink-0 mt-0.5"
+                  />
                   <div>
                     <p className="text-red-300 text-sm font-black">
                       Bank Transfer Unavailable Today
                     </p>
                     <p className="text-red-400/70 text-xs mt-0.5 leading-relaxed">
-                      Our daily processing capacity for bank transfers has been reached for
-                      today. This resets at midnight. Please use{" "}
+                      Our daily processing capacity for bank transfers has been
+                      reached for today. This resets at midnight. Please use{" "}
                       <strong className="text-red-300">Crypto</strong> or{" "}
-                      <strong className="text-red-300">Card</strong> to complete your payment.
+                      <strong className="text-red-300">Card</strong> to complete
+                      your payment.
                     </p>
                   </div>
                 </div>
@@ -1983,7 +2246,9 @@ function CheckoutInner() {
                       <div className="flex items-center gap-3">
                         <div className="text-2xl">₿</div>
                         <div className="text-left flex-1">
-                          <div className="text-white font-bold text-sm">Crypto Payment (USDT)</div>
+                          <div className="text-white font-bold text-sm">
+                            Crypto Payment (USDT)
+                          </div>
                           <div className="text-slate-400 text-xs">
                             {cryptoDiscount}% discount · Instant · Secure
                           </div>
@@ -2025,7 +2290,9 @@ function CheckoutInner() {
                     {methods.includes("bank_transfer") && (
                       <button
                         type="button"
-                        onClick={() => !bankTransferBlocked && setPayMethod("bank_transfer")}
+                        onClick={() =>
+                          !bankTransferBlocked && setPayMethod("bank_transfer")
+                        }
                         disabled={bankTransferBlocked}
                         className={`w-full p-4 rounded-xl transition-all border-2 ${
                           bankTransferBlocked
@@ -2052,7 +2319,9 @@ function CheckoutInner() {
                                 : "Bank · Card · Mobile Money"}
                             </div>
                           </div>
-                          <div className="text-slate-400 font-bold text-sm">${price.toFixed(2)}</div>
+                          <div className="text-slate-400 font-bold text-sm">
+                            ${price.toFixed(2)}
+                          </div>
                         </div>
                       </button>
                     )}
@@ -2073,18 +2342,23 @@ function CheckoutInner() {
                     <div
                       onClick={() => setAutoReinvest((v) => !v)}
                       className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-all ${
-                        autoReinvest ? "bg-emerald-500 border-emerald-500" : "border-slate-600"
+                        autoReinvest
+                          ? "bg-emerald-500 border-emerald-500"
+                          : "border-slate-600"
                       }`}
                     >
-                      {autoReinvest && <Check size={12} className="text-white" />}
+                      {autoReinvest && (
+                        <Check size={12} className="text-white" />
+                      )}
                     </div>
                     <div>
                       <p className="text-emerald-300 text-sm font-bold flex items-center gap-1.5">
                         <RefreshCw size={12} /> Auto-Reinvest After Session Ends
                       </p>
                       <p className="text-slate-500 text-xs mt-0.5 leading-relaxed">
-                        When your mining session completes, earnings automatically start a new{" "}
-                        {periodLabel} session. Compound your returns continuously.
+                        When your mining session completes, earnings
+                        automatically start a new {periodLabel} session.
+                        Compound your returns continuously.
                       </p>
                     </div>
                   </label>
@@ -2095,7 +2369,9 @@ function CheckoutInner() {
               <div>
                 <label className="block text-slate-300 text-sm font-bold mb-2 flex items-center gap-1.5">
                   <Gift size={13} className="text-amber-400" /> Referral Code{" "}
-                  <span className="text-slate-600 font-normal text-xs">(optional)</span>
+                  <span className="text-slate-600 font-normal text-xs">
+                    (optional)
+                  </span>
                 </label>
                 <div className="relative">
                   <input
@@ -2116,7 +2392,12 @@ function CheckoutInner() {
                     }`}
                   />
                   <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                    {checkingReferral && <Loader2 size={14} className="text-slate-400 animate-spin" />}
+                    {checkingReferral && (
+                      <Loader2
+                        size={14}
+                        className="text-slate-400 animate-spin"
+                      />
+                    )}
                     {!checkingReferral && referralValid === true && (
                       <CheckCircle size={14} className="text-emerald-400" />
                     )}
@@ -2131,7 +2412,9 @@ function CheckoutInner() {
                   </p>
                 )}
                 {referralValid === false && (
-                  <p className="text-red-400 text-xs mt-1">Invalid or expired referral code.</p>
+                  <p className="text-red-400 text-xs mt-1">
+                    Invalid or expired referral code.
+                  </p>
                 )}
               </div>
 
@@ -2154,7 +2437,10 @@ function CheckoutInner() {
                           border: "1px solid rgba(245,158,11,0.25)",
                         }}
                       >
-                        <Landmark size={13} className="text-amber-400 mt-0.5 shrink-0" />
+                        <Landmark
+                          size={13}
+                          className="text-amber-400 mt-0.5 shrink-0"
+                        />
                         <div>
                           <p className="text-amber-300 text-xs font-black">
                             Installment Payment Required
@@ -2164,9 +2450,11 @@ function CheckoutInner() {
                             <strong className="text-amber-200">
                               ₦{localAmount.toLocaleString()}
                             </strong>{" "}
-                            exceeds the ₦200,000 single-transaction limit. It will be split into{" "}
+                            exceeds the ₦200,000 single-transaction limit. It
+                            will be split into{" "}
                             <strong className="text-amber-200">
-                              {computeInstallments(localAmount).length} installments
+                              {computeInstallments(localAmount).length}{" "}
+                              installments
                             </strong>{" "}
                             for regulatory compliance.
                           </p>
@@ -2176,8 +2464,8 @@ function CheckoutInner() {
 
                     <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg">
                       <p className="text-blue-200 text-xs leading-relaxed">
-                        You will be redirected to complete payment securely via bank transfer,
-                        card, or mobile money.
+                        You will be redirected to complete payment securely via
+                        bank transfer, card, or mobile money.
                       </p>
                     </div>
                     {localAmount && conversionInfo && (
@@ -2191,7 +2479,8 @@ function CheckoutInner() {
                         <p className="text-emerald-300 text-xs">
                           Approx. amount:{" "}
                           <strong className="text-emerald-200">
-                            {conversionInfo.currency} {localAmount.toLocaleString()}
+                            {conversionInfo.currency}{" "}
+                            {localAmount.toLocaleString()}
                           </strong>
                         </p>
                       </div>
@@ -2211,7 +2500,10 @@ function CheckoutInner() {
                     </div>
                     {kpError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
                         <p className="text-red-300 text-xs">{kpError}</p>
                       </div>
                     )}
@@ -2222,7 +2514,8 @@ function CheckoutInner() {
                     >
                       {kpLoading ? (
                         <>
-                          <Loader2 size={16} className="animate-spin" /> Connecting…
+                          <Loader2 size={16} className="animate-spin" />{" "}
+                          Connecting…
                         </>
                       ) : localAmount && localAmount > MAX_SINGLE_NGN_TXN ? (
                         <>
@@ -2247,14 +2540,20 @@ function CheckoutInner() {
                     }}
                   >
                     <div>
-                      <p className="text-violet-300 font-black text-sm mb-1">Pay with USDT</p>
+                      <p className="text-violet-300 font-black text-sm mb-1">
+                        Pay with USDT
+                      </p>
                       <p className="text-slate-500 text-xs">
-                        Scan the QR or copy the address, then send the exact amount.
+                        Scan the QR or copy the address, then send the exact
+                        amount.
                       </p>
                     </div>
                     {!configLoaded ? (
                       <div className="flex justify-center py-4">
-                        <Loader2 size={24} className="text-violet-400 animate-spin" />
+                        <Loader2
+                          size={24}
+                          className="text-violet-400 animate-spin"
+                        />
                       </div>
                     ) : !cryptoWalletAddress ? (
                       <div
@@ -2312,15 +2611,27 @@ function CheckoutInner() {
                           </div>
                         </div>
                         <div className="grid grid-cols-2 gap-2">
-                          <div className="rounded-lg p-2.5" style={{ background: "rgba(0,0,0,0.3)" }}>
-                            <p className="text-slate-500 text-[10px] mb-0.5">Exact Amount</p>
+                          <div
+                            className="rounded-lg p-2.5"
+                            style={{ background: "rgba(0,0,0,0.3)" }}
+                          >
+                            <p className="text-slate-500 text-[10px] mb-0.5">
+                              Exact Amount
+                            </p>
                             <p className="text-emerald-400 font-black text-sm">
                               {discountedPrice.toFixed(2)} USDT
                             </p>
                           </div>
-                          <div className="rounded-lg p-2.5" style={{ background: "rgba(0,0,0,0.3)" }}>
-                            <p className="text-slate-500 text-[10px] mb-0.5">Network</p>
-                            <p className="text-white font-bold text-xs">{cryptoNetwork}</p>
+                          <div
+                            className="rounded-lg p-2.5"
+                            style={{ background: "rgba(0,0,0,0.3)" }}
+                          >
+                            <p className="text-slate-500 text-[10px] mb-0.5">
+                              Network
+                            </p>
+                            <p className="text-white font-bold text-xs">
+                              {cryptoNetwork}
+                            </p>
                           </div>
                         </div>
                       </div>
@@ -2329,7 +2640,9 @@ function CheckoutInner() {
                     <div>
                       <label className="block text-white text-sm font-bold mb-1.5">
                         Your Wallet Address{" "}
-                        <span className="text-slate-500 font-normal text-xs">(optional)</span>
+                        <span className="text-slate-500 font-normal text-xs">
+                          (optional)
+                        </span>
                       </label>
                       <input
                         type="text"
@@ -2344,22 +2657,32 @@ function CheckoutInner() {
                       <div
                         onClick={() => setTwConfirmed((v) => !v)}
                         className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${
-                          twConfirmed ? "bg-violet-500 border-violet-500" : "border-slate-600"
+                          twConfirmed
+                            ? "bg-violet-500 border-violet-500"
+                            : "border-slate-600"
                         }`}
                       >
-                        {twConfirmed && <Check size={12} className="text-white" />}
+                        {twConfirmed && (
+                          <Check size={12} className="text-white" />
+                        )}
                       </div>
                       <p className="text-slate-300 text-xs leading-relaxed">
                         I understand I must send exactly{" "}
-                        <strong className="text-white">{discountedPrice.toFixed(2)} USDT</strong> on
-                        the <strong className="text-white">{cryptoNetwork}</strong> network to the
-                        address above.
+                        <strong className="text-white">
+                          {discountedPrice.toFixed(2)} USDT
+                        </strong>{" "}
+                        on the{" "}
+                        <strong className="text-white">{cryptoNetwork}</strong>{" "}
+                        network to the address above.
                       </p>
                     </label>
 
                     {cryptoError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
                         <p className="text-red-300 text-xs">{cryptoError}</p>
                       </div>
                     )}
@@ -2395,10 +2718,15 @@ function CheckoutInner() {
                     <span className="text-white font-black text-xl">
                       ${effectivePrice.toFixed(2)}
                     </span>
-                    {(payMethod === "crypto_wallet" || (referralValid && referralDiscount > 0)) && (
+                    {(payMethod === "crypto_wallet" ||
+                      (referralValid && referralDiscount > 0)) && (
                       <p className="text-emerald-400 text-[10px]">
-                        {payMethod === "crypto_wallet" ? `-${cryptoDiscount}% crypto` : ""}
-                        {referralValid && referralDiscount > 0 ? ` -${referralDiscount}% referral` : ""}
+                        {payMethod === "crypto_wallet"
+                          ? `-${cryptoDiscount}% crypto`
+                          : ""}
+                        {referralValid && referralDiscount > 0
+                          ? ` -${referralDiscount}% referral`
+                          : ""}
                       </p>
                     )}
                   </div>
@@ -2419,8 +2747,13 @@ function CheckoutInner() {
               border: "1px solid rgba(255,255,255,0.08)",
             }}
           >
-            <Loader2 size={32} className="text-emerald-400 mx-auto mb-4 animate-spin" />
-            <h2 className="text-white font-black text-2xl mb-2">Processing Payment</h2>
+            <Loader2
+              size={32}
+              className="text-emerald-400 mx-auto mb-4 animate-spin"
+            />
+            <h2 className="text-white font-black text-2xl mb-2">
+              Processing Payment
+            </h2>
             <p className="text-slate-400 text-sm mb-6">
               {PROCESSING_STEPS[processingStep]?.label || "Completing…"}
             </p>
@@ -2429,7 +2762,9 @@ function CheckoutInner() {
                 <div
                   key={ps.id}
                   className={`flex items-center gap-3 text-sm ${
-                    idx <= processingStep ? "text-emerald-300" : "text-slate-600"
+                    idx <= processingStep
+                      ? "text-emerald-300"
+                      : "text-slate-600"
                   }`}
                 >
                   <div
@@ -2441,7 +2776,9 @@ function CheckoutInner() {
                           : "border-slate-600"
                     }`}
                   >
-                    {idx < processingStep && <CheckCircle size={14} className="text-white" />}
+                    {idx < processingStep && (
+                      <CheckCircle size={14} className="text-white" />
+                    )}
                   </div>
                   <span>{ps.label}</span>
                 </div>
@@ -2465,7 +2802,9 @@ function CheckoutInner() {
               <CheckCircle size={32} className="text-emerald-400" />
             </div>
             <h2 className="text-white font-black text-2xl text-center mb-2">
-              {purchaseType === "license" ? "License Activated!" : "Mining Session Started!"}
+              {purchaseType === "license"
+                ? "License Activated!"
+                : "Mining Session Started!"}
             </h2>
             <p className="text-slate-400 text-sm text-center mb-6">
               {purchaseType === "license"
@@ -2516,7 +2855,8 @@ function CheckoutInner() {
                   <RefreshCw size={11} /> Auto-Reinvest Active
                 </p>
                 <p className="text-emerald-400/70 text-xs mt-0.5">
-                  When this session ends, a new {periodLabel} session will start automatically.
+                  When this session ends, a new {periodLabel} session will start
+                  automatically.
                 </p>
               </div>
             )}
@@ -2531,12 +2871,16 @@ function CheckoutInner() {
               <button
                 onClick={() =>
                   router.push(
-                    purchaseType === "license" ? "/dashboard/tasks" : "/dashboard/gpu-plans",
+                    purchaseType === "license"
+                      ? "/dashboard/tasks"
+                      : "/dashboard/gpu-plans",
                   )
                 }
                 className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg transition-all"
               >
-                {purchaseType === "license" ? "Go to Tasks" : "View Portfolio →"}
+                {purchaseType === "license"
+                  ? "Go to Tasks"
+                  : "View Portfolio →"}
               </button>
             </div>
           </div>
@@ -2556,7 +2900,9 @@ function CheckoutInner() {
             <div className="w-16 h-16 rounded-full bg-red-500/20 border-2 border-red-500/40 flex items-center justify-center mx-auto mb-5">
               <AlertCircle size={32} className="text-red-400" />
             </div>
-            <h2 className="text-white font-black text-2xl text-center mb-2">Payment Failed</h2>
+            <h2 className="text-white font-black text-2xl text-center mb-2">
+              Payment Failed
+            </h2>
             <p className="text-slate-400 text-sm text-center mb-4">
               {errorMsg || "Something went wrong. Please try again."}
             </p>

@@ -12,8 +12,9 @@ import Link from "next/link";
 function isValidEmail(email: string): boolean {
   // Only allow: letters, numbers, dots, hyphens, underscores in local part
   // NO special characters like /, %, +, =, etc.
-  const emailRegex = /^[a-zA-Z][a-zA-Z0-9._-]*[a-zA-Z0-9]@[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
-  
+  const emailRegex =
+    /^[a-zA-Z][a-zA-Z0-9._-]*[a-zA-Z0-9]@[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$/;
+
   if (!emailRegex.test(email)) {
     return false;
   }
@@ -39,12 +40,23 @@ function isValidEmail(email: string): boolean {
 
   // Check for common disposable/invalid email patterns
   const disposableDomains = [
-    "tempmail", "throwaway", "guerrillamail", "mailinator", "10minutemail",
-    "temp-mail", "yopmail", "maildrop", "sharklasers", "fakeinbox",
-    "trashmail", "spam4.me", "mailnesia", "temp-mail.org"
+    "tempmail",
+    "throwaway",
+    "guerrillamail",
+    "mailinator",
+    "10minutemail",
+    "temp-mail",
+    "yopmail",
+    "maildrop",
+    "sharklasers",
+    "fakeinbox",
+    "trashmail",
+    "spam4.me",
+    "mailnesia",
+    "temp-mail.org",
   ];
-  
-  if (disposableDomains.some(d => domain.includes(d))) {
+
+  if (disposableDomains.some((d) => domain.includes(d))) {
     return false;
   }
 
@@ -73,7 +85,8 @@ function SignUpFormInner() {
   const [error, setError] = useState("");
 
   const isEmailValid = email.length > 0 && isValidEmail(email);
-  const isEmailInvalid = emailTouched && email.length > 0 && !isValidEmail(email);
+  const isEmailInvalid =
+    emailTouched && email.length > 0 && !isValidEmail(email);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -178,6 +191,7 @@ function SignUpFormInner() {
         </div>
       )}
 
+      {/* FULL NAME */}
       <div>
         <label className="block text-sm font-semibold text-slate-300 mb-1.5">
           FULL NAME
@@ -191,6 +205,7 @@ function SignUpFormInner() {
         />
       </div>
 
+      {/* EMAIL ADDRESS */}
       <div>
         <label className="block text-sm font-semibold text-slate-300 mb-1.5">
           EMAIL ADDRESS
@@ -201,7 +216,6 @@ function SignUpFormInner() {
             value={email}
             onChange={(e) => {
               setEmail(e.target.value);
-              // Validate immediately as user types
               if (e.target.value.length > 0) {
                 setEmailTouched(true);
               }
@@ -213,21 +227,27 @@ function SignUpFormInner() {
               isEmailInvalid
                 ? "border-red-500 focus:border-red-400"
                 : isEmailValid
-                ? "border-emerald-500 focus:border-emerald-400"
-                : "border-slate-700 focus:border-emerald-500"
+                  ? "border-emerald-500 focus:border-emerald-400"
+                  : "border-slate-700 focus:border-emerald-500"
             }`}
           />
           {isEmailInvalid && (
-            <AlertCircle className="absolute right-3 top-1/2 -translate-y-1/2 text-red-500" size={18} />
+            <AlertCircle
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-red-500"
+              size={18}
+            />
           )}
           {isEmailValid && (
-            <CheckCircle className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500" size={18} />
+            <CheckCircle
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-emerald-500"
+              size={18}
+            />
           )}
         </div>
         {isEmailInvalid && (
           <p className="text-xs text-red-400 mt-1">
-            {email.includes("@") 
-              ? email.includes(".") 
+            {email.includes("@")
+              ? email.includes(".")
                 ? "Please enter a valid email address (no disposable email services)"
                 : "Email must include a domain (e.g., gmail.com)"
               : "Email must include @ symbol"}
@@ -235,6 +255,7 @@ function SignUpFormInner() {
         )}
       </div>
 
+      {/* PASSWORD */}
       <div>
         <label className="block text-sm font-semibold text-slate-300 mb-1.5">
           PASSWORD
@@ -258,6 +279,7 @@ function SignUpFormInner() {
         </div>
       </div>
 
+      {/* CONFIRM PASSWORD */}
       <div>
         <label className="block text-sm font-semibold text-slate-300 mb-1.5">
           CONFIRM PASSWORD
@@ -272,13 +294,40 @@ function SignUpFormInner() {
         />
       </div>
 
-      <label className="flex items-start gap-3 cursor-pointer">
+      {/* TERMS CHECKBOX — custom styled for visibility on dark backgrounds */}
+      <label className="flex items-start gap-3 cursor-pointer select-none">
+        {/* Hidden native checkbox for form/accessibility */}
         <input
           type="checkbox"
           checked={agreed}
           onChange={(e) => setAgreed(e.target.checked)}
-          className="mt-0.5 rounded accent-emerald-500"
+          className="sr-only"
         />
+        {/* Custom visible checkbox box */}
+        <div
+          className={`mt-0.5 flex-shrink-0 w-5 h-5 rounded border-2 flex items-center justify-center transition-all duration-150 ${
+            agreed
+              ? "bg-emerald-500 border-emerald-500"
+              : "bg-slate-800 border-slate-400"
+          }`}
+        >
+          {agreed && (
+            <svg
+              className="w-3 h-3 text-white"
+              viewBox="0 0 12 12"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M2 6L5 9L10 3"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </div>
         <span className="text-slate-400 text-xs leading-relaxed">
           I agree to the{" "}
           <Link href="/terms" className="text-emerald-400 hover:underline">
@@ -291,12 +340,17 @@ function SignUpFormInner() {
         </span>
       </label>
 
+      {/* SUBMIT BUTTON */}
       <button
         type="submit"
         disabled={loading || !agreed}
         className="w-full py-3.5 rounded-lg font-black text-base transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         style={{
-          background: !agreed ? "rgba(16, 185, 129, 0.3)" : loading ? "rgba(16, 185, 129, 0.6)" : "linear-gradient(135deg, #059669, #10b981)",
+          background: !agreed
+            ? "rgba(16, 185, 129, 0.3)"
+            : loading
+              ? "rgba(16, 185, 129, 0.6)"
+              : "linear-gradient(135deg, #059669, #10b981)",
           color: "white",
           cursor: !agreed ? "not-allowed" : loading ? "wait" : "pointer",
         }}
