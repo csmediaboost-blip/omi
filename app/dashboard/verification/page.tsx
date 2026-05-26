@@ -162,8 +162,8 @@ const COUNTRIES = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// withTimeout — wraps ANY promise with a hard timeout.
-// clearTimeout is always called on success to avoid stale rejects.
+// withTimeout — wraps any promise with a hard deadline.
+// clearTimeout always fires on success so the handle is never leaked.
 // ─────────────────────────────────────────────────────────────────────────────
 function withTimeout<T>(
   promise: Promise<T>,
@@ -191,8 +191,8 @@ function withTimeout<T>(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compressImage — shrinks large camera photos before upload.
-// Mobile camera photos are often 3–8 MB. This brings them to ~150–300 KB,
-// making uploads complete in seconds even on weak 4G signal.
+// Mobile camera shots are 3–8 MB. This brings them to ~150–300 KB,
+// making uploads complete in seconds even on weak 4G.
 // ─────────────────────────────────────────────────────────────────────────────
 function compressImage(file: File, maxWidth: number): Promise<File> {
   return new Promise((resolve, reject) => {
@@ -235,25 +235,78 @@ function compressImage(file: File, maxWidth: number): Promise<File> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// uploadFileForKYC — uses supabase.storage.upload() directly.
+// uploadViaXHR — uploads a file to a pre-signed URL using XMLHttpRequest.
 //
-// WHY NOT createSignedUploadUrl + XHR:
-// createSignedUploadUrl() uses fetch() internally. On Android Chrome and
-// iOS Safari, fetch() calls to Supabase storage endpoints randomly stall
-// indefinitely — they never resolve() or reject(), so timeouts also never
-// fire. This caused the infinite spinner on mobile.
+// WHY XHR AND NOT FETCH:
+// supabase.storage.upload() and createSignedUploadUrl() both use the browser's
+// fetch() API internally. On Android Chrome and iOS Safari, fetch() calls to
+// Supabase Storage endpoints stall indefinitely — they never resolve or reject,
+// so even Promise.race timeouts never fire. This causes the infinite spinner.
 //
-// supabase.storage.upload() uses a different internal code path that does
-// not hit this mobile fetch() bug and is reliable on all browsers.
+// XMLHttpRequest is rock-solid on ALL mobile browsers:
+// - .timeout fires natively — no silent stalls
+// - .upload.onprogress gives real percentage (fetch has no upload progress API)
+// - .onload / .onerror / .ontimeout always fire
 //
-// COMPRESSION: Mobile camera photos are 3–8 MB. We compress to ~150–300 KB
-// before upload, which is 10–20x faster and prevents stalls on weak signal.
+// WHY THE SIGNED URL COMES FROM /api/kyc-upload-url:
+// createSignedUploadUrl() also uses fetch() internally on the client, so
+// calling it from the browser has the same stall problem. We generate the URL
+// server-side (Node.js fetch is reliable), then XHR uploads directly to
+// Supabase Storage using that URL — completely avoiding the mobile fetch bug.
+// ─────────────────────────────────────────────────────────────────────────────
+function uploadViaXHR(
+  signedUrl: string,
+  file: File,
+  contentType: string,
+  timeoutMs: number,
+  onProgress?: (pct: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.timeout = timeoutMs;
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+      } else {
+        reject(new Error(`Upload failed (${xhr.status}) — please try again`));
+      }
+    };
+
+    xhr.onerror = () =>
+      reject(new Error("Network error during upload — check your connection"));
+    xhr.ontimeout = () =>
+      reject(
+        new Error("Upload timed out — try a smaller image or better signal"),
+      );
+    xhr.onabort = () => reject(new Error("Upload was cancelled"));
+
+    xhr.open("PUT", signedUrl, true);
+    xhr.setRequestHeader(
+      "Content-Type",
+      contentType || "application/octet-stream",
+    );
+    xhr.send(file);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// uploadFileForKYC — three-step upload flow:
+//   1. Compress image client-side (3 MB → ~200 KB)
+//   2. POST /api/kyc-upload-url — server generates signed URL (no mobile fetch bug)
+//   3. XHR PUT directly to Supabase Storage (real progress, guaranteed timeout)
 // ─────────────────────────────────────────────────────────────────────────────
 async function uploadFileForKYC(
   file: File,
   path: string,
   onProgress?: (pct: number) => void,
-): Promise<string | null> {
+): Promise<string> {
   const ext = path.split(".").pop()?.toLowerCase() || "";
   const mimeMap: Record<string, string> = {
     jpg: "image/jpeg",
@@ -265,71 +318,63 @@ async function uploadFileForKYC(
   };
   const contentType = file.type || mimeMap[ext] || "application/octet-stream";
 
-  // Compress images — camera shots are huge on mobile
+  // ── Step 1: Compress images ────────────────────────────────────────────
   let fileToUpload = file;
   if (file.type.startsWith("image/") && file.size > 400 * 1024) {
     try {
-      onProgress?.(0);
+      onProgress?.(2);
       fileToUpload = await compressImage(file, 1200);
       console.log(
-        `[KYC Upload] Compressed ${(file.size / 1024).toFixed(0)}KB → ${(fileToUpload.size / 1024).toFixed(0)}KB`,
+        `[KYC] Compressed ${(file.size / 1024).toFixed(0)} KB → ${(fileToUpload.size / 1024).toFixed(0)} KB`,
       );
     } catch {
-      fileToUpload = file; // compression failed — use original
+      fileToUpload = file;
     }
   }
 
-  for (const bucket of ["kyc-documents", "documents"]) {
-    try {
-      onProgress?.(10);
+  // ── Step 2: Get signed URL from server (avoids mobile fetch stall) ────
+  onProgress?.(5);
 
-      // Simulate upload progress (supabase.storage.upload has no progress callback)
-      let pct = 10;
-      const progressInterval = setInterval(() => {
-        pct = Math.min(pct + 8, 85);
-        onProgress?.(pct);
-      }, 800);
-
-      const { error: uploadErr } = await withTimeout(
-        supabase.storage.from(bucket).upload(path, fileToUpload, {
-          contentType,
-          upsert: true,
-        }),
-        120_000, // 2 min — generous for large files on slow mobile connections
-        `Upload to ${bucket}`,
-      );
-
-      clearInterval(progressInterval);
-
-      if (uploadErr) {
-        console.warn(
-          `[KYC Upload] Direct upload failed for "${bucket}":`,
-          uploadErr.message,
-        );
-        continue;
-      }
-
-      onProgress?.(100);
-
-      const { data: urlData } = supabase.storage
-        .from(bucket)
-        .getPublicUrl(path);
-      return urlData?.publicUrl ?? null;
-    } catch (e: any) {
-      if (
-        e.message?.includes("timed out") ||
-        e.message?.includes("Network error")
-      ) {
-        throw e;
-      }
-      console.warn(`[KYC Upload] bucket "${bucket}" failed:`, e.message);
-      continue;
-    }
-  }
-
-  throw new Error(
-    "Upload failed: could not reach storage. Please ensure you have a stable internet connection and try again.",
+  const urlRes = await withTimeout(
+    fetch("/api/kyc-upload-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+      credentials: "include",
+    }),
+    20_000,
+    "Get upload URL",
   );
+
+  if (!urlRes.ok) {
+    const errBody = await urlRes.json().catch(() => ({}));
+    throw new Error(
+      errBody?.error ?? `Failed to get upload URL (${urlRes.status})`,
+    );
+  }
+
+  const { signedUrl, bucket } = (await urlRes.json()) as {
+    signedUrl: string;
+    bucket: string;
+  };
+  if (!signedUrl) throw new Error("No signed URL returned from server");
+
+  // ── Step 3: Upload via XHR (real progress, guaranteed mobile timeout) ─
+  onProgress?.(8);
+
+  await uploadViaXHR(
+    signedUrl,
+    fileToUpload,
+    contentType,
+    120_000,
+    (pct) => onProgress?.(8 + Math.round(pct * 0.9)), // map 0–100 → 8–98
+  );
+
+  onProgress?.(100);
+
+  // ── Step 4: Return public URL ──────────────────────────────────────────
+  const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(path);
+  return urlData?.publicUrl ?? "";
 }
 
 export default function VerificationPage() {
@@ -377,7 +422,6 @@ export default function VerificationPage() {
   const load = useCallback(async () => {
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
-
     if (mountedRef.current) {
       setLoading(true);
       setLoadErr("");
@@ -388,7 +432,6 @@ export default function VerificationPage() {
         data: { session },
         error: sessErr,
       } = await withTimeout(supabase.auth.getSession(), 12000, "Session check");
-
       if (sessErr || !session?.user) {
         router.push("/auth/signin");
         return;
@@ -477,16 +520,6 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // submitIdentity
-  //
-  // FIX: uploadFileForKYC now uses supabase.storage.upload() directly instead
-  // of createSignedUploadUrl() + XHR. The signed URL approach caused infinite
-  // hangs on mobile browsers (Android Chrome / iOS Safari) because the
-  // underlying fetch() call to Supabase storage stalls indefinitely on mobile.
-  //
-  // Nuclear fallback at 130s guarantees setSaving(false) fires no matter what.
-  // ─────────────────────────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -536,8 +569,8 @@ export default function VerificationPage() {
     setUploadPct(0);
     setUploadProgress("");
 
-    // Nuclear fallback — guarantees spinner stops within 130s even if every
-    // internal timer is throttled by the mobile browser's background tab policy.
+    // Nuclear fallback — guarantees spinner stops within 140s even if every
+    // internal timer is suppressed by mobile browser background throttle.
     const nuclearHandle = setTimeout(() => {
       if (mountedRef.current) {
         setSaving(false);
@@ -548,7 +581,7 @@ export default function VerificationPage() {
           false,
         );
       }
-    }, 130_000);
+    }, 140_000);
 
     try {
       const uid = profile.id;
@@ -560,15 +593,12 @@ export default function VerificationPage() {
         `Uploading ${DOC_TYPES[idType]?.label}… (${(idFile.size / 1024).toFixed(0)} KB)`,
       );
 
-      // Any error from uploadFileForKYC propagates directly to the outer catch.
-      // We never attempt DB writes when the upload failed.
-      const docUrl =
-        (await uploadFileForKYC(idFile, path, (pct) => {
-          if (mountedRef.current) {
-            setUploadPct(pct);
-            setUploadProgress(`Uploading… ${pct}%`);
-          }
-        })) ?? "";
+      const docUrl = await uploadFileForKYC(idFile, path, (pct) => {
+        if (mountedRef.current) {
+          setUploadPct(pct);
+          setUploadProgress(`Uploading… ${pct}%`);
+        }
+      });
 
       setUploadProgress("Saving your details…");
       setUploadPct(0);
@@ -743,11 +773,7 @@ export default function VerificationPage() {
       <div className="flex-1 overflow-y-auto">
         {toastMsg && (
           <div
-            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-xs ${
-              toastMsg.ok
-                ? "bg-emerald-500 text-slate-950"
-                : "bg-red-500 text-white"
-            }`}
+            className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-semibold shadow-xl max-w-xs ${toastMsg.ok ? "bg-emerald-500 text-slate-950" : "bg-red-500 text-white"}`}
           >
             {toastMsg.msg}
           </div>
@@ -796,20 +822,10 @@ export default function VerificationPage() {
                   <button
                     key={key}
                     onClick={() => setActiveStep(key)}
-                    className={`flex flex-col items-center gap-1.5 p-3 rounded-xl transition-all ${
-                      activeStep === key
-                        ? "bg-emerald-500/10 border border-emerald-500/30"
-                        : "hover:bg-slate-800/60"
-                    }`}
+                    className={`flex flex-col items-center gap-1.5 p-3 rounded-xl transition-all ${activeStep === key ? "bg-emerald-500/10 border border-emerald-500/30" : "hover:bg-slate-800/60"}`}
                   >
                     <div
-                      className={`w-9 h-9 rounded-full flex items-center justify-center ${
-                        done
-                          ? "bg-emerald-500/20 border border-emerald-500/40"
-                          : isPending
-                            ? "bg-amber-500/10 border border-amber-500/30"
-                            : "bg-slate-800 border border-slate-700"
-                      }`}
+                      className={`w-9 h-9 rounded-full flex items-center justify-center ${done ? "bg-emerald-500/20 border border-emerald-500/40" : isPending ? "bg-amber-500/10 border border-amber-500/30" : "bg-slate-800 border border-slate-700"}`}
                     >
                       {done ? (
                         <Check size={15} className="text-emerald-400" />
@@ -820,15 +836,7 @@ export default function VerificationPage() {
                       )}
                     </div>
                     <p
-                      className={`text-[10px] font-semibold ${
-                        done
-                          ? "text-emerald-400"
-                          : isPending
-                            ? "text-amber-400"
-                            : activeStep === key
-                              ? "text-white"
-                              : "text-slate-600"
-                      }`}
+                      className={`text-[10px] font-semibold ${done ? "text-emerald-400" : isPending ? "text-amber-400" : activeStep === key ? "text-white" : "text-slate-600"}`}
                     >
                       {label}
                     </p>
@@ -843,13 +851,7 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-5">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    profile?.kyc_verified
-                      ? "bg-emerald-500/20"
-                      : kycPending
-                        ? "bg-amber-500/10"
-                        : "bg-slate-800"
-                  }`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.kyc_verified ? "bg-emerald-500/20" : kycPending ? "bg-amber-500/10" : "bg-slate-800"}`}
                 >
                   {profile?.kyc_verified ? (
                     <CheckCircle size={16} className="text-emerald-400" />
@@ -1079,16 +1081,10 @@ export default function VerificationPage() {
                           <span className="text-red-400">*</span>
                         </label>
                         <label
-                          className={`flex items-center gap-3 p-4 rounded-xl border cursor-pointer transition-all ${
-                            idFile
-                              ? "border-emerald-500/40 bg-emerald-500/5"
-                              : "border-dashed border-slate-600 hover:border-slate-400 bg-slate-800/40"
-                          }`}
+                          className={`flex items-center gap-3 p-4 rounded-xl border cursor-pointer transition-all ${idFile ? "border-emerald-500/40 bg-emerald-500/5" : "border-dashed border-slate-600 hover:border-slate-400 bg-slate-800/40"}`}
                         >
                           <div
-                            className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${
-                              idFile ? "bg-emerald-500/10" : "bg-slate-700"
-                            }`}
+                            className={`w-10 h-10 rounded-lg flex items-center justify-center shrink-0 ${idFile ? "bg-emerald-500/10" : "bg-slate-700"}`}
                           >
                             <Upload
                               size={18}
@@ -1137,7 +1133,7 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
-                  {/* Upload progress bar */}
+                  {/* Upload progress */}
                   {uploadProgress && (
                     <div className="space-y-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <div className="flex items-center gap-2">
@@ -1194,11 +1190,7 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    profile?.cla_signed && profile?.terms_signed
-                      ? "bg-emerald-500/20"
-                      : "bg-slate-800"
-                  }`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.cla_signed && profile?.terms_signed ? "bg-emerald-500/20" : "bg-slate-800"}`}
                 >
                   {profile?.cla_signed && profile?.terms_signed ? (
                     <CheckCircle size={16} className="text-emerald-400" />
@@ -1288,11 +1280,7 @@ export default function VerificationPage() {
             <Card className="p-5 bg-slate-900/60 border-slate-800 rounded-2xl space-y-4">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                    profile?.payout_registered
-                      ? "bg-emerald-500/20"
-                      : "bg-slate-800"
-                  }`}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center ${profile?.payout_registered ? "bg-emerald-500/20" : "bg-slate-800"}`}
                 >
                   {profile?.payout_registered ? (
                     <CheckCircle size={16} className="text-emerald-400" />
