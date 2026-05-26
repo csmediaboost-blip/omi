@@ -1,9 +1,10 @@
 // app/api/korapay/checkout/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// KEY FIX: All config reads use the service-role Supabase client with
-// auth.uid() bypass. The payment_config table is read by directly passing
-// the service role key — no RLS, no env var dependency for the KoraPay key.
-// The KoraPay key lives in your payment_config DB table (admin-managed).
+// BUG FIX: payment_config table uses COLUMN-based schema, not key-value rows.
+//   Actual columns: id, korapay_secret_key, usd_to_ngn_rate,
+//                   crypto_wallet_address, created_at
+//   Old code did select("key, value") — those columns do NOT exist.
+//   Fixed: select("*") and read cfg.korapay_secret_key directly.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -13,23 +14,18 @@ import crypto from "crypto";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// ─── Service-role Supabase client — bypasses ALL RLS ─────────────────────────
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
   if (!url || !serviceKey) {
     console.error(
-      "[korapay/checkout] ❌ Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.",
+      "[korapay/checkout] ❌ Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY",
     );
   }
 
   return createClient(url, serviceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-    // Explicitly pass service role in global headers so RLS is bypassed
+    auth: { autoRefreshToken: false, persistSession: false },
     global: {
       headers: {
         apikey: serviceKey,
@@ -39,7 +35,6 @@ function getSupabaseAdmin() {
   });
 }
 
-// ─── Currency helpers ─────────────────────────────────────────────────────────
 const CURRENCY_CHANNELS: Record<string, string[]> = {
   NGN: ["card", "bank_transfer", "mobile_money"],
   KES: ["card", "mobile_money"],
@@ -65,21 +60,19 @@ function currencyForCountry(countryCode: string): string {
   return map[countryCode] ?? "NGN";
 }
 
-function toKorapayAmount(amount: number): number {
-  return Math.round(amount);
-}
-
-// ─── Load ALL payment config from DB ─────────────────────────────────────────
-// This is the single source of truth — mirrors exactly what your admin UI does.
+// ─── FIX: Load config from actual column-based schema ─────────────────────────
+// Table columns: id, korapay_secret_key, usd_to_ngn_rate,
+//                crypto_wallet_address, created_at
 async function loadPaymentConfig(
   supabase: ReturnType<typeof getSupabaseAdmin>,
 ): Promise<Record<string, string>> {
-  const cfg: Record<string, string> = {};
-
   try {
     const { data, error } = await supabase
       .from("payment_config")
-      .select("key, value");
+      .select("*") // ← FIX: was select("key, value") — wrong columns
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
     if (error) {
       console.error(
@@ -87,41 +80,49 @@ async function loadPaymentConfig(
         error.message,
         "code:",
         error.code,
-        "hint:",
-        error.hint,
       );
-      return cfg;
+      return {};
     }
 
-    if (!data || data.length === 0) {
+    if (!data) {
       console.warn(
-        "[korapay/checkout] payment_config returned 0 rows — table may be empty or RLS is blocking service role.",
+        "[korapay/checkout] payment_config returned 0 rows — " +
+          "go to Admin → Payment Config and save your KoraPay secret key.",
       );
-      return cfg;
+      return {};
     }
-
-    data.forEach((row: any) => {
-      if (row.key && row.value && row.value !== "EMPTY" && row.value !== "") {
-        cfg[row.key] = row.value;
-      }
-    });
 
     console.log(
-      "[korapay/checkout] payment_config loaded keys:",
-      Object.keys(cfg),
+      "[korapay/checkout] payment_config loaded. Has key?",
+      !!data.korapay_secret_key,
     );
+
+    // Normalise to Record<string,string> so downstream code stays the same
+    const cfg: Record<string, string> = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (v !== null && v !== undefined && v !== "" && v !== "EMPTY") {
+        cfg[k] = String(v);
+      }
+    }
+    return cfg;
   } catch (e: any) {
     console.error("[korapay/checkout] payment_config fetch threw:", e.message);
+    return {};
   }
-
-  return cfg;
 }
 
-// ─── Resolve KoraPay secret key from config ───────────────────────────────────
+// ─── FIX: Resolve key using actual column name first ─────────────────────────
 function resolveKorapayKey(cfg: Record<string, string>): string {
-  // Try every key name an admin might have stored it under
-  const candidates = [
-    "korapay_secret_key",
+  // Primary: actual DB column name used by the admin UI
+  if (cfg.korapay_secret_key?.trim()) {
+    console.log(
+      "[korapay/checkout] ✅ KoraPay key found in korapay_secret_key column",
+    );
+    return cfg.korapay_secret_key.trim();
+  }
+
+  // Fallback aliases in case admin saved under a different name
+  const aliases = [
     "korapay_api_key",
     "korapay_key",
     "KORAPAY_SECRET_KEY",
@@ -129,36 +130,32 @@ function resolveKorapayKey(cfg: Record<string, string>): string {
     "korapay_live_key",
     "korapay_sk",
   ];
-
-  for (const name of candidates) {
-    if (cfg[name] && cfg[name].trim() !== "" && cfg[name] !== "EMPTY") {
-      console.log(`[korapay/checkout] ✅ KoraPay key found under: "${name}"`);
+  for (const name of aliases) {
+    if (cfg[name]?.trim()) {
+      console.log(
+        `[korapay/checkout] ✅ KoraPay key found under alias: "${name}"`,
+      );
       return cfg[name].trim();
     }
   }
 
-  // Last resort: env var (for dev/staging environments)
-  if (
-    process.env.KORAPAY_SECRET_KEY &&
-    process.env.KORAPAY_SECRET_KEY.trim() !== ""
-  ) {
+  // Last resort: env var
+  if (process.env.KORAPAY_SECRET_KEY?.trim()) {
     console.log("[korapay/checkout] ✅ KoraPay key found in env var");
     return process.env.KORAPAY_SECRET_KEY.trim();
   }
 
   console.error(
-    "[korapay/checkout] ❌ KoraPay key not found. Tried keys:",
-    candidates,
-    "\nMake sure you saved the key in Admin → Payment Config with one of those key names.",
+    "[korapay/checkout] ❌ KoraPay key not found.\n" +
+      "  → Go to Admin → Payment Config and save your key in the " +
+      "'KoraPay Secret Key' field (column: korapay_secret_key).",
   );
   return "";
 }
 
-// ─── POST handler ─────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
-
     const body = await req.json();
 
     const {
@@ -166,8 +163,8 @@ export async function POST(req: NextRequest) {
       phone,
       nodeKey,
       nodeName,
-      price, // Converted local-currency amount e.g. ₦200,000
-      originalPrice, // USD amount e.g. $125
+      price,
+      originalPrice,
       currency: rawCurrency,
       gpu,
       vram,
@@ -187,7 +184,6 @@ export async function POST(req: NextRequest) {
       countryName,
       autoReinvest,
       referralCode,
-      // Split payment passthrough
       isSplitPayment,
       splitInstallment,
       splitTotal,
@@ -200,7 +196,7 @@ export async function POST(req: NextRequest) {
         ? rawCurrency
         : currencyForCountry(countryCode);
 
-    const korapayAmount = toKorapayAmount(Number(price));
+    const korapayAmount = Math.round(Number(price));
 
     const appUrl = (
       process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online"
@@ -214,45 +210,36 @@ export async function POST(req: NextRequest) {
       currency,
       countryCode,
       paymentModel,
-      miningPeriod,
       purchaseType,
-      licenseType,
       isSplitPayment,
-      splitInstallment,
-      splitTotal,
     });
 
-    // ── Basic validation ──────────────────────────────────────────────────────
-    if (!userId) {
+    if (!userId)
       return NextResponse.json({ error: "Missing userId" }, { status: 400 });
-    }
-    if (!price || isNaN(Number(price)) || Number(price) <= 0) {
+    if (!price || isNaN(Number(price)) || Number(price) <= 0)
       return NextResponse.json({ error: "Invalid amount" }, { status: 400 });
-    }
-    if (Number(originalPrice) > 10000) {
+    if (Number(originalPrice) > 10000)
       return NextResponse.json(
         { error: "Payment limit is $10,000 USD." },
         { status: 400 },
       );
-    }
 
-    // ── Load config from DB (admin-managed) ───────────────────────────────────
+    // ── Load config (FIXED schema) ────────────────────────────────────────────
     const cfg = await loadPaymentConfig(supabaseAdmin);
-
-    // ── Resolve KoraPay key ───────────────────────────────────────────────────
     const korapayKey = resolveKorapayKey(cfg);
 
     if (!korapayKey) {
       return NextResponse.json(
         {
           error:
-            "Payment gateway not configured. Please add your KoraPay secret key in Admin → Payment Config, then try again.",
+            "Payment gateway not configured. " +
+            "Please add your KoraPay secret key in Admin → Payment Config, then try again.",
         },
         { status: 500 },
       );
     }
 
-    // ── Load user email ───────────────────────────────────────────────────────
+    // ── Load user ─────────────────────────────────────────────────────────────
     const { data: user, error: userErr } = await supabaseAdmin
       .from("users")
       .select("email, full_name")
@@ -269,7 +256,6 @@ export async function POST(req: NextRequest) {
 
     const externalId = `omni_${userId.slice(0, 8)}_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
 
-    // ── Insert pending payment_transaction ────────────────────────────────────
     const txMetadata = {
       gateway: "korapay",
       externalId,
@@ -329,7 +315,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── Build KoraPay payload ─────────────────────────────────────────────────
     const customerObj: Record<string, string> = {
       name: user.full_name || "OmniTask User",
       email: user.email,
@@ -357,7 +342,6 @@ export async function POST(req: NextRequest) {
       JSON.stringify(korapayPayload),
     );
 
-    // ── Call KoraPay initialize endpoint ──────────────────────────────────────
     const koraRes = await fetch(
       "https://api.korapay.com/merchant/api/v1/charges/initialize",
       {
@@ -392,10 +376,7 @@ export async function POST(req: NextRequest) {
         koraData?.data?.message ||
         `HTTP ${koraRes.status}`;
 
-      console.error(
-        "[korapay/checkout] ✗ KoraPay rejected the request:",
-        errorMsg,
-      );
+      console.error("[korapay/checkout] ✗ KoraPay rejected:", errorMsg);
 
       await supabaseAdmin
         .from("payment_transactions")

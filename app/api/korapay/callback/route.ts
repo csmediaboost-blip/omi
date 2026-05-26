@@ -1,15 +1,14 @@
 // app/api/korapay/callback/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES vs broken version:
-//  FIX-A  Removed import from @/lib/allocation-creator (file does not exist).
-//         All allocation and license logic is now inlined directly here.
-//  FIX-B  GPU plan allocation uses all correct fields:
-//         mining_period, mining_ends_at, rate_factor_used, payment_model, etc.
-//  FIX-C  Flexible sessions: lockInMonths = 0, mining_ends_at computed from
-//         PERIOD_DURATIONS_MS. Contract sessions: mining_ends_at = maturity_date.
-//  FIX-D  License activation inserts into operator_licenses table.
-//  FIX-E  Idempotency guard prevents duplicate allocation on double-redirect.
-//  FIX-F  In-app notification sent after activation.
+// BUG FIX (vs original):
+//  FIX-SCHEMA  payment_config uses column-based schema, not key-value rows.
+//              Old code: select("key, value") → columns don't exist → no key found.
+//              Fixed: select("*") and read cfg.korapay_secret_key directly.
+//  FIX-ALLOC   GPU plan allocation uses all correct fields.
+//  FIX-LICENSE License activation inserts into operator_licenses table.
+//  FIX-IDEM    Idempotency guard on both allocation + license.
+//  FIX-SPLIT   Only activates allocation on final split installment.
+//  FIX-NOTIF   In-app notification sent after activation.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -18,7 +17,6 @@ import { NextRequest, NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-// Mirror of PERIOD_DURATIONS_MS from mining-service (inlined to avoid import)
 const PERIOD_DURATIONS_MS: Record<string, number> = {
   hourly: 1 * 60 * 60 * 1000,
   daily: 24 * 60 * 60 * 1000,
@@ -26,19 +24,57 @@ const PERIOD_DURATIONS_MS: Record<string, number> = {
   monthly: 30 * 24 * 60 * 60 * 1000,
 };
 
-function getSupabase() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-    process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  );
-}
-
 const APP_URL = (
   process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online"
 ).replace(/\/$/, "");
 
-// ─── Inline allocation creator ────────────────────────────────────────────────
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { apikey: key, Authorization: `Bearer ${key}` } },
+  });
+}
+
+// ─── FIX: Load config using actual column-based schema ────────────────────────
+async function resolveKorapayKey(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from("payment_config")
+      .select("*") // ← FIX: was select("key, value")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      console.error(
+        "[korapay/callback] payment_config read error:",
+        error.message,
+      );
+    }
+
+    if (data?.korapay_secret_key?.trim()) return data.korapay_secret_key.trim();
+
+    // Fallback aliases
+    for (const alias of [
+      "korapay_api_key",
+      "korapay_key",
+      "korapay_live_secret",
+    ]) {
+      if (data?.[alias]?.trim()) return data[alias].trim();
+    }
+  } catch (e: any) {
+    console.error("[korapay/callback] config fetch threw:", e.message);
+  }
+
+  // Last resort
+  return process.env.KORAPAY_SECRET_KEY?.trim() || "";
+}
+
+// ─── Allocation creator ────────────────────────────────────────────────────────
 async function createNodeAllocation(
   supabase: ReturnType<typeof getSupabase>,
   params: {
@@ -56,7 +92,7 @@ async function createNodeAllocation(
 }> {
   const { userId, planId, amount, metadata, transactionRef } = params;
 
-  // Idempotency — skip if allocation already created for this ref
+  // Idempotency check
   const { data: existing } = await supabase
     .from("node_allocations")
     .select("id")
@@ -89,7 +125,6 @@ async function createNodeAllocation(
       ).toISOString()
     : null;
 
-  // Fetch rate_factor (soft — falls back to 0.86)
   let rateFactor = 0.86;
   try {
     const { data: rateSnap } = await supabase
@@ -149,7 +184,6 @@ async function createNodeAllocation(
     return { success: false, error: allocErr.message };
   }
 
-  // Record payment_transaction entry for this allocation
   try {
     await supabase.from("payment_transactions").insert({
       user_id: userId,
@@ -172,7 +206,6 @@ async function createNodeAllocation(
     });
   } catch {}
 
-  // Referral tracking
   if (metadata.referralCode) {
     try {
       await supabase.from("referral_uses").insert({
@@ -188,7 +221,7 @@ async function createNodeAllocation(
   return { success: true, id: newAlloc.id };
 }
 
-// ─── Inline license activator ─────────────────────────────────────────────────
+// ─── License activator ────────────────────────────────────────────────────────
 async function activateLicense(
   supabase: ReturnType<typeof getSupabase>,
   userId: string,
@@ -201,7 +234,6 @@ async function activateLicense(
     now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  // Idempotency — check if license already active for this user + type
   const { data: existing } = await supabase
     .from("operator_licenses")
     .select("id")
@@ -233,7 +265,7 @@ async function activateLicense(
   return { success: true };
 }
 
-// ─── GET handler — KoraPay redirects here after payment ──────────────────────
+// ─── GET — KoraPay redirects here after payment ───────────────────────────────
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const reference = searchParams.get("reference");
@@ -255,25 +287,11 @@ export async function GET(req: NextRequest) {
   const supabase = getSupabase();
 
   try {
-    // ── Load KoraPay API key ─────────────────────────────────────────────────
-    const { data: configData } = await supabase
-      .from("payment_config")
-      .select("key, value");
-    const cfg: Record<string, string> = {};
-    (configData || []).forEach((r: any) => {
-      cfg[r.key] = r.value;
-    });
+    // ── Load KoraPay key (FIXED schema) ───────────────────────────────────────
+    const korapayKey = await resolveKorapayKey(supabase);
 
-    const korapayKey =
-      cfg["korapay_secret_key"] ||
-      cfg["korapay_api_key"] ||
-      cfg["korapay_key"] ||
-      cfg["KORAPAY_SECRET_KEY"] ||
-      process.env.KORAPAY_SECRET_KEY ||
-      "";
-
-    if (!korapayKey || korapayKey.trim() === "" || korapayKey === "EMPTY") {
-      console.error("[korapay/callback] No API key");
+    if (!korapayKey) {
+      console.error("[korapay/callback] No API key found");
       return NextResponse.redirect(
         `${APP_URL}/dashboard/checkout?error=config`,
       );
@@ -282,7 +300,10 @@ export async function GET(req: NextRequest) {
     // ── Verify charge with KoraPay ────────────────────────────────────────────
     const verifyRes = await fetch(
       `https://api.korapay.com/merchant/api/v1/charges/${reference}`,
-      { method: "GET", headers: { Authorization: `Bearer ${korapayKey}` } },
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${korapayKey}` },
+      },
     );
 
     let verifyData: any = {};
@@ -311,7 +332,6 @@ export async function GET(req: NextRequest) {
     const chargeStatus = verifyData?.data?.status;
 
     if (chargeStatus === "success" || chargeStatus === "completed") {
-      // ── Load transaction record ─────────────────────────────────────────────
       const { data: txData, error: txErr } = await supabase
         .from("payment_transactions")
         .select("*")
@@ -325,7 +345,7 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      // Idempotency — already processed
+      // Already processed — idempotent
       if (txData.status === "confirmed" || txData.status === "completed") {
         console.log("[korapay/callback] Already processed:", reference);
         return NextResponse.redirect(
@@ -341,7 +361,7 @@ export async function GET(req: NextRequest) {
       const now = new Date().toISOString();
       const purchaseType = metadata.purchaseType || "gpu_plan";
 
-      // ── Mark transaction confirmed ──────────────────────────────────────────
+      // Mark confirmed FIRST
       await supabase
         .from("payment_transactions")
         .update({
@@ -352,7 +372,7 @@ export async function GET(req: NextRequest) {
         })
         .eq("gateway_reference", reference);
 
-      // ── Activate plan or license immediately ────────────────────────────────
+      // ── Activate IMMEDIATELY ──────────────────────────────────────────────
       if (purchaseType === "license") {
         const licenseType =
           metadata.licenseType || txData.node_key || "operator_license";
@@ -363,15 +383,12 @@ export async function GET(req: NextRequest) {
           txData.amount,
           reference,
         );
-        if (!result.success) {
+        if (!result.success)
           console.error(
             "[korapay/callback] License activation failed:",
             result.error,
           );
-        }
       } else {
-        // For split payments, only activate allocation on the FINAL installment.
-        // For regular payments (isSplitPayment is false/null), activate immediately.
         const isSplit = metadata.isSplitPayment === true;
         const splitInstallment = Number(metadata.splitInstallment) || 1;
         const splitTotal = Number(metadata.splitTotal) || 1;
@@ -385,20 +402,19 @@ export async function GET(req: NextRequest) {
             metadata,
             transactionRef: reference,
           });
-          if (!result.success && !result.alreadyExisted) {
+          if (!result.success && !result.alreadyExisted)
             console.error(
-              "[korapay/callback] Allocation creation failed:",
+              "[korapay/callback] Allocation failed:",
               result.error,
             );
-          }
         } else {
           console.log(
-            `[korapay/callback] Split installment ${splitInstallment}/${splitTotal} confirmed — waiting for remaining installments.`,
+            `[korapay/callback] Split ${splitInstallment}/${splitTotal} confirmed — waiting for remaining.`,
           );
         }
       }
 
-      // ── Write ledger entry ──────────────────────────────────────────────────
+      // Ledger
       try {
         await supabase.from("transaction_ledger").insert({
           user_id: userId,
@@ -406,13 +422,13 @@ export async function GET(req: NextRequest) {
           amount: txData.amount,
           description:
             purchaseType === "license"
-              ? `Operator License via Bank Transfer (${metadata.licenseType || txData.node_key})`
-              : `GPU Node via Bank Transfer (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
+              ? `Operator License via KoraPay (${metadata.licenseType || txData.node_key})`
+              : `GPU Node via KoraPay (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
           created_at: now,
         });
       } catch {}
 
-      // ── In-app notification ─────────────────────────────────────────────────
+      // Notification
       try {
         await supabase.from("user_notifications").insert({
           user_id: userId,
@@ -424,8 +440,8 @@ export async function GET(req: NextRequest) {
               : "⛏️ Mining Session Started!",
           body:
             purchaseType === "license"
-              ? "Your operator license has been activated. Head to Tasks to start earning."
-              : `Your ${metadata.miningPeriod || "daily"} GPU mining session is now live. Watch your earnings in the portfolio.`,
+              ? "Your operator license is now active. Head to Tasks to start earning."
+              : `Your ${metadata.miningPeriod || "daily"} GPU mining session is now live.`,
           created_at: now,
         });
       } catch {}

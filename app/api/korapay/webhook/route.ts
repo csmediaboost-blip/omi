@@ -1,15 +1,12 @@
 // app/api/korapay/webhook/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES vs broken version:
-//  FIX-A  Removed import from @/lib/allocation-creator (file does not exist).
-//         All allocation and license logic is now inlined directly here.
-//  FIX-B  Uses gateway_reference column (not transaction_id — doesn't exist).
-//  FIX-C  Removed duplicate POST export that was crashing the route file.
-//  FIX-D  Does NOT insert into user_balances (that table doesn't exist).
-//         Balance is managed via balance_available on the users table.
-//  FIX-E  Allocations created with all correct mining fields.
-//  FIX-F  Idempotency guard — won't create duplicate allocations.
-//  FIX-G  Plan/license activates IMMEDIATELY on charge.success event.
+// BUG FIX (vs original):
+//  FIX-SCHEMA  Loads korapay_secret_key from DB using select("*") — actual
+//              column-based schema (not key-value rows).
+//  FIX-A  No import from @/lib/allocation-creator — all logic inlined.
+//  FIX-B  Queries by gateway_reference (correct column).
+//  FIX-C  Single POST export only.
+//  FIX-G  Activates plan/license IMMEDIATELY on charge.success.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -20,7 +17,6 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const maxDuration = 60;
 
-// Mirror of PERIOD_DURATIONS_MS from mining-service
 const PERIOD_DURATIONS_MS: Record<string, number> = {
   hourly: 1 * 60 * 60 * 1000,
   daily: 24 * 60 * 60 * 1000,
@@ -29,14 +25,39 @@ const PERIOD_DURATIONS_MS: Record<string, number> = {
 };
 
 function getSupabaseAdmin() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-    process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  );
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { apikey: key, Authorization: `Bearer ${key}` } },
+  });
 }
 
-function verifyKorapaySignature(
+// ─── FIX: Load webhook secret using actual column-based schema ─────────────────
+async function resolveKorapaySecret(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+): Promise<string> {
+  try {
+    const { data } = await supabase
+      .from("payment_config")
+      .select("*") // ← FIX: actual column-based schema
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (data?.korapay_secret_key?.trim()) return data.korapay_secret_key.trim();
+    for (const alias of [
+      "korapay_api_key",
+      "korapay_key",
+      "korapay_live_secret",
+    ]) {
+      if (data?.[alias]?.trim()) return data[alias].trim();
+    }
+  } catch {}
+  return process.env.KORAPAY_SECRET_KEY?.trim() || "";
+}
+
+function verifySignature(
   rawBody: string,
   signature: string,
   secret: string,
@@ -52,7 +73,6 @@ function verifyKorapaySignature(
   }
 }
 
-// ─── Inline allocation creator ────────────────────────────────────────────────
 async function createNodeAllocation(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   params: {
@@ -70,7 +90,6 @@ async function createNodeAllocation(
 }> {
   const { userId, planId, amount, metadata, transactionRef } = params;
 
-  // Idempotency — check for recent allocation for same user+plan
   const { data: existing } = await supabase
     .from("node_allocations")
     .select("id")
@@ -103,7 +122,6 @@ async function createNodeAllocation(
       ).toISOString()
     : null;
 
-  // Fetch rate_factor for this plan (soft — fallback 0.86)
   let rateFactor = 0.86;
   try {
     const { data: rateSnap } = await supabase
@@ -163,7 +181,6 @@ async function createNodeAllocation(
     return { success: false, error: allocErr.message };
   }
 
-  // Record a confirmed payment_transaction for this allocation
   try {
     await supabase.from("payment_transactions").insert({
       user_id: userId,
@@ -188,7 +205,6 @@ async function createNodeAllocation(
   return { success: true, id: newAlloc.id };
 }
 
-// ─── Inline license activator ─────────────────────────────────────────────────
 async function activateLicense(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   userId: string,
@@ -201,7 +217,6 @@ async function activateLicense(
     now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  // Idempotency
   const { data: existing } = await supabase
     .from("operator_licenses")
     .select("id")
@@ -233,8 +248,6 @@ async function activateLicense(
   return { success: true };
 }
 
-// ─── SINGLE POST handler — processes KoraPay webhook events ──────────────────
-// FIX-C: Only ONE export async function POST (old file had two — syntax error)
 export async function POST(req: NextRequest) {
   const supabaseAdmin = getSupabaseAdmin();
 
@@ -259,27 +272,24 @@ export async function POST(req: NextRequest) {
     body?.data?.reference,
   );
 
-  // Signature verification (non-blocking if secret not configured)
+  // Signature verification (loads key from DB with correct schema)
   const signature = req.headers.get("x-korapay-signature");
-  const korapaySecret = process.env.KORAPAY_SECRET_KEY || "";
-  if (signature && korapaySecret) {
-    if (!verifyKorapaySignature(rawBody, signature, korapaySecret)) {
+  if (signature) {
+    const secret = await resolveKorapaySecret(supabaseAdmin);
+    if (secret && !verifySignature(rawBody, signature, secret)) {
       console.error("[korapay/webhook] Invalid signature");
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
   }
 
   const { data, event } = body;
-  // FIX-B: KoraPay sends reference in data.reference
   const reference = data?.reference;
 
-  if (!reference) {
+  if (!reference)
     return NextResponse.json({ error: "Missing reference" }, { status: 400 });
-  }
 
   if (event === "charge.success") {
     try {
-      // FIX-B: Query by gateway_reference (not transaction_id — wrong column)
       const { data: txData, error: txErr } = await supabaseAdmin
         .from("payment_transactions")
         .select("*")
@@ -287,16 +297,10 @@ export async function POST(req: NextRequest) {
         .single();
 
       if (txErr || !txData) {
-        console.error(
-          "[korapay/webhook] Transaction not found:",
-          reference,
-          txErr,
-        );
-        // Return 200 so KoraPay stops retrying for unknown references
+        console.error("[korapay/webhook] Transaction not found:", reference);
         return NextResponse.json({ success: true, note: "tx_not_found" });
       }
 
-      // Idempotency — skip if already processed
       if (txData.status === "confirmed" || txData.status === "completed") {
         console.log("[korapay/webhook] Already processed:", reference);
         return NextResponse.json({ success: true });
@@ -311,7 +315,6 @@ export async function POST(req: NextRequest) {
       const userId = txData.user_id;
       const purchaseType = metadata.purchaseType || "gpu_plan";
 
-      // ── Mark payment confirmed ────────────────────────────────────────────
       await supabaseAdmin
         .from("payment_transactions")
         .update({
@@ -322,7 +325,6 @@ export async function POST(req: NextRequest) {
         })
         .eq("gateway_reference", reference);
 
-      // ── FIX-G: Activate plan or license immediately ───────────────────────
       if (purchaseType === "license") {
         const licenseType =
           metadata.licenseType || txData.node_key || "operator_license";
@@ -333,14 +335,12 @@ export async function POST(req: NextRequest) {
           txData.amount,
           reference,
         );
-        if (!result.success) {
+        if (!result.success)
           console.error(
             "[korapay/webhook] License activation failed:",
             result.error,
           );
-        }
       } else {
-        // Split payment: only activate on final installment
         const isSplit = metadata.isSplitPayment === true;
         const splitInstallment = Number(metadata.splitInstallment) || 1;
         const splitTotal = Number(metadata.splitTotal) || 1;
@@ -354,20 +354,15 @@ export async function POST(req: NextRequest) {
             metadata,
             transactionRef: reference,
           });
-          if (!result.success && !result.alreadyExisted) {
-            console.error(
-              "[korapay/webhook] Allocation creation failed:",
-              result.error,
-            );
-          }
+          if (!result.success && !result.alreadyExisted)
+            console.error("[korapay/webhook] Allocation failed:", result.error);
         } else {
           console.log(
-            `[korapay/webhook] Split installment ${splitInstallment}/${splitTotal} confirmed — waiting for remaining.`,
+            `[korapay/webhook] Split ${splitInstallment}/${splitTotal} confirmed — waiting.`,
           );
         }
       }
 
-      // ── Write transaction ledger ──────────────────────────────────────────
       try {
         await supabaseAdmin.from("transaction_ledger").insert({
           user_id: userId,
@@ -375,13 +370,12 @@ export async function POST(req: NextRequest) {
           amount: txData.amount,
           description:
             purchaseType === "license"
-              ? `Operator License via KoraPay (${metadata.licenseType || txData.node_key})`
-              : `GPU Node via KoraPay (${txData.node_key}) — ${metadata.miningPeriod || "daily"} session`,
+              ? `License via KoraPay (${metadata.licenseType || txData.node_key})`
+              : `GPU Node via KoraPay (${txData.node_key}) — ${metadata.miningPeriod || "daily"}`,
           created_at: now,
         });
       } catch {}
 
-      // ── In-app notification ───────────────────────────────────────────────
       try {
         await supabaseAdmin.from("user_notifications").insert({
           user_id: userId,
@@ -393,14 +387,14 @@ export async function POST(req: NextRequest) {
               : "⛏️ Mining Session Started!",
           body:
             purchaseType === "license"
-              ? "Your operator license has been activated. Head to Tasks to start earning."
-              : `Your ${metadata.miningPeriod || "daily"} GPU mining session is now live. Watch your earnings grow in real time.`,
+              ? "Your operator license is now active."
+              : `Your ${metadata.miningPeriod || "daily"} GPU mining session is live.`,
           created_at: now,
         });
       } catch {}
 
       console.log(
-        "[korapay/webhook] Successfully processed:",
+        "[korapay/webhook] ✓ Processed:",
         reference,
         "type:",
         purchaseType,
@@ -408,11 +402,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, processed: true });
     } catch (err: any) {
       console.error("[korapay/webhook] Processing error:", err);
-      // Return 500 so KoraPay retries
-      return NextResponse.json(
-        { error: err.message || "Processing failed" },
-        { status: 500 },
-      );
+      return NextResponse.json({ error: err.message }, { status: 500 });
     }
   }
 
@@ -424,6 +414,5 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true });
   }
 
-  // Unknown event — acknowledge so KoraPay doesn't retry indefinitely
   return NextResponse.json({ success: true });
 }
