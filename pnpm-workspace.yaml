@@ -1,4 +1,0 @@
-ignoredBuiltDependencies:
-  - bcrypt
-  - core-js
-  - sharp
