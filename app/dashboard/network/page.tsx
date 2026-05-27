@@ -488,7 +488,7 @@ function DeliveryModal({
     {
       key: "phone",
       label: "Phone Number",
-      placeholder: "+234 800 000 0000",
+      placeholder: "",
       icon: Phone,
       required: true,
       type: "tel",
@@ -507,11 +507,11 @@ function DeliveryModal({
       icon: MapPin,
       required: true,
     },
-    { key: "city", label: "City", placeholder: "Lagos", icon: MapPin },
+    { key: "city", label: "City", placeholder: "", icon: MapPin },
     {
       key: "country",
       label: "Country",
-      placeholder: "Nigeria",
+      placeholder: "",
       icon: Globe,
       required: true,
     },

@@ -1,161 +1,208 @@
 // app/api/admin/activate-node/route.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// RESCUE FALLBACK — only needed for payments that were confirmed BEFORE the
-// approve-payment fix was deployed (no allocation was created at that time).
-//
-// For ALL new payments, allocation is created INSTANTLY by approve-payment/
-// korapay callback/korapay webhook. This route is only a safety net.
-//
-// Idempotent: safe to call multiple times — checks for existing allocation first.
-// ─────────────────────────────────────────────────────────────────────────────
+// Manual re-activation for confirmed payments where allocation was missed.
+// Idempotency-safe — won't create duplicates.
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import {
-  createNodeAllocation,
-  activateLicense,
-} from "@/lib/allocation-creator";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-export const maxDuration = 30;
+export const maxDuration = 60;
+
+const PERIOD_DURATIONS_MS: Record<string, number> = {
+  hourly: 1 * 60 * 60 * 1000,
+  daily: 24 * 60 * 60 * 1000,
+  weekly: 7 * 24 * 60 * 60 * 1000,
+  monthly: 30 * 24 * 60 * 60 * 1000,
+};
 
 function getAdminSupabase() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { autoRefreshToken: false, persistSession: false } },
-  );
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+    global: { headers: { apikey: key, Authorization: `Bearer ${key}` } },
+  });
 }
 
 export async function POST(req: NextRequest) {
   try {
     const supabase = getAdminSupabase();
-    const body = await req.json();
-    const { paymentId, reference } = body;
+    const { paymentId } = await req.json();
 
-    if (!paymentId && !reference) {
+    if (!paymentId) {
       return NextResponse.json(
-        { error: "paymentId or reference required" },
+        { error: "paymentId is required" },
         { status: 400 },
       );
     }
 
-    // Load the payment transaction
-    let q = supabase.from("payment_transactions").select("*");
-    if (paymentId) q = q.eq("id", Number(paymentId));
-    else q = q.eq("gateway_reference", reference);
-    const { data: txn, error: txErr } = await q.single();
+    const { data: txn, error: txErr } = await supabase
+      .from("payment_transactions")
+      .select("*")
+      .eq("id", paymentId)
+      .single();
 
     if (txErr || !txn) {
       return NextResponse.json(
-        { error: "Transaction not found" },
+        { error: `Transaction #${paymentId} not found` },
         { status: 404 },
       );
     }
 
-    const metadata = (() => {
-      try {
-        return typeof txn.metadata === "string"
-          ? JSON.parse(txn.metadata)
-          : txn.metadata || {};
-      } catch {
-        return {};
-      }
-    })();
+    const metadata =
+      typeof txn.metadata === "string"
+        ? JSON.parse(txn.metadata || "{}")
+        : txn.metadata || {};
 
-    const purchaseType = metadata.purchaseType || "gpu_plan";
+    const now = new Date();
+    const nowIso = now.toISOString();
     const userId = txn.user_id;
-
-    let allocationId: string | undefined;
+    const planId = txn.node_key;
+    const purchaseType = metadata.purchaseType || "gpu_plan";
 
     if (purchaseType === "license") {
-      const licenseType =
-        metadata.licenseType || txn.node_key || "operator_license";
-      const result = await activateLicense(
-        supabase,
-        userId,
-        licenseType,
-        txn.amount,
-        String(txn.id),
-      );
-      if (!result.success) {
-        return NextResponse.json(
-          { error: "License activation failed: " + result.error },
-          { status: 500 },
-        );
-      }
-    } else {
-      // Create node allocation — idempotency inside createNodeAllocation prevents duplicates
-      const result = await createNodeAllocation(supabase, {
-        userId,
-        planId: txn.node_key,
-        amount: txn.amount,
-        metadata,
-        transactionRef: String(txn.id),
-      });
+      const licenseType = metadata.licenseType || planId || "operator_license";
 
-      if (!result.success && !result.alreadyExisted) {
-        return NextResponse.json(
-          { error: "Allocation creation failed: " + result.error },
-          { status: 500 },
-        );
-      }
-      allocationId = result.allocationId;
-      if (result.alreadyExisted) {
+      const { data: existing } = await supabase
+        .from("operator_licenses")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("license_type", licenseType)
+        .eq("status", "active")
+        .limit(1);
+
+      if (existing && existing.length > 0) {
         return NextResponse.json({
           success: true,
-          message: "Allocation already exists — no duplicate created",
-          allocationId,
           alreadyExisted: true,
+          message: "License already active",
         });
       }
+
+      const expiresAt = new Date(
+        now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+
+      await supabase.from("operator_licenses").insert({
+        user_id: userId,
+        license_type: licenseType,
+        status: "active",
+        activated_at: nowIso,
+        expires_at: expiresAt,
+        amount_paid: txn.amount,
+        transaction_ref: txn.gateway_reference || String(txn.id),
+        created_at: nowIso,
+      });
+
+      return NextResponse.json({ success: true, type: "license", licenseType });
     }
 
-    // Ensure payment marked confirmed
-    await supabase
-      .from("payment_transactions")
-      .update({
-        status: "confirmed",
-        verified_by_admin: true,
-        confirmed_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", txn.id)
-      .eq("status", "pending"); // only update if still pending (idempotent)
+    // GPU node
+    const { data: existing } = await supabase
+      .from("node_allocations")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("plan_id", planId)
+      .gte("created_at", new Date(Date.now() - 30 * 60 * 1000).toISOString())
+      .limit(1);
 
-    // Notify user
-    try {
-      await supabase.from("user_notifications").insert({
-        user_id: userId,
-        type:
-          purchaseType === "license" ? "license_activated" : "mining_started",
-        title:
-          purchaseType === "license"
-            ? "🏆 License Activated!"
-            : "⛏️ Mining Session Started!",
-        body:
-          purchaseType === "license"
-            ? "Your payment has been verified and your operator license is now active."
-            : `Your ${metadata.miningPeriod || "daily"} GPU mining session is now live. Watch your earnings grow.`,
-        created_at: new Date().toISOString(),
+    if (existing && existing.length > 0) {
+      return NextResponse.json({
+        success: true,
+        alreadyExisted: true,
+        allocationId: existing[0].id,
       });
+    }
+
+    const paymentModel: "flexible" | "contract" =
+      metadata.paymentModel === "contract" ? "contract" : "flexible";
+    const miningPeriod = metadata.miningPeriod ?? "daily";
+    const isContract = paymentModel === "contract";
+
+    const periodMs =
+      PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
+    const miningEndsAt = isContract
+      ? null
+      : new Date(now.getTime() + periodMs).toISOString();
+
+    const contractMonths = Number(metadata.contractMonths) || 6;
+    const maturityDate = isContract
+      ? new Date(
+          now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000,
+        ).toISOString()
+      : null;
+
+    let rateFactor = 0.86;
+    try {
+      const { data: rateSnap } = await supabase
+        .from("current_mining_rates")
+        .select("rate_factor")
+        .eq("plan_id", planId)
+        .eq("period", miningPeriod)
+        .single();
+      if (rateSnap?.rate_factor != null) rateFactor = rateSnap.rate_factor;
     } catch {}
+
+    const payload: Record<string, any> = {
+      user_id: userId,
+      plan_id: planId,
+      amount_invested: txn.amount,
+      status: "active",
+      payment_model: paymentModel,
+      instance_type: metadata.itype || "on_demand",
+      total_earned: 0,
+      total_withdrawn: 0,
+      created_at: nowIso,
+      updated_at: nowIso,
+      auto_reinvest: metadata.autoReinvest || false,
+      ...(paymentModel === "flexible"
+        ? {
+            mining_period: miningPeriod,
+            mining_ends_at: miningEndsAt,
+            mining_completed: false,
+            rate_factor_used: rateFactor,
+            capital_returned: false,
+            final_profit: 0,
+          }
+        : {
+            contract_months: contractMonths,
+            contract_label: metadata.contractLabel || null,
+            contract_min_pct: metadata.contractMinPct || null,
+            contract_max_pct: metadata.contractMaxPct || null,
+            maturity_date: maturityDate,
+            lock_in_months: contractMonths,
+            lock_in_label:
+              metadata.lockInLabel || metadata.contractLabel || null,
+            lock_in_multiplier: metadata.lockInMultiplier || 1.0,
+            mining_completed: false,
+            rate_factor_used: rateFactor,
+            mining_period: "contract",
+            mining_ends_at: maturityDate,
+          }),
+    };
+
+    const { data: newAlloc, error: allocErr } = await supabase
+      .from("node_allocations")
+      .insert(payload)
+      .select("id")
+      .single();
+
+    if (allocErr) {
+      return NextResponse.json(
+        { error: "Allocation failed: " + allocErr.message },
+        { status: 500 },
+      );
+    }
 
     return NextResponse.json({
       success: true,
-      allocationId,
-      purchaseType,
-      message:
-        purchaseType === "license"
-          ? "License activated successfully"
-          : `Mining session started (${metadata.miningPeriod || "daily"})`,
+      type: "gpu_plan",
+      allocationId: newAlloc.id,
+      miningPeriod,
     });
   } catch (err: any) {
-    console.error("[activate-node] Unhandled error:", err);
-    return NextResponse.json(
-      { error: err.message || "Internal server error" },
-      { status: 500 },
-    );
+    console.error("[activate-node] Error:", err);
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }

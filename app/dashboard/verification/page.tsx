@@ -1,5 +1,24 @@
 "use client";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MOBILE BUG FIX SUMMARY
+//
+// ROOT CAUSE: Android Chrome / iOS Safari — fetch() calls to Supabase
+// endpoints (Auth, Storage, PostgREST/DB) stall indefinitely. They never
+// resolve or reject, so even Promise.race timeouts never fire.
+//
+// SOLUTION: Every Supabase call is now server-side via Next.js API routes.
+// The mobile browser only ever fetches its OWN server (/api/*), which uses
+// Node.js fetch (rock-solid). The only exception is XHR for the file upload
+// which bypasses fetch entirely.
+//
+// API ROUTES USED:
+//   GET  /api/kyc-profile          → load session + user profile
+//   POST /api/kyc-upload-url       → generate signed Storage URL
+//   POST /api/kyc-submit           → insert kyc_documents + update users
+//   POST /api/kyc-sign-agreements  → update cla_signed + terms_signed
+// ─────────────────────────────────────────────────────────────────────────────
+
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -162,7 +181,7 @@ const COUNTRIES = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// withTimeout — wraps any promise with a hard deadline.
+// withTimeout
 // ─────────────────────────────────────────────────────────────────────────────
 function withTimeout<T>(
   promise: Promise<T>,
@@ -189,8 +208,28 @@ function withTimeout<T>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// compressImage — shrinks large camera photos before upload.
-// Mobile camera shots are 3–8 MB → compressed to ~150–300 KB.
+// serverFetch — fetch to our own Next.js API with timeout.
+// Calls to /api/* go to Vercel/Node.js — never stall on mobile.
+// ─────────────────────────────────────────────────────────────────────────────
+async function serverFetch(
+  path: string,
+  options: RequestInit,
+  timeoutMs: number,
+  label: string,
+): Promise<any> {
+  const res = await withTimeout(
+    fetch(path, { ...options, credentials: "include" }),
+    timeoutMs,
+    label,
+  );
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok)
+    throw new Error(json?.error ?? `${label} failed (${res.status})`);
+  return json;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// compressImage
 // ─────────────────────────────────────────────────────────────────────────────
 function compressImage(file: File, maxWidth: number): Promise<File> {
   return new Promise((resolve, reject) => {
@@ -233,17 +272,8 @@ function compressImage(file: File, maxWidth: number): Promise<File> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// uploadViaXHR — uploads a file to a pre-signed URL using XMLHttpRequest.
-//
-// WHY XHR AND NOT FETCH:
-// supabase.storage.upload() and fetch() to Supabase Storage endpoints stall
-// indefinitely on Android Chrome / iOS Safari — they never resolve or reject,
-// so even Promise.race timeouts never fire.
-//
-// XMLHttpRequest is rock-solid on ALL mobile browsers:
-// - .timeout fires natively (no silent stalls)
-// - .upload.onprogress gives real upload percentage
-// - .onload / .onerror / .ontimeout always fire
+// uploadViaXHR — XHR PUT to a signed URL.
+// XHR has a native .timeout and .upload.onprogress — both guaranteed on mobile.
 // ─────────────────────────────────────────────────────────────────────────────
 function uploadViaXHR(
   signedUrl: string,
@@ -283,10 +313,7 @@ function uploadViaXHR(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// uploadFileForKYC — three-step upload flow:
-//   1. Compress image client-side (3 MB → ~200 KB)
-//   2. POST /api/kyc-upload-url — server generates signed URL (no mobile fetch bug)
-//   3. XHR PUT directly to Supabase Storage (real progress, guaranteed timeout)
+// uploadFileForKYC
 // ─────────────────────────────────────────────────────────────────────────────
 async function uploadFileForKYC(
   file: File,
@@ -304,7 +331,7 @@ async function uploadFileForKYC(
   };
   const contentType = file.type || mimeMap[ext] || "application/octet-stream";
 
-  // Step 1: Compress
+  // Compress images
   let fileToUpload = file;
   if (file.type.startsWith("image/") && file.size > 400 * 1024) {
     try {
@@ -318,84 +345,29 @@ async function uploadFileForKYC(
     }
   }
 
-  // Step 2: Get signed URL from server (avoids mobile fetch stall)
+  // Get signed URL from server
   onProgress?.(5);
-  const urlRes = await withTimeout(
-    fetch("/api/kyc-upload-url", {
+  const { signedUrl, bucket } = await serverFetch(
+    "/api/kyc-upload-url",
+    {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
-      credentials: "include",
-    }),
+    },
     20_000,
     "Get upload URL",
   );
-
-  if (!urlRes.ok) {
-    const errBody = await urlRes.json().catch(() => ({}));
-    throw new Error(
-      errBody?.error ?? `Failed to get upload URL (${urlRes.status})`,
-    );
-  }
-
-  const { signedUrl, bucket } = (await urlRes.json()) as {
-    signedUrl: string;
-    bucket: string;
-  };
   if (!signedUrl) throw new Error("No signed URL returned from server");
 
-  // Step 3: Upload via XHR (real progress, guaranteed mobile timeout)
+  // XHR upload
   onProgress?.(8);
-  await uploadViaXHR(
-    signedUrl,
-    fileToUpload,
-    contentType,
-    120_000,
-    (pct) => onProgress?.(8 + Math.round(pct * 0.9)), // 8–98%
+  await uploadViaXHR(signedUrl, fileToUpload, contentType, 120_000, (pct) =>
+    onProgress?.(8 + Math.round(pct * 0.9)),
   );
   onProgress?.(100);
 
   const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(path);
   return urlData?.publicUrl ?? "";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// submitKycToServer — sends KYC data to /api/kyc-submit server-side route.
-//
-// WHY SERVER-SIDE:
-// Mobile browser fetch() to Supabase PostgREST (the DB API) stalls
-// indefinitely — same bug as Storage. Running DB writes on the server
-// (Node.js fetch) completely eliminates the "Saving KYC record timed out"
-// error on mobile. The server uses the service role key so it bypasses RLS
-// and never stalls on policy evaluation.
-// ─────────────────────────────────────────────────────────────────────────────
-async function submitKycToServer(payload: {
-  documentType: string;
-  documentNumber: string;
-  documentUrl: string;
-  fullName: string;
-  country: string;
-  phone: string;
-  address: string;
-  city: string;
-  gender: string;
-  dateOfBirth: string;
-}): Promise<void> {
-  const res = await withTimeout(
-    fetch("/api/kyc-submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      credentials: "include",
-    }),
-    30_000,
-    "Saving KYC record",
-  );
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    throw new Error(errBody?.error ?? `Server error (${res.status})`);
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -443,6 +415,7 @@ export default function VerificationPage() {
     }, 6000);
   }
 
+  // ── load — calls /api/kyc-profile (server-side, no mobile stall) ────────
   const load = useCallback(async () => {
     if (loadCalledRef.current) return;
     loadCalledRef.current = true;
@@ -452,68 +425,21 @@ export default function VerificationPage() {
     }
 
     try {
-      const {
-        data: { session },
-        error: sessErr,
-      } = await withTimeout(supabase.auth.getSession(), 12000, "Session check");
-      if (sessErr || !session?.user) {
-        router.push("/auth/signin");
-        return;
-      }
-
-      const uid = session.user.id;
-
-      const { data, error } = await withTimeout(
-        supabase
-          .from("users")
-          .select(
-            "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
-          )
-          .eq("id", uid)
-          .single(),
-        12000,
-        "Profile load",
+      const { profile: data } = await serverFetch(
+        "/api/kyc-profile",
+        { method: "GET" },
+        20_000,
+        "Loading profile",
       );
 
       if (!mountedRef.current) return;
-
-      if (error) {
-        if (error.code === "PGRST116" || error.message?.includes("no rows")) {
-          const { data: created } = await withTimeout(
-            supabase
-              .from("users")
-              .insert({
-                id: uid,
-                email: session.user.email || "",
-                kyc_status: "not_started",
-                kyc_verified: false,
-                phone_verified: false,
-                payout_registered: false,
-                cla_signed: false,
-                terms_signed: false,
-              })
-              .select(
-                "id,email,full_name,phone,phone_verified,kyc_verified,kyc_status,kyc_full_name,payout_registered,cla_signed,terms_signed",
-              )
-              .single(),
-            12000,
-            "Create profile",
-          );
-          if (created && mountedRef.current) setProfile(created);
-        } else {
-          if (mountedRef.current)
-            setLoadErr(`Failed to load: ${error.message}`);
-        }
-        return;
-      }
-
-      if (!data || !mountedRef.current) return;
 
       setProfile(data);
       if (data.kyc_full_name) setIdFullName(data.kyc_full_name);
       else if (data.full_name) setIdFullName(data.full_name);
       if (data.phone) setIdPhone(data.phone);
 
+      // Redirect if already verified and a redirect URL was stored
       if (data.kyc_verified) {
         const redirect =
           typeof window !== "undefined"
@@ -532,8 +458,13 @@ export default function VerificationPage() {
       else if (!data.payout_registered) setActiveStep("payout");
       else setActiveStep("identity");
     } catch (err: unknown) {
-      if (mountedRef.current)
-        setLoadErr(err instanceof Error ? err.message : "Unknown error");
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      // 401 = not logged in
+      if (msg.includes("Unauthorized") || msg.includes("401")) {
+        router.push("/auth/signin");
+        return;
+      }
+      if (mountedRef.current) setLoadErr(msg);
     } finally {
       loadCalledRef.current = false;
       if (mountedRef.current) setLoading(false);
@@ -544,21 +475,7 @@ export default function VerificationPage() {
     load();
   }, [load]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // submitIdentity
-  //
-  // ALL network calls are now server-side:
-  // - /api/kyc-upload-url  → generates signed URL (no mobile fetch stall)
-  // - XHR                  → uploads file (guaranteed timeout on mobile)
-  // - /api/kyc-submit      → saves DB records (no mobile fetch stall)
-  //
-  // The mobile browser only does:
-  //   fetch("/api/kyc-upload-url") — to our own Next.js server (fast, no stall)
-  //   XHR PUT to signed URL        — XHR is reliable on mobile
-  //   fetch("/api/kyc-submit")     — to our own Next.js server (fast, no stall)
-  //
-  // Calls to Supabase endpoints directly from mobile browser are eliminated.
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── submitIdentity ───────────────────────────────────────────────────────
   async function submitIdentity() {
     if (!profile) {
       showToast("Profile not loaded yet", false);
@@ -608,7 +525,6 @@ export default function VerificationPage() {
     setUploadPct(0);
     setUploadProgress("");
 
-    // Nuclear fallback — guarantees spinner stops within 150s no matter what
     const nuclearHandle = setTimeout(() => {
       if (mountedRef.current) {
         setSaving(false);
@@ -627,11 +543,10 @@ export default function VerificationPage() {
       const ext = idFile.name.split(".").pop() || "jpg";
       const path = `kyc/${uid}/doc-${ts}.${ext}`;
 
-      // ── Step 1: Upload file (server signed URL + XHR) ─────────────────
+      // Step 1: Upload file
       setUploadProgress(
         `Uploading ${DOC_TYPES[idType]?.label}… (${(idFile.size / 1024).toFixed(0)} KB)`,
       );
-
       const docUrl = await uploadFileForKYC(idFile, path, (pct) => {
         if (mountedRef.current) {
           setUploadPct(pct);
@@ -639,22 +554,31 @@ export default function VerificationPage() {
         }
       });
 
-      // ── Step 2: Save DB records via server API (no mobile fetch stall) ─
+      // Step 2: Save to DB via server
       setUploadProgress("Saving your details…");
       setUploadPct(0);
 
-      await submitKycToServer({
-        documentType: idType,
-        documentNumber: idNumber.trim(),
-        documentUrl: docUrl,
-        fullName: idFullName.trim(),
-        country: idCountry,
-        phone: idPhone.trim(),
-        address: idAddress.trim(),
-        city: idCity.trim(),
-        gender: idGender,
-        dateOfBirth: idDob,
-      });
+      await serverFetch(
+        "/api/kyc-submit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            documentType: idType,
+            documentNumber: idNumber.trim(),
+            documentUrl: docUrl,
+            fullName: idFullName.trim(),
+            country: idCountry,
+            phone: idPhone.trim(),
+            address: idAddress.trim(),
+            city: idCity.trim(),
+            gender: idGender,
+            dateOfBirth: idDob,
+          }),
+        },
+        30_000,
+        "Saving KYC record",
+      );
 
       setUploadProgress("");
       showToast("Identity submitted — pending review within 24–48 hrs ✓");
@@ -674,6 +598,7 @@ export default function VerificationPage() {
     }
   }
 
+  // ── signAgreements ───────────────────────────────────────────────────────
   async function signAgreements() {
     if (!profile) {
       showToast("Profile not loaded", false);
@@ -681,19 +606,14 @@ export default function VerificationPage() {
     }
     setSaving(true);
     try {
-      const { error } = await withTimeout(
-        supabase
-          .from("users")
-          .update({ cla_signed: true, terms_signed: true })
-          .eq("id", profile.id),
-        15000,
+      await serverFetch(
+        "/api/kyc-sign-agreements",
+        { method: "POST" },
+        20_000,
         "Signing agreements",
       );
-      if (error) showToast(error.message, false);
-      else {
-        showToast("Agreements signed ✓");
-        load();
-      }
+      showToast("Agreements signed ✓");
+      load();
     } catch (err: unknown) {
       showToast(
         err instanceof Error ? err.message : "Failed to sign — please retry",
@@ -702,6 +622,26 @@ export default function VerificationPage() {
     } finally {
       setSaving(false);
     }
+  }
+
+  // ── resetKycStatus ───────────────────────────────────────────────────────
+  async function resetKycStatus() {
+    try {
+      await serverFetch(
+        "/api/kyc-submit",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ resetOnly: true }),
+        },
+        15_000,
+        "Reset KYC status",
+      );
+    } catch (e: any) {
+      showToast(e.message, false);
+      return;
+    }
+    load();
   }
 
   // ── Loading / error states ───────────────────────────────────────────────
@@ -906,22 +846,7 @@ export default function VerificationPage() {
                       Being reviewed — 24–48 hours.
                     </p>
                     <button
-                      onClick={async () => {
-                        try {
-                          await withTimeout(
-                            supabase
-                              .from("users")
-                              .update({ kyc_status: "not_started" })
-                              .eq("id", profile!.id),
-                            10000,
-                            "Reset KYC status",
-                          );
-                        } catch (e: any) {
-                          showToast(e.message, false);
-                          return;
-                        }
-                        load();
-                      }}
+                      onClick={resetKycStatus}
                       className="mt-2 text-amber-400 hover:text-amber-300 text-xs underline underline-offset-2"
                     >
                       Submitted wrong info? Tap to resubmit →
@@ -943,7 +868,6 @@ export default function VerificationPage() {
                     </p>
                   </div>
 
-                  {/* Personal Information */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Personal Information
@@ -1048,7 +972,6 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
-                  {/* Identity Document */}
                   <section>
                     <p className="text-slate-400 text-xs font-bold uppercase tracking-wide mb-3">
                       Identity Document
@@ -1143,7 +1066,6 @@ export default function VerificationPage() {
                     </div>
                   </section>
 
-                  {/* Upload progress */}
                   {uploadProgress && (
                     <div className="space-y-2 bg-blue-900/20 border border-blue-800/40 p-3 rounded-xl">
                       <div className="flex items-center gap-2">

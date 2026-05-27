@@ -1,15 +1,10 @@
 // app/api/kyc-submit/route.ts
 //
-// WHY THIS EXISTS:
-// On Android Chrome and iOS Safari, fetch() calls to Supabase PostgREST (the
-// DB API) stall indefinitely on mobile — same bug as Storage. Moving all DB
-// writes server-side (Node.js fetch, rock-solid) completely eliminates the
-// "Saving KYC record timed out" error on mobile.
+// Handles two operations:
+//   1. Full KYC submit — insert kyc_documents + update users profile
+//   2. Reset only      — set kyc_status back to "not_started" (resubmit flow)
 //
-// SECURITY:
-// - Requires a valid Supabase session cookie.
-// - User ID is taken from the verified session, never from the request body.
-// - Uses service role key only on the server.
+// All DB writes run server-side (Node.js) to avoid mobile fetch() stalls.
 
 import { createServerClient } from "@supabase/ssr";
 import { NextRequest, NextResponse } from "next/server";
@@ -43,16 +38,21 @@ export async function POST(req: NextRequest) {
     }
 
     const uid = session.user.id;
+    const service = getSupabaseServiceClient();
+    const body = await req.json().catch(() => ({}));
 
-    // ── 2. Parse body ──────────────────────────────────────────────────────
-    const body = await req.json().catch(() => null);
-    if (!body) {
-      return NextResponse.json(
-        { error: "Invalid request body" },
-        { status: 400 },
-      );
+    // ── 2. Reset-only mode ─────────────────────────────────────────────────
+    if (body?.resetOnly === true) {
+      const { error } = await service
+        .from("users")
+        .update({ kyc_status: "not_started" })
+        .eq("id", uid);
+      if (error)
+        return NextResponse.json({ error: error.message }, { status: 500 });
+      return NextResponse.json({ ok: true });
     }
 
+    // ── 3. Full submit — validate fields ───────────────────────────────────
     const {
       documentType,
       documentNumber,
@@ -77,7 +77,6 @@ export async function POST(req: NextRequest) {
       dateOfBirth: string;
     };
 
-    // Basic validation
     if (!fullName?.trim())
       return NextResponse.json(
         { error: "Full name required" },
@@ -98,9 +97,7 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
 
-    const service = getSupabaseServiceClient();
-
-    // ── 3. Insert KYC document record ─────────────────────────────────────
+    // ── 4. Insert KYC document record ─────────────────────────────────────
     const { error: docErr } = await service.from("kyc_documents").insert({
       user_id: uid,
       document_type: documentType,
@@ -116,7 +113,6 @@ export async function POST(req: NextRequest) {
       status: "pending",
     });
 
-    // Ignore "table does not exist" errors gracefully
     if (
       docErr &&
       docErr.code !== "42P01" &&
@@ -129,7 +125,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── 4. Update user profile ─────────────────────────────────────────────
+    // ── 5. Update user profile ─────────────────────────────────────────────
     const { error: updErr } = await service
       .from("users")
       .update({
