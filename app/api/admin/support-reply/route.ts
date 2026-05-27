@@ -6,6 +6,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { sanitizeText, validateUUID } from "@/lib/sanitize";
+import {
+  requireAdminAuth,
+  logAdminAction,
+  getClientIp,
+} from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -19,11 +24,14 @@ function getSupabaseAdmin() {
 }
 
 export async function POST(req: NextRequest) {
+  const authResult = await requireAdminAuth(req);
+  if (authResult instanceof Response) return authResult;
+  const { userId: adminId } = authResult;
+
   try {
     const supabaseAdmin = getSupabaseAdmin();
     const { ticketId, body } = await req.json();
 
-    // Validate ticket ID format
     if (!validateUUID(ticketId)) {
       return NextResponse.json(
         { error: "Invalid ticket ID format" },
@@ -31,7 +39,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Sanitize message body
     const sanitizedBody = sanitizeText(body, 5000);
     if (!sanitizedBody || sanitizedBody.length === 0) {
       return NextResponse.json(
@@ -44,7 +51,7 @@ export async function POST(req: NextRequest) {
       .from("support_messages")
       .insert({
         ticket_id: ticketId,
-        sender_id: null, // NULL avoids FK — is_admin:true identifies it as admin
+        sender_id: null,
         body: sanitizedBody,
         message: sanitizedBody,
         is_admin: true,
@@ -54,8 +61,11 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (error) {
-      console.error("Admin reply insert error:", error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      console.error("Admin reply insert error:", error.code);
+      return NextResponse.json(
+        { error: "An error occurred. Please try again." },
+        { status: 500 },
+      );
     }
 
     await supabaseAdmin
@@ -66,7 +76,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, message: data });
   } catch (err: any) {
     return NextResponse.json(
-      { error: err.message || "Internal error" },
+      { error: "An error occurred. Please try again." },
       { status: 500 },
     );
   }

@@ -1,9 +1,13 @@
 // app/api/admin/payment-config/route.ts
-// Rewritten to match actual schema:
-// payment_config columns: id, korapay_secret_key, usd_to_ngn_rate, crypto_wallet_address, created_at
+// SECURED: requireAdminAuth required for GET and POST + audit logging + key masking
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  requireAdminAuth,
+  logAdminAction,
+  getClientIp,
+} from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +20,10 @@ function getSupabase() {
   });
 }
 
-// GET — return the single config row (or null if empty)
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const authResult = await requireAdminAuth(req);
+  if (authResult instanceof Response) return authResult;
+
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("payment_config")
@@ -27,19 +33,32 @@ export async function GET() {
     .maybeSingle();
 
   if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to load config" },
+      { status: 500 },
+    );
   }
-  return NextResponse.json(data ?? {});
+
+  // Mask secret key — only show last 6 chars so admin can confirm it's set
+  const masked = data ? { ...data } : {};
+  if (masked.korapay_secret_key) {
+    masked.korapay_secret_key =
+      "••••••" + String(masked.korapay_secret_key).slice(-6);
+  }
+
+  return NextResponse.json(masked ?? {});
 }
 
-// POST — upsert specific fields
 export async function POST(req: NextRequest) {
+  const authResult = await requireAdminAuth(req);
+  if (authResult instanceof Response) return authResult;
+  const { userId: adminId } = authResult;
+
   const supabase = getSupabase();
   const body = await req.json();
-  const { action, field, value, id } = body;
+  const { action, field, value } = body;
 
   if (action === "upsert") {
-    // Check if a row exists
     const { data: existing } = await supabase
       .from("payment_config")
       .select("id")
@@ -48,7 +67,6 @@ export async function POST(req: NextRequest) {
 
     let result;
     if (existing?.id) {
-      // Update existing row
       result = await supabase
         .from("payment_config")
         .update({ [field]: value })
@@ -56,7 +74,6 @@ export async function POST(req: NextRequest) {
         .select()
         .single();
     } else {
-      // Insert first row
       result = await supabase
         .from("payment_config")
         .insert({ [field]: value, created_at: new Date().toISOString() })
@@ -66,11 +83,18 @@ export async function POST(req: NextRequest) {
 
     if (result.error) {
       return NextResponse.json(
-        { error: result.error.message },
+        { error: "Config update failed" },
         { status: 500 },
       );
     }
-    return NextResponse.json({ success: true, data: result.data });
+
+    // Log field name but NOT the value (it's a secret key)
+    await logAdminAction(adminId, "update_payment_config", "payment_config", {
+      field,
+      ipAddress: getClientIp(req),
+    });
+
+    return NextResponse.json({ success: true });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });

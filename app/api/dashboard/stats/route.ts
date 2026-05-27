@@ -1,28 +1,49 @@
+// app/api/dashboard/stats/route.ts
+// SECURITY FIX: Was accepting userId from query param with service role —
+// any user could read any other user's data (IDOR). Now uses session userId only.
+
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@supabase/ssr";
+import { cookies } from "next/headers";
 
 export const dynamic = "force-dynamic";
 
-const getDb = () =>
-  createClient(
+function getDb() {
+  return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } },
   );
+}
 
 export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const userId = searchParams.get("userId");
+    // ── Verify session — userId comes from the token, NOT the query param ──
+    const cookieStore = await cookies();
+    const userSupabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      {
+        cookies: {
+          getAll: () => cookieStore.getAll(),
+          setAll: () => {},
+        },
+      },
+    );
 
-    if (!userId) {
-      return NextResponse.json({ error: "userId required" }, { status: 400 });
+    const {
+      data: { user },
+      error: authErr,
+    } = await userSupabase.auth.getUser();
+    if (authErr || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const userId = user.id; // Always from session — never from query string
     const db = getDb();
 
-    // Fetch user profile with all earnings fields
-    const { data: user, error } = await db
+    const { data: profile, error } = await db
       .from("users")
       .select(
         "id, email, full_name, tier, earnings, balance_available, balance_pending, " +
@@ -34,8 +55,7 @@ export async function GET(req: NextRequest) {
       .single();
 
     if (error) {
-      console.error("Dashboard stats error:", error.message);
-      // Return safe defaults instead of crashing — dashboard still works
+      console.error("[dashboard/stats] Profile fetch error:", error.code);
       return NextResponse.json({
         user: {
           id: userId,
@@ -48,13 +68,11 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Fetch referral count
     const { count: referralCount } = await db
       .from("referrals")
       .select("id", { count: "exact", head: true })
       .eq("referrer_id", userId);
 
-    // Fetch referral commissions total
     const { data: commissions } = await db
       .from("referral_commissions")
       .select("amount")
@@ -67,15 +85,11 @@ export async function GET(req: NextRequest) {
     );
 
     return NextResponse.json({
-      user,
-      network: {
-        referrals: referralCount || 0,
-        totalCommissions: totalCommissions,
-      },
+      user: profile,
+      network: { referrals: referralCount || 0, totalCommissions },
     });
   } catch (err: any) {
-    console.error("Dashboard stats fatal:", err.message);
-    // Always return something so dashboard doesn't break
+    console.error("[dashboard/stats] Fatal:", err.code || "unknown");
     return NextResponse.json({
       user: {
         tier: "observer",

@@ -1,9 +1,13 @@
 // app/api/admin/activate-node/route.ts
-// Manual re-activation for confirmed payments where allocation was missed.
-// Idempotency-safe — won't create duplicates.
+// SECURED: requireAdminAuth + audit logging + safe error messages
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import {
+  requireAdminAuth,
+  logAdminAction,
+  getClientIp,
+} from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -26,6 +30,10 @@ function getAdminSupabase() {
 }
 
 export async function POST(req: NextRequest) {
+  const authResult = await requireAdminAuth(req);
+  if (authResult instanceof Response) return authResult;
+  const { userId: adminId } = authResult;
+
   try {
     const supabase = getAdminSupabase();
     const { paymentId } = await req.json();
@@ -45,7 +53,7 @@ export async function POST(req: NextRequest) {
 
     if (txErr || !txn) {
       return NextResponse.json(
-        { error: `Transaction #${paymentId} not found` },
+        { error: "Transaction not found" },
         { status: 404 },
       );
     }
@@ -63,7 +71,6 @@ export async function POST(req: NextRequest) {
 
     if (purchaseType === "license") {
       const licenseType = metadata.licenseType || planId || "operator_license";
-
       const { data: existing } = await supabase
         .from("operator_licenses")
         .select("id")
@@ -83,7 +90,6 @@ export async function POST(req: NextRequest) {
       const expiresAt = new Date(
         now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
       ).toISOString();
-
       await supabase.from("operator_licenses").insert({
         user_id: userId,
         license_type: licenseType,
@@ -95,10 +101,20 @@ export async function POST(req: NextRequest) {
         created_at: nowIso,
       });
 
+      await logAdminAction(
+        adminId,
+        "activate_node_license",
+        "operator_licenses",
+        {
+          paymentId,
+          userId,
+          licenseType,
+          ipAddress: getClientIp(req),
+        },
+      );
       return NextResponse.json({ success: true, type: "license", licenseType });
     }
 
-    // GPU node
     const { data: existing } = await supabase
       .from("node_allocations")
       .select("id")
@@ -119,13 +135,11 @@ export async function POST(req: NextRequest) {
       metadata.paymentModel === "contract" ? "contract" : "flexible";
     const miningPeriod = metadata.miningPeriod ?? "daily";
     const isContract = paymentModel === "contract";
-
     const periodMs =
       PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
     const miningEndsAt = isContract
       ? null
       : new Date(now.getTime() + periodMs).toISOString();
-
     const contractMonths = Number(metadata.contractMonths) || 6;
     const maturityDate = isContract
       ? new Date(
@@ -190,10 +204,18 @@ export async function POST(req: NextRequest) {
 
     if (allocErr) {
       return NextResponse.json(
-        { error: "Allocation failed: " + allocErr.message },
+        { error: "Node activation failed" },
         { status: 500 },
       );
     }
+
+    await logAdminAction(adminId, "activate_node_gpu", "node_allocations", {
+      paymentId,
+      userId,
+      planId,
+      allocationId: newAlloc.id,
+      ipAddress: getClientIp(req),
+    });
 
     return NextResponse.json({
       success: true,
@@ -203,6 +225,9 @@ export async function POST(req: NextRequest) {
     });
   } catch (err: any) {
     console.error("[activate-node] Error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      { error: "Node activation failed" },
+      { status: 500 },
+    );
   }
 }

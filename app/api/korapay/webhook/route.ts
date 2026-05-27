@@ -7,6 +7,7 @@
 //  FIX-B  Queries by gateway_reference (correct column).
 //  FIX-C  Single POST export only.
 //  FIX-G  Activates plan/license IMMEDIATELY on charge.success.
+//  FIX-SIG  Signature header is now REQUIRED — missing header = 401 reject.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -272,14 +273,16 @@ export async function POST(req: NextRequest) {
     body?.data?.reference,
   );
 
-  // Signature verification (loads key from DB with correct schema)
+  // Signature verification — REQUIRED. Reject any request that omits the header.
   const signature = req.headers.get("x-korapay-signature");
-  if (signature) {
-    const secret = await resolveKorapaySecret(supabaseAdmin);
-    if (secret && !verifySignature(rawBody, signature, secret)) {
-      console.error("[korapay/webhook] Invalid signature");
-      return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
-    }
+  if (!signature) {
+    console.error("[korapay/webhook] Missing signature header");
+    return NextResponse.json({ error: "Missing signature" }, { status: 401 });
+  }
+  const secret = await resolveKorapaySecret(supabaseAdmin);
+  if (!secret || !verifySignature(rawBody, signature, secret)) {
+    console.error("[korapay/webhook] Invalid signature");
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
 
   const { data, event } = body;

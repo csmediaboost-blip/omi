@@ -1,19 +1,18 @@
 /**
  * API Security Utilities
  * - Admin authentication check
- * - Rate limiting
- * - CSRF token validation
+ * - Rate limiting (Redis-backed)
  * - Request logging
+ * - Audit trail
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
-/**
- * Verify user is authenticated and has admin role
- */
-export async function requireAdminAuth(req: NextRequest): Promise<{ userId: string } | Response> {
+export async function requireAdminAuth(
+  req: NextRequest,
+): Promise<{ userId: string } | Response> {
   try {
     const cookieStore = await cookies();
     const supabase = createServerClient(
@@ -24,19 +23,18 @@ export async function requireAdminAuth(req: NextRequest): Promise<{ userId: stri
           getAll: () => cookieStore.getAll(),
           setAll: () => {},
         },
-      }
+      },
     );
 
-    const { data: { user }, error: userError } = await supabase.auth.getUser();
-    
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
     if (userError || !user) {
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    // Check if user is admin
     const { data: profile } = await supabase
       .from("users")
       .select("is_admin, role")
@@ -46,7 +44,7 @@ export async function requireAdminAuth(req: NextRequest): Promise<{ userId: stri
     if (!profile?.is_admin && profile?.role !== "admin") {
       return NextResponse.json(
         { error: "Forbidden: Admin access required" },
-        { status: 403 }
+        { status: 403 },
       );
     }
 
@@ -54,51 +52,45 @@ export async function requireAdminAuth(req: NextRequest): Promise<{ userId: stri
   } catch (error: any) {
     return NextResponse.json(
       { error: "Authentication failed" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 }
 
 /**
- * Simple in-memory rate limiter for admin endpoints
- * Stores: { [key]: { count, resetAt } }
+ * Admin rate limiter — uses Redis (Upstash) so it works correctly
+ * across Vercel serverless instances.
  */
-const adminRateLimits = new Map<string, { count: number; resetAt: number }>();
-
-export function checkAdminRateLimit(identifier: string, maxRequests = 100, windowSeconds = 60): boolean {
-  const now = Date.now();
-  const key = `admin:${identifier}`;
-  const entry = adminRateLimits.get(key);
-
-  if (!entry || now > entry.resetAt) {
-    adminRateLimits.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });
-    return true;
+export async function checkAdminRateLimit(
+  identifier: string,
+  maxRequests = 100,
+  windowSeconds = 60,
+): Promise<boolean> {
+  try {
+    const { rateLimit } = await import("@/lib/ratelimit");
+    const { allowed } = await rateLimit(
+      `admin:${identifier}`,
+      maxRequests,
+      windowSeconds * 1000,
+    );
+    return allowed;
+  } catch {
+    return true; // Fail open — don't block admins if rate limiter errors
   }
-
-  if (entry.count >= maxRequests) {
-    return false;
-  }
-
-  entry.count++;
-  return true;
 }
 
-/**
- * Log admin actions for audit trail
- */
 export async function logAdminAction(
   userId: string,
   action: string,
   resource: string,
-  metadata?: Record<string, any>
+  metadata?: Record<string, any>,
 ): Promise<void> {
   try {
     const supabase = require("@supabase/supabase-js").createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      { auth: { persistSession: false, autoRefreshToken: false } }
+      { auth: { persistSession: false, autoRefreshToken: false } },
     );
-
     await supabase.from("admin_audit_log").insert({
       user_id: userId,
       action,
@@ -109,26 +101,21 @@ export async function logAdminAction(
     });
   } catch (err) {
     console.error("[AUDIT] Failed to log admin action:", err);
-    // Don't fail the request if logging fails
   }
 }
 
-/**
- * Get client IP address from request
- */
 export function getClientIp(req: NextRequest): string {
   return (
-    (req.headers.get("x-forwarded-for")?.split(",")[0] || 
-    req.headers.get("x-real-ip") || 
-    "unknown").trim()
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    req.headers.get("x-real-ip") ||
+    "unknown"
   );
 }
 
-/**
- * Validate CSRF token (if needed)
- */
-export function validateCsrfToken(token: string | null, sessionToken: string): boolean {
+export function validateCsrfToken(
+  token: string | null,
+  sessionToken: string,
+): boolean {
   if (!token || !sessionToken) return false;
-  // CSRF token should match session
   return token === sessionToken;
 }

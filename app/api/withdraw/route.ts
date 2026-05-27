@@ -11,6 +11,7 @@ import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 import {
   isBusinessDay,
   getBusinessDayMessage,
@@ -51,13 +52,11 @@ function checkRateLimit(userId: string): {
   return { limited: false, remaining: 5 - entry.count };
 }
 
-async function hashPin(pinValue: string, userId: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(pinValue + userId);
-  const buf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+async function verifyPin(
+  pinValue: string,
+  storedHash: string,
+): Promise<boolean> {
+  return bcrypt.compare(pinValue, storedHash);
 }
 
 // ── Korapay transfer helper ───────────────────────────────────────────────────
@@ -248,7 +247,6 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 5. PIN verification ───────────────────────────────────────────────────
-    const providedPinHash = await hashPin(pin, user.id);
     const { data: userData } = await supabase
       .from("users")
       .select("pin_hash, pin_set")
@@ -264,7 +262,10 @@ export async function POST(req: NextRequest) {
         { status: 403 },
       );
     }
-    if (providedPinHash !== userData.pin_hash) {
+    const pinValid = userData.pin_hash
+      ? await verifyPin(pin, userData.pin_hash)
+      : false;
+    if (!pinValid) {
       return NextResponse.json(
         {
           error: `Incorrect security PIN. Please double-check your PIN and try again. (${remaining} attempt${remaining !== 1 ? "s" : ""} remaining this hour)`,
@@ -586,7 +587,7 @@ export async function POST(req: NextRequest) {
     const message = autoProcessed
       ? `Your withdrawal of $${amount.toFixed(2)} has been submitted and is being processed by our payment partner. Expected by ${new Date(expectedDate).toLocaleDateString("en-NG")}.`
       : isCrypto
-        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our  team will process it to your registered ${profile.payout_gateway?.toUpperCase()} address within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
+        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our team will process it to your registered ${profile.payout_gateway?.toUpperCase()} address within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
         : `Your withdrawal of $${amount.toFixed(2)} has been queued and will be processed by our team within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`;
 
     return NextResponse.json({

@@ -1,16 +1,9 @@
 // app/api/admin/approve-payment/route.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// FIXES:
-//  FIX-1  Accepts paymentId (number/string) — matches PaymentsClient which
-//         sends paymentId, not reference. Old route read `reference` → crash.
-//  FIX-2  Creates node_allocations OR operator_licenses immediately based on
-//         purchaseType in metadata. Old route only updated users.tier.
-//  FIX-3  Idempotency guard — safe to call twice.
-//  FIX-4  All mining fields set correctly (mining_period, mining_ends_at, etc.)
-// ─────────────────────────────────────────────────────────────────────────────
+// SECURED: requireAdminAuth + audit logging + safe error messages
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { requireAdminAuth, logAdminAction, getClientIp } from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -33,28 +26,21 @@ function getAdminSupabase() {
 }
 
 export async function POST(req: NextRequest) {
+  // ── SECURITY: Require admin session ──────────────────────────────────────
+  const authResult = await requireAdminAuth(req);
+  if (authResult instanceof Response) return authResult;
+  const { userId: adminId } = authResult;
+
   try {
     const supabase = getAdminSupabase();
 
-    // FIX-1: Read paymentId (what PaymentsClient sends), fall back to reference
     const body = await req.json();
-    const {
-      paymentId,
-      reference,
-      txHash,
-      cryptoAmount,
-      cryptoType,
-      walletAddress,
-    } = body;
+    const { paymentId, reference, txHash, cryptoAmount, cryptoType, walletAddress } = body;
 
     if (!paymentId && !reference) {
-      return NextResponse.json(
-        { error: "paymentId is required" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "paymentId is required" }, { status: 400 });
     }
 
-    // Look up transaction by id (paymentId) OR gateway_reference
     let txn: any = null;
     if (paymentId) {
       const { data, error } = await supabase
@@ -63,10 +49,7 @@ export async function POST(req: NextRequest) {
         .eq("id", paymentId)
         .single();
       if (error || !data) {
-        return NextResponse.json(
-          { error: `Transaction #${paymentId} not found` },
-          { status: 404 },
-        );
+        return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
       }
       txn = data;
     } else {
@@ -76,21 +59,13 @@ export async function POST(req: NextRequest) {
         .eq("gateway_reference", reference)
         .single();
       if (error || !data) {
-        return NextResponse.json(
-          { error: "Transaction not found" },
-          { status: 404 },
-        );
+        return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
       }
       txn = data;
     }
 
-    // Idempotency — already confirmed
     if (txn.status === "confirmed" || txn.status === "completed") {
-      return NextResponse.json({
-        success: true,
-        alreadyConfirmed: true,
-        message: "Already confirmed — checking allocation...",
-      });
+      return NextResponse.json({ success: true, note: "already_confirmed" });
     }
 
     const metadata =
@@ -102,9 +77,7 @@ export async function POST(req: NextRequest) {
     const nowIso = now.toISOString();
     const userId = txn.user_id;
     const purchaseType = metadata.purchaseType || "gpu_plan";
-    const planId = txn.node_key;
 
-    // ── 1. Mark transaction confirmed ───────────────────────────────────────
     await supabase
       .from("payment_transactions")
       .update({
@@ -112,17 +85,16 @@ export async function POST(req: NextRequest) {
         verified_by_admin: true,
         confirmed_at: nowIso,
         updated_at: nowIso,
-        ...(txHash ? { crypto_tx_hash: txHash } : {}),
+        ...(txHash ? { tx_hash: txHash } : {}),
+        ...(cryptoAmount ? { crypto_amount: cryptoAmount } : {}),
+        ...(cryptoType ? { crypto_type: cryptoType } : {}),
+        ...(walletAddress ? { wallet_address: walletAddress } : {}),
       })
       .eq("id", txn.id);
 
-    // ── 2. Activate: license OR GPU node ────────────────────────────────────
     if (purchaseType === "license") {
-      // ── License activation ────────────────────────────────────────────────
-      const licenseType = metadata.licenseType || planId || "operator_license";
-
-      // Idempotency
-      const { data: existingLic } = await supabase
+      const licenseType = metadata.licenseType || txn.node_key || "operator_license";
+      const { data: existing } = await supabase
         .from("operator_licenses")
         .select("id")
         .eq("user_id", userId)
@@ -130,62 +102,22 @@ export async function POST(req: NextRequest) {
         .eq("status", "active")
         .limit(1);
 
-      if (!existingLic || existingLic.length === 0) {
-        const expiresAt = new Date(
-          now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000,
-        ).toISOString();
-
-        const { error: licErr } = await supabase
-          .from("operator_licenses")
-          .insert({
-            user_id: userId,
-            license_type: licenseType,
-            status: "active",
-            activated_at: nowIso,
-            expires_at: expiresAt,
-            amount_paid: txn.amount,
-            transaction_ref: txn.gateway_reference || String(txn.id),
-            created_at: nowIso,
-          });
-
-        if (licErr) {
-          console.error(
-            "[approve-payment] License insert failed:",
-            licErr.message,
-          );
-          return NextResponse.json(
-            { error: "License activation failed: " + licErr.message },
-            { status: 500 },
-          );
-        }
-      }
-
-      // Notification
-      try {
-        await supabase.from("user_notifications").insert({
+      if (!existing || existing.length === 0) {
+        const expiresAt = new Date(now.getTime() + 4 * 365 * 24 * 60 * 60 * 1000).toISOString();
+        await supabase.from("operator_licenses").insert({
           user_id: userId,
-          type: "license_activated",
-          title: "🏆 License Activated!",
-          body: "Your operator license is now active. Head to Tasks to start earning.",
+          license_type: licenseType,
+          status: "active",
+          activated_at: nowIso,
+          expires_at: expiresAt,
+          amount_paid: txn.amount,
+          transaction_ref: txn.gateway_reference || String(txn.id),
           created_at: nowIso,
         });
-      } catch {}
-
-      return NextResponse.json({
-        success: true,
-        type: "license",
-        licenseType,
-        nodeKey: planId,
-      });
+      }
     } else {
-      // ── GPU node allocation ───────────────────────────────────────────────
-      const paymentModel: "flexible" | "contract" =
-        metadata.paymentModel === "contract" ? "contract" : "flexible";
-      const miningPeriod = metadata.miningPeriod ?? "daily";
-      const isContract = paymentModel === "contract";
-
-      // Idempotency
-      const { data: existingAlloc } = await supabase
+      const planId = txn.node_key;
+      const { data: existing } = await supabase
         .from("node_allocations")
         .select("id")
         .eq("user_id", userId)
@@ -193,117 +125,94 @@ export async function POST(req: NextRequest) {
         .gte("created_at", new Date(Date.now() - 15 * 60 * 1000).toISOString())
         .limit(1);
 
-      if (existingAlloc && existingAlloc.length > 0) {
-        return NextResponse.json({
-          success: true,
-          type: "gpu_plan",
-          nodeKey: planId,
-          allocationId: existingAlloc[0].id,
-          alreadyExisted: true,
-        });
-      }
+      if (!existing || existing.length === 0) {
+        const paymentModel: "flexible" | "contract" =
+          metadata.paymentModel === "contract" ? "contract" : "flexible";
+        const miningPeriod = metadata.miningPeriod ?? "daily";
+        const isContract = paymentModel === "contract";
+        const periodMs = PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
+        const miningEndsAt = isContract ? null : new Date(now.getTime() + periodMs).toISOString();
+        const contractMonths = Number(metadata.contractMonths) || 6;
+        const maturityDate = isContract
+          ? new Date(now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000).toISOString()
+          : null;
 
-      const periodMs =
-        PERIOD_DURATIONS_MS[miningPeriod] ?? PERIOD_DURATIONS_MS.daily;
-      const miningEndsAt = isContract
-        ? null
-        : new Date(now.getTime() + periodMs).toISOString();
+        let rateFactor = 0.86;
+        try {
+          const { data: rateSnap } = await supabase
+            .from("current_mining_rates")
+            .select("rate_factor")
+            .eq("plan_id", planId)
+            .eq("period", miningPeriod)
+            .single();
+          if (rateSnap?.rate_factor != null) rateFactor = rateSnap.rate_factor;
+        } catch {}
 
-      const contractMonths = Number(metadata.contractMonths) || 6;
-      const maturityDate = isContract
-        ? new Date(
-            now.getTime() + contractMonths * 30 * 24 * 60 * 60 * 1000,
-          ).toISOString()
-        : null;
-
-      // Fetch rate_factor
-      let rateFactor = 0.86;
-      try {
-        const { data: rateSnap } = await supabase
-          .from("current_mining_rates")
-          .select("rate_factor")
-          .eq("plan_id", planId)
-          .eq("period", miningPeriod)
-          .single();
-        if (rateSnap?.rate_factor != null) rateFactor = rateSnap.rate_factor;
-      } catch {}
-
-      const allocationPayload: Record<string, any> = {
-        user_id: userId,
-        plan_id: planId,
-        amount_invested: txn.amount,
-        status: "active",
-        payment_model: paymentModel,
-        instance_type: metadata.itype || "on_demand",
-        total_earned: 0,
-        total_withdrawn: 0,
-        created_at: nowIso,
-        updated_at: nowIso,
-        auto_reinvest: metadata.autoReinvest || false,
-        ...(paymentModel === "flexible"
-          ? {
-              mining_period: miningPeriod,
-              mining_ends_at: miningEndsAt,
-              mining_completed: false,
-              rate_factor_used: rateFactor,
-              capital_returned: false,
-              final_profit: 0,
-            }
-          : {
-              contract_months: contractMonths,
-              contract_label: metadata.contractLabel || null,
-              contract_min_pct: metadata.contractMinPct || null,
-              contract_max_pct: metadata.contractMaxPct || null,
-              maturity_date: maturityDate,
-              lock_in_months: contractMonths,
-              lock_in_label:
-                metadata.lockInLabel || metadata.contractLabel || null,
-              lock_in_multiplier: metadata.lockInMultiplier || 1.0,
-              mining_completed: false,
-              rate_factor_used: rateFactor,
-              mining_period: "contract",
-              mining_ends_at: maturityDate,
-            }),
-      };
-
-      const { data: newAlloc, error: allocErr } = await supabase
-        .from("node_allocations")
-        .insert(allocationPayload)
-        .select("id")
-        .single();
-
-      if (allocErr) {
-        console.error(
-          "[approve-payment] Allocation insert failed:",
-          allocErr.message,
-        );
-        return NextResponse.json(
-          { error: "Node activation failed: " + allocErr.message },
-          { status: 500 },
-        );
-      }
-
-      // Notification
-      try {
-        await supabase.from("user_notifications").insert({
+        const allocationPayload: Record<string, any> = {
           user_id: userId,
-          type: "mining_started",
-          title: "⛏️ Mining Session Started!",
-          body: `Your ${miningPeriod} GPU mining session is now live. Watch your earnings in the portfolio.`,
+          plan_id: planId,
+          amount_invested: metadata.originalPrice ?? txn.amount,
+          status: "active",
+          payment_model: paymentModel,
+          instance_type: metadata.itype || "on_demand",
+          total_earned: 0,
+          total_withdrawn: 0,
           created_at: nowIso,
-        });
-      } catch {}
+          updated_at: nowIso,
+          auto_reinvest: metadata.autoReinvest || false,
+          ...(paymentModel === "flexible"
+            ? {
+                mining_period: miningPeriod,
+                mining_ends_at: miningEndsAt,
+                mining_completed: false,
+                rate_factor_used: rateFactor,
+                capital_returned: false,
+                final_profit: 0,
+              }
+            : {
+                contract_months: contractMonths,
+                contract_label: metadata.contractLabel || null,
+                contract_min_pct: metadata.contractMinPct || null,
+                contract_max_pct: metadata.contractMaxPct || null,
+                maturity_date: maturityDate,
+                lock_in_months: contractMonths,
+                lock_in_label: metadata.lockInLabel || metadata.contractLabel || null,
+                lock_in_multiplier: metadata.lockInMultiplier || 1.0,
+                mining_completed: false,
+                rate_factor_used: rateFactor,
+                mining_period: "contract",
+                mining_ends_at: maturityDate,
+              }),
+        };
 
-      return NextResponse.json({
-        success: true,
-        type: "gpu_plan",
-        nodeKey: planId,
-        allocationId: newAlloc.id,
-        miningPeriod,
-      });
+        await supabase.from("node_allocations").insert(allocationPayload);
+      }
     }
+
+    try {
+      await supabase.from("user_notifications").insert({
+        user_id: userId,
+        type: purchaseType === "license" ? "license_activated" : "mining_started",
+        title: purchaseType === "license" ? "🏆 License Activated!" : "⛏️ Mining Session Started!",
+        body:
+          purchaseType === "license"
+            ? "Your operator license is now active."
+            : `Your ${metadata.miningPeriod || "daily"} GPU mining session is live.`,
+        created_at: nowIso,
+      });
+    } catch {}
+
+    await logAdminAction(adminId, "approve_payment", "payment_transactions", {
+      paymentId: txn.id,
+      userId,
+      amount: txn.amount,
+      purchaseType,
+      ipAddress: getClientIp(req),
+    });
+
+    return NextResponse.json({ success: true, processed: true });
   } catch (err: any) {
-    console.error("[approve-payment] Unhandled error:", err);
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("[approve-payment] Error:", err);
+    return NextResponse.json({ error: "Payment approval failed" }, { status: 500 });
   }
 }

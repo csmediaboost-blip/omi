@@ -7,7 +7,6 @@ import {
   Users,
   CreditCard,
   Gift,
-  ClipboardList,
   AlertCircle,
   Settings,
   LogOut,
@@ -15,12 +14,8 @@ import {
   X,
   Home,
   RefreshCw,
-  Lock,
-  Mail,
   Bell,
-  FileText,
   DollarSign,
-  CheckSquare,
   UserCheck,
   Zap,
   Key,
@@ -38,7 +33,9 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
   useEffect(() => {
     const checkAdminAccess = async () => {
       try {
-        const { data: { user } } = await supabase.auth.getUser();
+        const {
+          data: { user },
+        } = await supabase.auth.getUser();
         if (!user) {
           router.push("/auth/signin");
           return;
@@ -50,19 +47,13 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
           .eq("id", user.id)
           .single();
 
-        console.log("[v0] Admin check - User email:", user.email);
-        console.log("[v0] Admin check - Profile:", profile);
-        console.log("[v0] Admin check - Error:", error);
-
         if (profile?.is_admin === true || profile?.role === "admin") {
-          console.log("[v0] Admin access granted");
           setIsAdmin(true);
         } else {
-          console.log("[v0] Admin access denied - redirecting to dashboard");
           router.push("/dashboard");
         }
       } catch (error) {
-        console.error("[v0] Admin check error:", error);
+        console.error("[Admin] Access check error:", error);
         router.push("/auth/signin");
       } finally {
         setLoading(false);
@@ -101,29 +92,11 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
           href: "/admin/referrals",
           id: "referrals",
         },
-        {
-          icon: Lock,
-          label: "Licenses",
-          href: "/admin/licenses",
-          id: "licenses",
-        },
       ],
     },
     {
       section: "Tasks & Work",
       items: [
-        {
-          icon: ClipboardList,
-          label: "Task Management",
-          href: "/admin/tasks",
-          id: "tasks",
-        },
-        {
-          icon: CheckSquare,
-          label: "Task Submissions",
-          href: "/admin/task-submissions",
-          id: "task-submissions",
-        },
         {
           icon: Zap,
           label: "RLHF Questions",
@@ -182,12 +155,6 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
       section: "Communications",
       items: [
         {
-          icon: Mail,
-          label: "Email Templates",
-          href: "/admin/email-templates",
-          id: "email",
-        },
-        {
           icon: Bell,
           label: "Announcements",
           href: "/admin/announcements",
@@ -198,12 +165,6 @@ const AdminLayout = ({ children }: { children: React.ReactNode }) => {
     {
       section: "Administration",
       items: [
-        {
-          icon: FileText,
-          label: "Compliance",
-          href: "/admin/compliance",
-          id: "compliance",
-        },
         {
           icon: Settings,
           label: "System Logs",

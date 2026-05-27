@@ -1,3 +1,6 @@
+// app/api/payment/webhook/stripe/route.ts
+// SECURITY FIX: Added Stripe webhook signature verification with replay protection.
+
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { sendLicenseReceipt } from "@/lib/email-service";
@@ -10,12 +13,80 @@ function getAdminSupabase() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } },
   );
 }
 
+async function verifyStripeSignature(
+  body: string,
+  signature: string,
+  secret: string,
+): Promise<boolean> {
+  try {
+    const parts = signature
+      .split(",")
+      .reduce<Record<string, string>>((acc, part) => {
+        const [k, v] = part.split("=");
+        acc[k] = v;
+        return acc;
+      }, {});
+
+    const timestamp = parts["t"];
+    const sigHash = parts["v1"];
+    if (!timestamp || !sigHash) return false;
+
+    // Reject events older than 5 minutes — prevents replay attacks
+    const eventAge = Math.abs(Date.now() / 1000 - Number(timestamp));
+    if (eventAge > 300) return false;
+
+    const signedPayload = `${timestamp}.${body}`;
+    const encoder = new TextEncoder();
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signatureBuffer = await crypto.subtle.sign(
+      "HMAC",
+      cryptoKey,
+      encoder.encode(signedPayload),
+    );
+    const computedSig = Array.from(new Uint8Array(signatureBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    return computedSig === sigHash;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(req: NextRequest) {
-  const adminSupabase = getAdminSupabase();
   const body = await req.text();
+
+  const signature = req.headers.get("stripe-signature");
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  if (!signature) {
+    return NextResponse.json({ error: "Missing signature" }, { status: 401 });
+  }
+  if (!webhookSecret) {
+    console.error("[stripe/webhook] STRIPE_WEBHOOK_SECRET not configured");
+    return NextResponse.json(
+      { error: "Webhook not configured" },
+      { status: 500 },
+    );
+  }
+
+  const isValid = await verifyStripeSignature(body, signature, webhookSecret);
+  if (!isValid) {
+    console.error("[stripe/webhook] Invalid signature");
+    return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
+  }
+
+  const adminSupabase = getAdminSupabase();
 
   try {
     const event = JSON.parse(body);
@@ -25,20 +96,17 @@ export async function POST(req: NextRequest) {
       const { userId, nodeKey } = session.metadata || {};
 
       if (userId && nodeKey) {
-        // 1. Get user details for email
         const { data: userData } = await adminSupabase
           .from("users")
           .select("email, full_name")
           .eq("id", userId)
           .single();
 
-        // 2. Upgrade user node
         await adminSupabase
           .from("users")
           .update({ tier: nodeKey })
           .eq("id", userId);
 
-        // 3. Mark transaction confirmed
         const { data: txn } = await adminSupabase
           .from("payment_transactions")
           .update({
@@ -49,27 +117,19 @@ export async function POST(req: NextRequest) {
           .select("id, amount, currency, created_at")
           .single();
 
-        // 4. ✅ Process referral commission — based on PURCHASED node
-        const { data: commission, error: commError } = await adminSupabase.rpc(
-          "process_referral_commission",
-          {
+        await adminSupabase
+          .rpc("process_referral_commission", {
             p_referred_user_id: userId,
             p_purchased_node: nodeKey,
             p_transaction_id: txn?.id || null,
-          },
-        );
+          })
+          .catch((e: any) =>
+            console.error("[stripe/webhook] Commission error:", e.code),
+          );
 
-        if (commError) {
-          console.error("Commission error:", commError.message);
-        } else {
-          console.log("Commission processed:", commission);
-        }
-
-        // 5. Send license receipt email
         if (userData?.email && txn) {
           const validUntil = new Date();
           validUntil.setFullYear(validUntil.getFullYear() + 4);
-          
           await sendLicenseReceipt(
             userData.email,
             userData.full_name || "User",
@@ -78,48 +138,33 @@ export async function POST(req: NextRequest) {
             "Operator License",
             validUntil.toISOString(),
             String(txn.id),
-            txn.created_at
+            txn.created_at,
+          ).catch((e: any) =>
+            console.error("[stripe/webhook] Email error:", e.code),
           );
         }
       }
     }
 
-    // Handle Korapay webhook
-    if (
-      event.event === "charge.completed" ||
-      event.event === "charge.success"
-    ) {
-      const data = event.data;
-      const { userId, nodeKey } = data?.metadata || {};
-
-      if (userId && nodeKey) {
-        await adminSupabase
-          .from("users")
-          .update({ tier: nodeKey })
-          .eq("id", userId);
-
-        const { data: txn } = await adminSupabase
-          .from("payment_transactions")
-          .update({
-            status: "confirmed",
-            confirmed_at: new Date().toISOString(),
-          })
-          .eq("gateway_reference", data.reference)
-          .select("id")
-          .single();
-
-        // Process referral commission
-        await adminSupabase.rpc("process_referral_commission", {
-          p_referred_user_id: userId,
-          p_purchased_node: nodeKey,
-          p_transaction_id: txn?.id || null,
-        });
-      }
+    if (event.type === "payment_intent.payment_failed") {
+      const intent = event.data.object;
+      await adminSupabase
+        .from("payment_transactions")
+        .update({
+          status: "failed",
+          failure_reason: "Stripe payment failed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("gateway_reference", intent.id)
+        .catch(() => {});
     }
 
     return NextResponse.json({ received: true });
   } catch (err: any) {
-    console.error("Webhook error:", err);
-    return NextResponse.json({ error: err.message }, { status: 400 });
+    console.error("[stripe/webhook] Processing error:", err.code || "unknown");
+    return NextResponse.json(
+      { error: "Webhook processing failed" },
+      { status: 400 },
+    );
   }
 }

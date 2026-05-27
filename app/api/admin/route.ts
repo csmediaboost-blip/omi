@@ -4,7 +4,12 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
-import { requireAdminAuth, checkAdminRateLimit, getClientIp, logAdminAction } from "@/lib/api-security";
+import {
+  requireAdminAuth,
+  checkAdminRateLimit,
+  getClientIp,
+  logAdminAction,
+} from "@/lib/api-security";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 60; // Cache admin stats for 60 seconds
@@ -47,19 +52,18 @@ export async function GET(req: NextRequest) {
   // ── SECURITY: Rate limiting ─────────────────────────────────
   const clientIp = getClientIp(req);
   if (!checkAdminRateLimit(clientIp, 100, 60)) {
-    return NextResponse.json(
-      { error: "Rate limit exceeded" },
-      { status: 429 }
-    );
+    return NextResponse.json({ error: "Rate limit exceeded" }, { status: 429 });
   }
 
   const resource = new URL(req.url).searchParams.get("resource");
-  
+
   // Log the request
-  await logAdminAction(userId, "GET_ADMIN_STATS", resource || "unknown", { 
+  await logAdminAction(userId, "GET_ADMIN_STATS", resource || "unknown", {
     ip: clientIp,
-    resource 
+    resource,
   });
+
+  const db = getDb();
 
   try {
     switch (resource) {
@@ -67,7 +71,7 @@ export async function GET(req: NextRequest) {
         const { data: users } = await db
           .from("users")
           .select(
-            "id, balance_available, wallet_balance, account_flagged, kyc_status, withdwals_fronzen, node_expiry_date",
+            "id, balance_available, wallet_balance, status, kyc_status, withdrawals_frozen, node_expiry_date",
           );
         const u = users || [];
         const totalBalance = u.reduce(
@@ -99,8 +103,10 @@ export async function GET(req: NextRequest) {
           totalBalance,
           pendingSubmissions: pendingSubs,
           pendingWithdrawals: pendingWiths,
-          flaggedAccounts: u.filter((x: any) => x.account_flagged).length,
-          frozenAccounts: u.filter((x: any) => x.withdwals_fronzen).length,
+          flaggedAccounts: u.filter(
+            (x: any) => x.status === "flagged" || x.status === "suspended",
+          ).length,
+          frozenAccounts: u.filter((x: any) => x.withdrawals_frozen).length,
           pendingKyc: u.filter((x: any) => x.kyc_status === "pending").length,
           licensesExpired: u.filter(
             (x: any) =>
@@ -591,6 +597,8 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const { action, ...p } = body;
 
+  const db = getDb();
+
   try {
     switch (action) {
       case "approve_kyc":
@@ -848,17 +856,15 @@ export async function POST(req: NextRequest) {
 
       case "create_task":
         try {
-          await db
-            .from("tasks")
-            .insert({
-              title: p.title,
-              description: p.description,
-              category: p.category || "AI Evaluation",
-              payout_amount: parseFloat(p.payout_amount) || 0.05,
-              tier_required: p.tier_required || "foundation",
-              max_assignments: parseInt(p.max_assignments) || 100,
-              status: "open",
-            });
+          await db.from("tasks").insert({
+            title: p.title,
+            description: p.description,
+            category: p.category || "AI Evaluation",
+            payout_amount: parseFloat(p.payout_amount) || 0.05,
+            tier_required: p.tier_required || "foundation",
+            max_assignments: parseInt(p.max_assignments) || 100,
+            status: "open",
+          });
         } catch (e: any) {
           return NextResponse.json({ error: e.message }, { status: 500 });
         }
@@ -881,30 +887,27 @@ export async function POST(req: NextRequest) {
 
       case "create_gpu_plan":
         try {
-          await db
-            .from("gpu_node_plans")
-            .insert({
-              name: p.name,
-              short_name: p.short_name,
-              subtitle: p.subtitle,
-              gpu_model: p.gpu_model,
-              vram: p.vram,
-              tdp: p.tdp,
-              architecture: p.architecture,
-              tflops: parseFloat(p.tflops) || 0,
-              price_min: parseFloat(p.price_min),
-              price_max:
-                parseFloat(p.price_max) || parseFloat(p.price_min) * 100,
-              daily_pct: parseFloat(p.daily_pct),
-              tier_color: p.tier_color || "slate",
-              is_waitlist: !!p.is_waitlist,
-              is_invite_only: !!p.is_invite_only,
-              is_admin_locked: !!p.is_admin_locked,
-              instance_type: "on_demand",
-              use_cases: p.use_cases || [],
-              sort_order: parseInt(p.sort_order) || 99,
-              is_active: true,
-            });
+          await db.from("gpu_node_plans").insert({
+            name: p.name,
+            short_name: p.short_name,
+            subtitle: p.subtitle,
+            gpu_model: p.gpu_model,
+            vram: p.vram,
+            tdp: p.tdp,
+            architecture: p.architecture,
+            tflops: parseFloat(p.tflops) || 0,
+            price_min: parseFloat(p.price_min),
+            price_max: parseFloat(p.price_max) || parseFloat(p.price_min) * 100,
+            daily_pct: parseFloat(p.daily_pct),
+            tier_color: p.tier_color || "slate",
+            is_waitlist: !!p.is_waitlist,
+            is_invite_only: !!p.is_invite_only,
+            is_admin_locked: !!p.is_admin_locked,
+            instance_type: "on_demand",
+            use_cases: p.use_cases || [],
+            sort_order: parseInt(p.sort_order) || 99,
+            is_active: true,
+          });
         } catch (e: any) {
           return NextResponse.json({ error: e.message }, { status: 500 });
         }
@@ -961,18 +964,16 @@ export async function POST(req: NextRequest) {
 
       case "create_demand_event":
         try {
-          await db
-            .from("demand_events")
-            .insert({
-              plan_id: p.plan_id,
-              event_type: p.event_type,
-              title: p.title,
-              description: p.description,
-              multiplier: p.multiplier,
-              maintenance_fee: p.maintenance_fee,
-              is_active: true,
-              created_by: p.admin_id,
-            });
+          await db.from("demand_events").insert({
+            plan_id: p.plan_id,
+            event_type: p.event_type,
+            title: p.title,
+            description: p.description,
+            multiplier: p.multiplier,
+            maintenance_fee: p.maintenance_fee,
+            is_active: true,
+            created_by: p.admin_id,
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
@@ -987,18 +988,16 @@ export async function POST(req: NextRequest) {
 
       case "create_announcement":
         try {
-          await db
-            .from("platform_announcements")
-            .insert({
-              title: p.title,
-              body: p.body,
-              type: p.type || "info",
-              action_type: p.action_type || null,
-              action_fee: p.action_fee || null,
-              requires_action: !!p.action_type,
-              is_active: true,
-              created_by: p.admin_id,
-            });
+          await db.from("platform_announcements").insert({
+            title: p.title,
+            body: p.body,
+            type: p.type || "info",
+            action_type: p.action_type || null,
+            action_fee: p.action_fee || null,
+            requires_action: !!p.action_type,
+            is_active: true,
+            created_by: p.admin_id,
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
@@ -1013,51 +1012,43 @@ export async function POST(req: NextRequest) {
 
       case "freeze_withdrawals":
         try {
-          await db
-            .from("withdrawal_freeze")
-            .update({
-              is_frozen: true,
-              reason: p.reason || "Admin action",
-              frozen_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            });
+          await db.from("withdrawal_freeze").update({
+            is_frozen: true,
+            reason: p.reason || "Admin action",
+            frozen_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
       case "unfreeze_withdrawals":
         try {
-          await db
-            .from("withdrawal_freeze")
-            .update({
-              is_frozen: false,
-              reason: null,
-              updated_at: new Date().toISOString(),
-            });
+          await db.from("withdrawal_freeze").update({
+            is_frozen: false,
+            reason: null,
+            updated_at: new Date().toISOString(),
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
       case "freeze_with_announcement":
         try {
-          await db
-            .from("withdrawal_freeze")
-            .update({
-              is_frozen: true,
-              reason: p.title,
-              frozen_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            });
+          await db.from("withdrawal_freeze").update({
+            is_frozen: true,
+            reason: p.title,
+            frozen_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
         } catch {}
         try {
-          await db
-            .from("platform_announcements")
-            .insert({
-              title: p.title,
-              body: p.body,
-              type: "critical",
-              action_type: p.action_type,
-              requires_action: true,
-              is_active: true,
-            });
+          await db.from("platform_announcements").insert({
+            title: p.title,
+            body: p.body,
+            type: "critical",
+            action_type: p.action_type,
+            requires_action: true,
+            is_active: true,
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
@@ -1072,14 +1063,12 @@ export async function POST(req: NextRequest) {
 
       case "send_support_reply":
         try {
-          await db
-            .from("support_messages")
-            .insert({
-              ticket_id: p.ticket_id,
-              sender_id: p.admin_id,
-              body: p.body,
-              is_admin: true,
-            });
+          await db.from("support_messages").insert({
+            ticket_id: p.ticket_id,
+            sender_id: p.admin_id,
+            body: p.body,
+            is_admin: true,
+          });
         } catch {}
         try {
           await db
@@ -1201,26 +1190,22 @@ export async function POST(req: NextRequest) {
           if (p.userId === "all") {
             const { data: allUsers } = await db.from("users").select("id");
             if (allUsers?.length)
-              await db
-                .from("user_notifications")
-                .insert(
-                  allUsers.map((u: any) => ({
-                    user_id: u.id,
-                    type: p.type || "system",
-                    title: p.title,
-                    body: p.body_text,
-                  })),
-                );
+              await db.from("user_notifications").insert(
+                allUsers.map((u: any) => ({
+                  user_id: u.id,
+                  type: p.type || "system",
+                  title: p.title,
+                  body: p.body_text,
+                })),
+              );
             return NextResponse.json({ sent: allUsers?.length || 0 });
           }
-          await db
-            .from("user_notifications")
-            .insert({
-              user_id: p.userId,
-              type: p.type || "system",
-              title: p.title,
-              body: p.body_text,
-            });
+          await db.from("user_notifications").insert({
+            user_id: p.userId,
+            type: p.type || "system",
+            title: p.title,
+            body: p.body_text,
+          });
           return NextResponse.json({ sent: 1 });
         } catch {
           return NextResponse.json({ sent: 0 });
@@ -1236,17 +1221,15 @@ export async function POST(req: NextRequest) {
             .gte("node_expiry_date", new Date().toISOString())
             .lte("node_expiry_date", in30);
           if (expiring?.length)
-            await db
-              .from("user_notifications")
-              .insert(
-                expiring.map((u: any) => ({
-                  user_id: u.id,
-                  type: "system",
-                  title: "License Renewal Required",
-                  body: `Your node license expires on ${new Date(u.node_expiry_date).toLocaleDateString()}.`,
-                  action_url: "/dashboard/node-upgrade",
-                })),
-              );
+            await db.from("user_notifications").insert(
+              expiring.map((u: any) => ({
+                user_id: u.id,
+                type: "system",
+                title: "License Renewal Required",
+                body: `Your node license expires on ${new Date(u.node_expiry_date).toLocaleDateString()}.`,
+                action_url: "/dashboard/node-upgrade",
+              })),
+            );
           return NextResponse.json({ notified: expiring?.length || 0 });
         } catch {
           return NextResponse.json({ notified: 0 });
@@ -1255,16 +1238,14 @@ export async function POST(req: NextRequest) {
 
       case "save_config":
         try {
-          await db
-            .from("payment_config")
-            .upsert(
-              {
-                key: p.key,
-                value: p.value,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "key" },
-            );
+          await db.from("payment_config").upsert(
+            {
+              key: p.key,
+              value: p.value,
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "key" },
+          );
         } catch {}
         return NextResponse.json({ ok: true });
 
@@ -1273,14 +1254,12 @@ export async function POST(req: NextRequest) {
           await db.from("datacenter_media").update({ is_active: false });
         } catch {}
         try {
-          await db
-            .from("datacenter_media")
-            .insert({
-              file_url: p.file_url,
-              label: p.label || "Live Feed",
-              is_active: true,
-              created_by: p.admin_id,
-            });
+          await db.from("datacenter_media").insert({
+            file_url: p.file_url,
+            label: p.label || "Live Feed",
+            is_active: true,
+            created_by: p.admin_id,
+          });
         } catch {}
         return NextResponse.json({ ok: true });
 
