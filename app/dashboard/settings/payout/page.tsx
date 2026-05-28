@@ -254,13 +254,10 @@ export default function PayoutSettingsPage() {
 
     try {
       // FIX: getUser() stalls forever on mobile without timeout
-      const result = await withTimeout(
-        supabase.auth.getUser(),
-        12000,
-        "Session check",
-      );
-      const user = result?.data?.user;
-      const userErr = result?.error;
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser();
       if (userErr || !user) {
         router.push("/auth/signin");
         return;
