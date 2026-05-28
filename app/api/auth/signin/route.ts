@@ -1,3 +1,4 @@
+// app/api/auth/signin/route.ts
 import { generateDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { supabase } from "@/lib/supabase";
 import { NextRequest } from "next/server";
@@ -9,7 +10,11 @@ export const revalidate = 0;
 export async function POST(req: NextRequest) {
   // Rate limit: 5 attempts per 15 minutes per IP
   const ip = getClientIp(req);
-  const { allowed, remaining } = rateLimit(`signin:${ip}`, 5, 15 * 60_000);
+  const { allowed, remaining } = await rateLimit(
+    `signin:${ip}`,
+    5,
+    15 * 60_000,
+  ); // ← await
 
   if (!allowed) {
     return Response.json(
@@ -17,10 +22,7 @@ export async function POST(req: NextRequest) {
         error:
           "Too many sign-in attempts. Please wait 15 minutes and try again.",
       },
-      {
-        status: 429,
-        headers: { "Retry-After": "900" },
-      },
+      { status: 429, headers: { "Retry-After": "900" } },
     );
   }
 
@@ -50,8 +52,8 @@ export async function POST(req: NextRequest) {
     .update({ device_fingerprint: fingerprint })
     .eq("id", user.user.id);
 
-  return Response.json({
-    success: true,
-    headers: { "X-RateLimit-Remaining": String(remaining) },
-  });
+  return Response.json(
+    { success: true },
+    { headers: { "X-RateLimit-Remaining": String(remaining) } },
+  );
 }
