@@ -478,8 +478,11 @@ async function getDailyBankTransferNGNTotal(): Promise<number> {
 
     if (!data || data.length === 0) return 0;
     const NGN_RATE = CURRENCY_RATES["NG"].rate; // 1600
+
+    // ✅ Fix: explicitly type both reduce parameters
     return data.reduce(
-      (sum, tx) => sum + (Number(tx.amount) || 0) * NGN_RATE,
+      (sum: number, tx: { amount: unknown; metadata: unknown }) =>
+        sum + (Number(tx.amount) || 0) * NGN_RATE,
       0,
     );
   } catch {
