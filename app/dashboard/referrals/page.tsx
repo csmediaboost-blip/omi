@@ -58,16 +58,15 @@ export default function ReferralsPage() {
         .eq("referrer_id", user.id)
         .order("created_at", { ascending: false });
 
-      // Calculate stats
       const totalReferrals = referralList?.length || 0;
       const activeReferrals =
-        referralList?.filter((r) => r.commission_status !== "claimed").length ||
-        0;
+        referralList?.filter(
+          (r: { commission_status: string }) =>
+            r.commission_status !== "claimed",
+        ).length || 0;
       const totalCommission =
-        referralList?.reduce(
-          (sum, r) => sum + (r.commission_amount || 0),
-          0
-        ) || 0;
+        referralList?.reduce((sum, r) => sum + (r.commission_amount || 0), 0) ||
+        0;
       const pendingCommission =
         referralList
           ?.filter((r) => r.commission_status === "pending")
