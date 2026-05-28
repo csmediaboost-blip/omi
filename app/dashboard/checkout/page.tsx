@@ -1,22 +1,12 @@
 "use client";
 // app/dashboard/checkout/page.tsx — WITH DAILY LIMIT + SPLIT PAYMENT
-// ─────────────────────────────────────────────────────────────────────────────
-// ORIGINAL FIXES (unchanged):
-//  1–9 as documented in original file
-//
-// NEW FEATURES:
-//  F1. Daily NGN Limit Guard — once platform receives ₦495,000 via bank transfer
-//      in a calendar day, bank transfer is disabled; users are routed to Crypto/Card.
-//  F2. Split Payment Modal — any single bank transfer exceeding ₦200,000 is
-//      automatically split into ₦200,000 installments. A professional AML notice
-//      explains the compliance requirement. Allocation activates only after all
-//      installments are successfully received.
-// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { PERIOD_DURATIONS_MS } from "@/lib/mining-service";
+// ✅ FIX: All Supabase types imported explicitly
+import type { User } from "@supabase/supabase-js";
 
 import {
   Lock,
@@ -53,36 +43,23 @@ type CheckoutStep =
 type PayMethod = "card" | "bank_transfer" | "crypto_wallet";
 type PurchaseType = "gpu_plan" | "license" | "task";
 
-// ─── DAILY NGN LIMIT CONSTANTS ─────────────────────────────────────────────
-// F1: Platform-wide daily cap — KoraPay merchant account limit is ₦500,000/day.
-// We halt at ₦495,000 to maintain a ₦5,000 safety buffer.
 const DAILY_NGN_LIMIT = 495_000;
-
-// F2: KoraPay enforces a ₦200,000 ceiling per individual transaction.
-// Any single payment above this threshold must be split into installments.
 const MAX_SINGLE_NGN_TXN = 200_000;
 
-// ─── SPLIT PAYMENT STATE TYPE ──────────────────────────────────────────────
 type SplitState = {
-  totalNGN: number; // Full amount in NGN, e.g. 320_000
-  totalUSD: number; // Full amount in USD, e.g. 200
-  ngnRate: number; // Conversion rate used, e.g. 1600
-  localCurrency: string; // e.g. "NGN"
-  installmentsNGN: number[]; // e.g. [200_000, 120_000]
-  completed: number; // How many installments done so far
-  references: string[]; // KoraPay refs collected
+  totalNGN: number;
+  totalUSD: number;
+  ngnRate: number;
+  localCurrency: string;
+  installmentsNGN: number[];
+  completed: number;
+  references: string[];
   kpPhone: string;
-  planData: Record<string, any>; // Everything needed to create allocation + call KoraPay
+  planData: Record<string, any>;
 };
 
 const BANK_TRANSFER_COUNTRIES = new Set([
-  "KE",
-  "GH",
-  "CM",
-  "CI",
-  "EG",
-  "TZ",
-  "NG",
+  "KE", "GH", "CM", "CI", "EG", "TZ", "NG",
 ]);
 
 const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
@@ -339,10 +316,7 @@ async function createMiningAllocation(params: {
       .gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString())
       .limit(1);
     if (existing && existing.length > 0) {
-      console.log(
-        "[checkout] Allocation already exists, skipping:",
-        existing[0].id,
-      );
+      console.log("[checkout] Allocation already exists, skipping:", existing[0].id);
       return existing[0].id;
     }
   }
@@ -462,8 +436,6 @@ async function createMiningAllocation(params: {
 }
 
 // ─── F1: DAILY NGN TOTAL QUERY ─────────────────────────────────────────────
-// Queries platform-wide confirmed bank transfer payments for today,
-// returns estimated NGN total (all amounts stored in USD × NGN rate).
 async function getDailyBankTransferNGNTotal(): Promise<number> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -477,9 +449,9 @@ async function getDailyBankTransferNGNTotal(): Promise<number> {
       .not("gateway", "eq", "gpu_mining");
 
     if (!data || data.length === 0) return 0;
-    const NGN_RATE = CURRENCY_RATES["NG"].rate; // 1600
+    const NGN_RATE = CURRENCY_RATES["NG"].rate;
 
-    // ✅ Fix: explicitly type both reduce parameters
+    // ✅ FIX: explicitly type both reduce parameters
     return data.reduce(
       (sum: number, tx: { amount: unknown; metadata: unknown }) =>
         sum + (Number(tx.amount) || 0) * NGN_RATE,
@@ -601,9 +573,7 @@ function SplitPaymentModal({
                   ₦200,000 per-transaction ceiling
                 </strong>
                 . This safeguard protects you against unauthorised use of
-                payment instruments — including transactions initiated on
-                compromised or stolen devices where the legitimate account
-                holder is unaware. Each installment undergoes real-time fraud
+                payment instruments. Each installment undergoes real-time fraud
                 screening and transaction monitoring by our payment processor.
                 Your service activates automatically once all installments are
                 received and reconciled.{" "}
@@ -637,9 +607,7 @@ function SplitPaymentModal({
             <div className="flex justify-between text-[10px] text-slate-600 mb-1.5">
               <span>₦{paidNGN.toLocaleString()} paid</span>
               <span>{progressPct.toFixed(0)}% complete</span>
-              <span>
-                ₦{(state.totalNGN - paidNGN).toLocaleString()} remaining
-              </span>
+              <span>₦{(state.totalNGN - paidNGN).toLocaleString()} remaining</span>
             </div>
             <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
               <div
@@ -684,11 +652,7 @@ function SplitPaymentModal({
                           : isCurrent
                             ? "rgba(245,158,11,0.2)"
                             : "rgba(100,116,139,0.15)",
-                        color: isPaid
-                          ? "#10b981"
-                          : isCurrent
-                            ? "#f59e0b"
-                            : "#475569",
+                        color: isPaid ? "#10b981" : isCurrent ? "#f59e0b" : "#475569",
                       }}
                     >
                       {isPaid ? <CheckCircle size={12} /> : i + 1}
@@ -715,11 +679,7 @@ function SplitPaymentModal({
                     <p
                       className="text-[10px]"
                       style={{
-                        color: isPaid
-                          ? "#059669"
-                          : isCurrent
-                            ? "#d97706"
-                            : "#334155",
+                        color: isPaid ? "#059669" : isCurrent ? "#d97706" : "#334155",
                       }}
                     >
                       {isPaid ? "✓ Paid" : isCurrent ? "→ Next" : "○ Pending"}
@@ -758,8 +718,7 @@ function SplitPaymentModal({
           >
             {loading ? (
               <>
-                <Loader2 size={16} className="animate-spin" /> Connecting to
-                bank…
+                <Loader2 size={16} className="animate-spin" /> Connecting to bank…
               </>
             ) : isFirst ? (
               <>
@@ -776,7 +735,6 @@ function SplitPaymentModal({
             )}
           </button>
 
-          {/* ── FIX: prominent "switch method" button ── */}
           <button
             onClick={onCancel}
             disabled={loading}
@@ -903,14 +861,9 @@ function Receipt({
                   ["VRAM", data.vram],
                   [
                     "Payment Model",
-                    isContract
-                      ? `Contract — ${contractDurLabel}`
-                      : "Pay-As-You-Go",
+                    isContract ? `Contract — ${contractDurLabel}` : "Pay-As-You-Go",
                   ],
-                  [
-                    "Mining Session",
-                    isContract ? contractDurLabel : periodLabel,
-                  ],
+                  ["Mining Session", isContract ? contractDurLabel : periodLabel],
                   [
                     "Amount Paid",
                     `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`,
@@ -1034,17 +987,11 @@ function OrderSummary({
                 ...(!isContract
                   ? [
                       ["Mining Duration", periodLabel],
-                      [
-                        "Earnings",
-                        "Live — visible in your portfolio after activation",
-                      ],
+                      ["Earnings", "Live — visible in your portfolio after activation"],
                     ]
                   : [
                       ["Contract Term", contractDurLabel],
-                      [
-                        "Earnings",
-                        "Accumulate daily — visible in your portfolio",
-                      ],
+                      ["Earnings", "Accumulate daily — visible in your portfolio"],
                     ]),
                 ["Instance Type", itype.replace(/_/g, " ")],
               ].map(([l, v]) => (
@@ -1135,9 +1082,7 @@ function OrderSummary({
                 <LicIcon size={22} style={{ color: licConfig.color }} />
               </div>
               <div>
-                <p className="text-white font-black text-sm">
-                  {licConfig.label}
-                </p>
+                <p className="text-white font-black text-sm">{licConfig.label}</p>
                 <p className="text-slate-500 text-xs mt-1">
                   Certified AI Operator Program
                 </p>
@@ -1222,11 +1167,11 @@ function CheckoutInner() {
   const [twConfirmed, setTwConfirmed] = useState(false);
   const [cryptoError, setCryptoError] = useState("");
 
-  // ── F1: Daily limit state ──
+  // F1: Daily limit state
   const [bankTransferBlocked, setBankTransferBlocked] = useState(false);
   const [dailyLimitChecked, setDailyLimitChecked] = useState(false);
 
-  // ── F2: Split payment state ──
+  // F2: Split payment state
   const [splitState, setSplitState] = useState<SplitState | null>(null);
   const [splitLoading, setSplitLoading] = useState(false);
   const [splitError, setSplitError] = useState("");
@@ -1287,8 +1232,7 @@ function CheckoutInner() {
     return p;
   })();
 
-  // ── FIX-STALE: On a fresh visit (no ?status= redirect), wipe any leftover
-  // split/pending session so the user always starts clean.
+  // Wipe leftover split/pending session on fresh visit
   useEffect(() => {
     const hasRedirect =
       typeof window !== "undefined" &&
@@ -1303,7 +1247,8 @@ function CheckoutInner() {
   useEffect(() => {
     let cancelled = false;
 
-    supabase.auth.getUser().then(({ data: { user } }: any) => {
+    // ✅ FIX 1: explicitly type the destructured user parameter
+    supabase.auth.getUser().then(({ data: { user } }: { data: { user: User | null } }) => {
       if (cancelled) return;
       if (!user) {
         router.push("/auth/signin");
@@ -1339,7 +1284,7 @@ function CheckoutInner() {
     };
   }, []); // eslint-disable-line
 
-  // ── F1: Check daily bank transfer limit on mount ────────────────────────
+  // F1: Check daily bank transfer limit on mount
   useEffect(() => {
     getDailyBankTransferNGNTotal().then((total) => {
       if (total >= DAILY_NGN_LIMIT) setBankTransferBlocked(true);
@@ -1353,7 +1298,7 @@ function CheckoutInner() {
     const r = params.get("reference");
     if (!s || !r) return;
 
-    // ── F2: Handle split payment continuation ──
+    // F2: Handle split payment continuation
     const splitSaved = sessionStorage.getItem("korapay_split_checkout");
     if (splitSaved) {
       if (s === "success") {
@@ -1361,7 +1306,6 @@ function CheckoutInner() {
         try {
           const saved: SplitState = JSON.parse(splitSaved);
 
-          // Restore country so details step renders correctly
           if (saved.planData.countryCode) {
             setCountryCode(saved.planData.countryCode);
             setCountryName(saved.planData.countryName || "");
@@ -1374,11 +1318,11 @@ function CheckoutInner() {
           };
 
           if (updated.completed >= updated.installmentsNGN.length) {
-            // ── All installments done — create allocation ──
             sessionStorage.removeItem("korapay_split_checkout");
             setTransactionId(r);
 
-            supabase.auth.getUser().then(async ({ data: { user } }) => {
+            // ✅ FIX 2: explicitly type the destructured user parameter
+            supabase.auth.getUser().then(async ({ data: { user } }: { data: { user: User | null } }) => {
               if (!user) return;
               try {
                 const id = await createMiningAllocation({
@@ -1394,7 +1338,6 @@ function CheckoutInner() {
 
             setStep("success");
           } else {
-            // ── More installments needed — show continuation modal ──
             sessionStorage.setItem(
               "korapay_split_checkout",
               JSON.stringify(updated),
@@ -1414,10 +1357,10 @@ function CheckoutInner() {
         setStep("declined");
         window.history.replaceState({}, "", "/dashboard/checkout");
       }
-      return; // Don't fall through to regular handler
+      return;
     }
 
-    // ── Regular KoraPay handler (unchanged) ──
+    // Regular KoraPay handler
     if (s === "success") {
       setTransactionId(r);
       setStep("success");
@@ -1426,7 +1369,8 @@ function CheckoutInner() {
       const saved = sessionStorage.getItem("korapay_pending_checkout");
       if (saved) {
         sessionStorage.removeItem("korapay_pending_checkout");
-        supabase.auth.getUser().then(async ({ data: { user } }) => {
+        // ✅ FIX 3: explicitly type the destructured user parameter
+        supabase.auth.getUser().then(async ({ data: { user } }: { data: { user: User | null } }) => {
           if (!user) return;
           try {
             const checkoutData = JSON.parse(saved);
@@ -1437,10 +1381,7 @@ function CheckoutInner() {
             });
             if (id) setAllocationId(id);
           } catch (e) {
-            console.error(
-              "[checkout] Failed to create allocation after KoraPay:",
-              e,
-            );
+            console.error("[checkout] Failed to create allocation after KoraPay:", e);
           }
         });
       }
@@ -1456,9 +1397,7 @@ function CheckoutInner() {
   useEffect(() => {
     if (!countryCode) return;
     setPayMethod(
-      BANK_TRANSFER_COUNTRIES.has(countryCode)
-        ? "bank_transfer"
-        : "crypto_wallet",
+      BANK_TRANSFER_COUNTRIES.has(countryCode) ? "bank_transfer" : "crypto_wallet",
     );
   }, [countryCode]);
 
@@ -1490,7 +1429,7 @@ function CheckoutInner() {
     setCheckingReferral(false);
   }, []);
 
-  // ── F2: Initiate a single split installment via KoraPay ─────────────────
+  // F2: Initiate a single split installment via KoraPay
   async function initiateSplitInstallment(state: SplitState) {
     if (!userId) return;
     setSplitLoading(true);
@@ -1502,7 +1441,6 @@ function CheckoutInner() {
     );
 
     try {
-      // Save split state to sessionStorage so we can restore after redirect
       sessionStorage.setItem("korapay_split_checkout", JSON.stringify(state));
 
       const res = await fetch("/api/korapay/checkout", {
@@ -1532,7 +1470,6 @@ function CheckoutInner() {
           lockInLabel: state.planData.lockInLabel || lockInLabel,
           countryCode: state.planData.countryCode || countryCode,
           countryName: state.planData.countryName || countryName,
-          // Split metadata
           isSplitPayment: true,
           splitInstallment: state.completed + 1,
           splitTotal: state.installmentsNGN.length,
@@ -1542,24 +1479,20 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_split_checkout");
-        setSplitError(
-          data.error || "Payment initiation failed. Please try again.",
-        );
+        setSplitError(data.error || "Payment initiation failed. Please try again.");
         setSplitLoading(false);
         return;
       }
 
       window.location.href = data.checkoutUrl;
-    } catch (err: any) {
+    } catch (err: unknown) {
       sessionStorage.removeItem("korapay_split_checkout");
-      setSplitError(
-        "Connection error. Please check your internet and try again.",
-      );
+      setSplitError("Connection error. Please check your internet and try again.");
       setSplitLoading(false);
     }
   }
 
-  // ── F1 + F2: Bank Transfer Submit ───────────────────────────────────────
+  // F1 + F2: Bank Transfer Submit
   async function handleBankTransferSubmit() {
     if (!userId) {
       setKpError("Session not ready. Please wait and try again.");
@@ -1568,7 +1501,6 @@ function CheckoutInner() {
     setKpError("");
     setKpLoading(true);
 
-    // ── F1: Re-check daily limit at time of submission ──
     const currentNGNTotal = await getDailyBankTransferNGNTotal();
     if (currentNGNTotal >= DAILY_NGN_LIMIT) {
       setBankTransferBlocked(true);
@@ -1585,7 +1517,6 @@ function CheckoutInner() {
       ? parseFloat((price * conversion.rate).toFixed(2))
       : price;
 
-    // ── F2: Check single-transaction limit ──
     if (convertedPrice > MAX_SINGLE_NGN_TXN) {
       const installmentsNGN = computeInstallments(convertedPrice);
       const planData: Record<string, any> = {
@@ -1608,7 +1539,6 @@ function CheckoutInner() {
         countryName,
         autoReinvest,
         referralCode: referralValid ? referralCode.toUpperCase() : undefined,
-        // Extra fields for KoraPay call in initiateSplitInstallment
         nodeKey,
         nodeName,
         itype,
@@ -1630,10 +1560,9 @@ function CheckoutInner() {
 
       setSplitState(newSplitState);
       setKpLoading(false);
-      return; // Modal will render and handle from here
+      return;
     }
 
-    // ── Normal bank transfer flow (amount ≤ ₦200,000) ──
     try {
       sessionStorage.setItem(
         "korapay_pending_checkout",
@@ -1693,15 +1622,13 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_pending_checkout");
-        setKpError(
-          data.error || "Payment initiation failed. Please try again.",
-        );
+        setKpError(data.error || "Payment initiation failed. Please try again.");
         setKpLoading(false);
         return;
       }
 
       window.location.href = data.checkoutUrl;
-    } catch (err: any) {
+    } catch (err: unknown) {
       sessionStorage.removeItem("korapay_pending_checkout");
       console.error("Bank transfer error:", err);
       setKpError("Connection error. Please check your internet and try again.");
@@ -1729,9 +1656,7 @@ function CheckoutInner() {
         return;
       }
       if (!cryptoWalletAddress) {
-        setCryptoError(
-          "Payment wallet not configured. Please contact support.",
-        );
+        setCryptoError("Payment wallet not configured. Please contact support.");
         return;
       }
     }
@@ -1787,8 +1712,9 @@ function CheckoutInner() {
         setTransactionId(txId);
         setStep("pending_crypto");
         isSubmittingRef.current = false;
-      } catch (err: any) {
-        setErrorMsg(err.message || "Failed to submit payment details.");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to submit payment details.";
+        setErrorMsg(msg);
         setStep("failed");
         isSubmittingRef.current = false;
       }
@@ -1859,8 +1785,9 @@ function CheckoutInner() {
       setTransactionId(data.transactionId || `TXN-${Date.now()}`);
       setStep("success");
       isSubmittingRef.current = false;
-    } catch (err: any) {
-      setErrorMsg(err.message || "Payment could not be processed.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Payment could not be processed.";
+      setErrorMsg(msg);
       setStep("failed");
       isSubmittingRef.current = false;
     }
@@ -1918,11 +1845,9 @@ function CheckoutInner() {
 
   const periodLabel = PERIOD_LABELS[miningPeriod] ?? miningPeriod;
 
-  // F1: Payment methods filtered by daily limit
   const availablePayMethods = (() => {
     const methods = getPaymentMethodsForCountry(countryCode, price);
-    if (bankTransferBlocked)
-      return methods.filter((m) => m !== "bank_transfer");
+    if (bankTransferBlocked) return methods.filter((m) => m !== "bank_transfer");
     return methods;
   })();
 
@@ -1932,7 +1857,7 @@ function CheckoutInner() {
         <Receipt data={receiptData} onClose={() => setShowReceipt(false)} />
       )}
 
-      {/* ── F2: Split Payment Modal ── */}
+      {/* F2: Split Payment Modal */}
       {splitState !== null && step === "details" && (
         <SplitPaymentModal
           state={splitState}
@@ -1943,7 +1868,6 @@ function CheckoutInner() {
             sessionStorage.removeItem("korapay_split_checkout");
             setSplitState(null);
             setSplitError("");
-            // ── FIX: switch to crypto so user sees an immediately usable option
             setPayMethod("crypto_wallet");
           }}
         />
@@ -2037,9 +1961,7 @@ function CheckoutInner() {
                     style={{ background: "rgba(0,0,0,0.3)" }}
                   >
                     <p className="text-slate-500 text-[10px] mb-0.5">{l}</p>
-                    <p className="text-white font-bold text-xs break-all">
-                      {v}
-                    </p>
+                    <p className="text-white font-bold text-xs break-all">{v}</p>
                   </div>
                 ))}
               </div>
@@ -2201,7 +2123,7 @@ function CheckoutInner() {
                 </p>
               </div>
 
-              {/* ── F1: Daily limit banner ── */}
+              {/* F1: Daily limit banner */}
               {bankTransferBlocked && dailyLimitChecked && (
                 <div
                   className="rounded-xl p-4 flex items-start gap-3"
@@ -2210,10 +2132,7 @@ function CheckoutInner() {
                     border: "1px solid rgba(239,68,68,0.25)",
                   }}
                 >
-                  <AlertTriangle
-                    size={15}
-                    className="text-red-400 shrink-0 mt-0.5"
-                  />
+                  <AlertTriangle size={15} className="text-red-400 shrink-0 mt-0.5" />
                   <div>
                     <p className="text-red-300 text-sm font-black">
                       Bank Transfer Unavailable Today
@@ -2289,7 +2208,7 @@ function CheckoutInner() {
                       </button>
                     )}
 
-                    {/* ── F1: Bank transfer button — disabled when limit reached ── */}
+                    {/* F1: Bank transfer button — disabled when limit reached */}
                     {methods.includes("bank_transfer") && (
                       <button
                         type="button"
@@ -2396,10 +2315,7 @@ function CheckoutInner() {
                   />
                   <div className="absolute right-3 top-1/2 -translate-y-1/2">
                     {checkingReferral && (
-                      <Loader2
-                        size={14}
-                        className="text-slate-400 animate-spin"
-                      />
+                      <Loader2 size={14} className="text-slate-400 animate-spin" />
                     )}
                     {!checkingReferral && referralValid === true && (
                       <CheckCircle size={14} className="text-emerald-400" />
@@ -2440,10 +2356,7 @@ function CheckoutInner() {
                           border: "1px solid rgba(245,158,11,0.25)",
                         }}
                       >
-                        <Landmark
-                          size={13}
-                          className="text-amber-400 mt-0.5 shrink-0"
-                        />
+                        <Landmark size={13} className="text-amber-400 mt-0.5 shrink-0" />
                         <div>
                           <p className="text-amber-300 text-xs font-black">
                             Installment Payment Required
@@ -2456,8 +2369,7 @@ function CheckoutInner() {
                             exceeds the ₦200,000 single-transaction limit. It
                             will be split into{" "}
                             <strong className="text-amber-200">
-                              {computeInstallments(localAmount).length}{" "}
-                              installments
+                              {computeInstallments(localAmount).length} installments
                             </strong>{" "}
                             for regulatory compliance.
                           </p>
@@ -2482,8 +2394,7 @@ function CheckoutInner() {
                         <p className="text-emerald-300 text-xs">
                           Approx. amount:{" "}
                           <strong className="text-emerald-200">
-                            {conversionInfo.currency}{" "}
-                            {localAmount.toLocaleString()}
+                            {conversionInfo.currency} {localAmount.toLocaleString()}
                           </strong>
                         </p>
                       </div>
@@ -2503,10 +2414,7 @@ function CheckoutInner() {
                     </div>
                     {kpError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle
-                          size={14}
-                          className="text-red-400 shrink-0 mt-0.5"
-                        />
+                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
                         <p className="text-red-300 text-xs">{kpError}</p>
                       </div>
                     )}
@@ -2517,8 +2425,7 @@ function CheckoutInner() {
                     >
                       {kpLoading ? (
                         <>
-                          <Loader2 size={16} className="animate-spin" />{" "}
-                          Connecting…
+                          <Loader2 size={16} className="animate-spin" /> Connecting…
                         </>
                       ) : localAmount && localAmount > MAX_SINGLE_NGN_TXN ? (
                         <>
@@ -2547,16 +2454,12 @@ function CheckoutInner() {
                         Pay with USDT
                       </p>
                       <p className="text-slate-500 text-xs">
-                        Scan the QR or copy the address, then send the exact
-                        amount.
+                        Scan the QR or copy the address, then send the exact amount.
                       </p>
                     </div>
                     {!configLoaded ? (
                       <div className="flex justify-center py-4">
-                        <Loader2
-                          size={24}
-                          className="text-violet-400 animate-spin"
-                        />
+                        <Loader2 size={24} className="text-violet-400 animate-spin" />
                       </div>
                     ) : !cryptoWalletAddress ? (
                       <div
@@ -2682,10 +2585,7 @@ function CheckoutInner() {
 
                     {cryptoError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle
-                          size={14}
-                          className="text-red-400 shrink-0 mt-0.5"
-                        />
+                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
                         <p className="text-red-300 text-xs">{cryptoError}</p>
                       </div>
                     )}
@@ -2765,9 +2665,7 @@ function CheckoutInner() {
                 <div
                   key={ps.id}
                   className={`flex items-center gap-3 text-sm ${
-                    idx <= processingStep
-                      ? "text-emerald-300"
-                      : "text-slate-600"
+                    idx <= processingStep ? "text-emerald-300" : "text-slate-600"
                   }`}
                 >
                   <div
@@ -2881,9 +2779,7 @@ function CheckoutInner() {
                 }
                 className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg transition-all"
               >
-                {purchaseType === "license"
-                  ? "Go to Tasks"
-                  : "View Portfolio →"}
+                {purchaseType === "license" ? "Go to Tasks" : "View Portfolio →"}
               </button>
             </div>
           </div>
