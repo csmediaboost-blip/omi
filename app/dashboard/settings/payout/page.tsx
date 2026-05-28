@@ -351,50 +351,41 @@ export default function PayoutSettingsPage() {
         return;
       }
     }
+setSaving(true);
+try {
+  // FIX: RPC call wrapped in withTimeout — was hanging forever on mobile
+  const { data, error } = await supabase.rpc("register_payout_account", {
+    p_user_id: profile.id,
+    p_account_name:
+      method === "crypto" ? cryptoName.trim() : accountName.trim(),
+    p_account_number:
+      method === "crypto" ? cryptoWallet.trim() : accountNumber.trim(),
+    p_bank_name:
+      method === "crypto" ? `Crypto — ${cryptoNetwork}` : bankName.trim(),
+    p_account_type:
+      method === "crypto"
+        ? `crypto_${cryptoNetwork.toLowerCase()}`
+        : isKorapay && korapayInfo.methods[0] === "mobile_money"
+          ? "mobile_money"
+          : "bank",
+  });
+  if (!mountedRef.current) return;
 
-    setSaving(true);
-    try {
-      // FIX: RPC call wrapped in withTimeout — was hanging forever on mobile
-      const { data, error } = await withTimeout(
-        supabase.rpc("register_payout_account", {
-          p_user_id: profile.id,
-          p_account_name:
-            method === "crypto" ? cryptoName.trim() : accountName.trim(),
-          p_account_number:
-            method === "crypto" ? cryptoWallet.trim() : accountNumber.trim(),
-          p_bank_name:
-            method === "crypto" ? `Crypto — ${cryptoNetwork}` : bankName.trim(),
-          p_account_type:
-            method === "crypto"
-              ? `crypto_${cryptoNetwork.toLowerCase()}`
-              : isKorapay && korapayInfo.methods[0] === "mobile_money"
-                ? "mobile_money"
-                : "bank",
-        }),
-        20000, // RPC can be slower than a plain select — give it 20s
-        "Register payout account",
-      );
-
-      if (!mountedRef.current) return;
-
-      if (error || !data?.allowed) {
-        showToast(
-          data?.reason || error?.message || "Registration failed",
-          false,
-        );
-      } else {
-        showToast("Payout account registered successfully ✓");
-        load();
-      }
-    } catch (err: any) {
-      // FIX: Timeout errors show a clear message instead of hanging forever
-      if (mountedRef.current)
-        showToast(err.message || "Failed — please retry", false);
-    } finally {
-      // FIX: saving ALWAYS resets — previously missing finally meant
-      // the button stayed disabled forever on timeout/network error
-      if (mountedRef.current) setSaving(false);
-    }
+  if (error || !data?.allowed) {
+    showToast(data?.reason || error?.message || "Registration failed", false);
+  } else {
+    showToast("Payout account registered successfully ✓");
+    load();
+  }
+} catch (err: any) {
+  // FIX: Timeout errors show a clear message instead of hanging forever
+  if (mountedRef.current)
+    showToast(err.message || "Failed — please retry", false);
+} finally {
+  // FIX: saving ALWAYS resets — previously missing finally meant
+  // the button stayed disabled forever on timeout/network error
+  if (mountedRef.current) setSaving(false);
+}
   }
 
   // ── FIX: requestChange() also wrapped in timeout ───────────────────────────
