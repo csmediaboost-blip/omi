@@ -158,16 +158,17 @@ export default function RootLayout({
       lang="en"
     >
       <head>
-        {/* Preload critical fonts */}
         <link
           rel="preload"
-          href={geistSans.src || "/"}
+          href="/fonts/geist-sans.woff2"
           as="font"
           type="font/woff2"
           crossOrigin="anonymous"
         />
         {/* Prevent FOUC - force layout immediately with critical CSS */}
-        <style dangerouslySetInnerHTML={{__html: `
+        <style
+          dangerouslySetInnerHTML={{
+            __html: `
           * { margin: 0; padding: 0; box-sizing: border-box; }
           html { 
             width: 100%; 
@@ -190,7 +191,9 @@ export default function RootLayout({
             src: url(${geistSans.src || ""}) format('woff2');
             font-display: swap;
           }
-        `}} />
+        `,
+          }}
+        />
       </head>
       <body className="antialiased">
         <PWAProvider>
