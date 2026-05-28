@@ -1,20 +1,4 @@
 // app/api/mining/claim-session/route.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// USER-FACING claim endpoint — authenticated via Supabase session cookie.
-// This is separate from /api/mining/complete-sessions which requires CRON_SECRET.
-//
-// WHY THIS EXISTS:
-//   complete-sessions requires CRON_SECRET for cron job security.
-//   When called from the browser with no bearer token it returns 401.
-//   This endpoint uses the user's own Supabase session instead —
-//   safe for browser calls, only claims the authenticated user's own sessions.
-//
-// CALLED FROM:
-//   - PortfolioCard "Claim Earnings" button
-//   - Finance page "Claim Now" button
-//   - GPU Plans auto-complete on portfolio tab load
-// ─────────────────────────────────────────────────────────────────────────────
-
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
@@ -24,7 +8,6 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 export const maxDuration = 30;
 
-// Service role for DB writes (bypasses RLS for balance credit)
 function getAdminSupabase() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -33,13 +16,6 @@ function getAdminSupabase() {
   );
 }
 
-// Period durations
-const PERIOD_MS: Record<string, number> = {
-  hourly: 3_600_000,
-  daily: 86_400_000,
-  weekly: 604_800_000,
-  monthly: 2_592_000_000,
-};
 const PERIOD_MULT: Record<string, number> = {
   hourly: 0.8 / 24,
   daily: 1.0,
@@ -49,8 +25,10 @@ const PERIOD_MULT: Record<string, number> = {
 
 export async function POST(req: NextRequest) {
   try {
-    // ── Authenticate via Supabase session (no CRON_SECRET needed) ────────────
-    const cookieStore = cookies();
+    // ── Authenticate via Supabase session cookie ──────────────────────────────
+    // Next.js 15: cookies() is async — must be awaited
+    const cookieStore = await cookies();
+
     const userSupabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -75,11 +53,10 @@ export async function POST(req: NextRequest) {
     }
 
     const userId = user.id;
-    const supabase = getAdminSupabase(); // service role for DB writes
-    const now = new Date();
-    const nowIso = now.toISOString();
+    const supabase = getAdminSupabase();
+    const nowIso = new Date().toISOString();
 
-    // ── Find this user's expired-but-unclaimed flexible sessions ─────────────
+    // ── Find expired-but-unclaimed flexible sessions for this user ────────────
     const { data: expired, error: queryErr } = await supabase
       .from("node_allocations")
       .select(
@@ -115,9 +92,8 @@ export async function POST(req: NextRequest) {
 
     for (const alloc of expired) {
       const plan = (alloc as any).gpu_plans;
-      const rf = alloc.rate_factor_used ?? 0.86;
+      const rf = (alloc as any).rate_factor_used ?? 0.86;
 
-      // Capital-proportional earnings calculation
       const rawMin =
         ((plan?.base_daily_profit_min ?? 0.29) / 100) *
         (plan?.roi_tier_multiplier ?? 1.0);
@@ -129,8 +105,6 @@ export async function POST(req: NextRequest) {
       const mult = PERIOD_MULT[period] ?? 1.0;
       const maxProfit = (alloc as any).amount_invested * dailyDec * mult;
 
-      // Use total_earned from DB (synced every 60s by the DB sync effect),
-      // capped at the max period profit
       const finalProfit = Math.min(
         Math.max((alloc as any).total_earned ?? 0, maxProfit * 0.72),
         maxProfit,
@@ -148,7 +122,7 @@ export async function POST(req: NextRequest) {
           updated_at: nowIso,
         })
         .eq("id", (alloc as any).id)
-        .eq("mining_completed", false) // Atomic guard
+        .eq("mining_completed", false)
         .select("id");
 
       if (updateErr) {
@@ -159,24 +133,22 @@ export async function POST(req: NextRequest) {
         );
         continue;
       }
-      if (!updated || updated.length === 0) {
-        // Another process already completed it — skip
-        continue;
-      }
+      if (!updated || updated.length === 0) continue; // Already claimed
 
-      // Credit capital + profit to user wallet
       const credit = (alloc as any).amount_invested + rounded;
 
-      const { error: walletErr } = await supabase
-        .rpc("increment_user_balance", {
+      // Try RPC first, fall back to direct update
+      const { error: walletErr } = await supabase.rpc(
+        "increment_user_balance",
+        {
           p_user_id: userId,
           p_amount: credit,
           p_earned: rounded,
-        })
-        .catch(() => ({ error: { message: "rpc not found" } }));
+        },
+      );
 
       if (walletErr) {
-        // RPC not found — fall back to direct update
+        // RPC not found — fall back to direct balance update
         const { data: u } = await supabase
           .from("users")
           .select("balance_available, wallet_balance, total_earned")
@@ -204,7 +176,7 @@ export async function POST(req: NextRequest) {
             "[claim-session] Wallet update error:",
             directErr.message,
           );
-          // Rollback the allocation update so user can retry
+          // Rollback so user can retry
           await supabase
             .from("node_allocations")
             .update({
@@ -217,9 +189,10 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Write ledger entry
-      try {
-        await supabase.from("transaction_ledger").insert({
+      // Ledger entry (non-blocking — failure doesn't abort the claim)
+      const { error: ledgerErr } = await supabase
+        .from("transaction_ledger")
+        .insert({
           user_id: userId,
           type: "mining_payout",
           amount: credit,
@@ -227,18 +200,26 @@ export async function POST(req: NextRequest) {
           reference_id: (alloc as any).id,
           created_at: nowIso,
         });
-      } catch {}
+      if (ledgerErr) {
+        console.error("[claim-session] Ledger insert error:", ledgerErr.code);
+      }
 
-      // In-app notification
-      try {
-        await supabase.from("user_notifications").insert({
+      // In-app notification (non-blocking)
+      const { error: notifErr } = await supabase
+        .from("user_notifications")
+        .insert({
           user_id: userId,
           type: "mining_complete",
           title: "⛏️ Mining Payout Received!",
           body: `Your ${period} session finished. $${rounded.toFixed(4)} profit + $${Number((alloc as any).amount_invested).toFixed(2)} capital — $${credit.toFixed(2)} total credited to your wallet.`,
           created_at: nowIso,
         });
-      } catch {}
+      if (notifErr) {
+        console.error(
+          "[claim-session] Notification insert error:",
+          notifErr.code,
+        );
+      }
 
       completed++;
       totalCredited += credit;
