@@ -755,8 +755,8 @@ function WithdrawModal({
       )
       .eq("id", userId)
       .single()
-      .then(({ data }) => {
-        if (data) setPayoutInfo(data as PayoutInfo);
+      .then(({ data }: { data: PayoutInfo | null }) => {
+        if (data) setPayoutInfo(data);
         setLoadingPayout(false);
       });
   }, [userId]);
