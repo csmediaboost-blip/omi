@@ -2514,8 +2514,7 @@ function PlanCard({
           )}
 
           </div>}
-
-         {/* CTA */}
+{/* CTA */}
           <div
             className="pt-1 border-t"
             style={{ borderColor: "rgba(255,255,255,0.06)" }}
@@ -2550,20 +2549,20 @@ function PlanCard({
                     amountErr || !amount
                       ? undefined
                       : tab === "contract"
-                        ? "linear-gradient(135deg,rgba(139,92,246,0.9),rgba(99,102,241,0.7))"
-                        : `linear-gradient(135deg,${cs.hex},rgba(16,185,129,0.7))`,
+                      ? "linear-gradient(135deg,rgba(139,92,246,0.9),rgba(99,102,241,0.7))"
+                      : "linear-gradient(135deg," + cs.hex + ",rgba(16,185,129,0.7))",
                 }}
               >
                 {tab === "contract" ? (
                   <>
                     <FileCheck size={14} /> Lock In $
-                    {amount > 0 ? amount.toLocaleString() : "—"} · {term.label}{" "}
+                    {amount > 0 ? amount.toLocaleString() : "\u2014"} · {term.label}{" "}
                     <ArrowRight size={13} />
                   </>
                 ) : (
                   <>
                     <Pickaxe size={14} /> Start Mining · $
-                    {amount > 0 ? amount.toLocaleString() : "—"} ·{" "}
+                    {amount > 0 ? amount.toLocaleString() : "\u2014"} ·{" "}
                     {minPeriod.label} <ArrowRight size={13} />
                   </>
                 )}
@@ -2574,7 +2573,6 @@ function PlanCard({
       </div>
   );
 }
-
 // ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function GPUPlansPage() {
   const router = useRouter();
