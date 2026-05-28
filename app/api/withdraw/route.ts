@@ -1,12 +1,4 @@
 // app/api/withdraw/route.ts
-// FIXED VERSION:
-// 1. Withdraw button unblocked — canWithdraw logic fixed (business day handled separately in UI)
-// 2. Business day + Nigerian public holiday enforcement with exact error messages
-// 3. Auto Korapay payout from admin payment_config table (no hardcoded keys)
-// 4. Korapay sender = "OmniTaskPro", narration set
-// 5. Crypto withdrawals flagged for manual admin processing
-// 6. All error messages tell user EXACTLY what is wrong (never a generic system error)
-
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
@@ -14,7 +6,6 @@ import { z } from "zod";
 import bcrypt from "bcryptjs";
 import {
   isBusinessDay,
-  getBusinessDayMessage,
   getTodayHoliday,
   nextBusinessDayLabel,
 } from "@/lib/business-days";
@@ -34,7 +25,7 @@ const WithdrawSchema = z.object({
     .regex(/^\d+$/, "PIN must contain numbers only"),
 });
 
-// In-memory rate limiter (per process — use Redis in production)
+// In-memory rate limiter (per process — use Redis in production for distributed)
 const attempts = new Map<string, { count: number; resetAt: number }>();
 function checkRateLimit(userId: string): {
   limited: boolean;
@@ -59,10 +50,10 @@ async function verifyPin(
   return bcrypt.compare(pinValue, storedHash);
 }
 
-// ── Korapay transfer helper ───────────────────────────────────────────────────
+// ── Korapay transfer ──────────────────────────────────────────────────────────
 async function sendKorapayTransfer(opts: {
   secretKey: string;
-  amount: number; // in NGN
+  amount: number;
   accountNumber: string;
   bankCode: string;
   accountName: string;
@@ -85,33 +76,25 @@ async function sendKorapayTransfer(opts: {
             amount: opts.amount,
             currency: "NGN",
             narration: opts.narration,
-            bank_account: {
-              bank: opts.bankCode,
-              account: opts.accountNumber,
-            },
-            customer: {
-              name: opts.accountName,
-            },
+            bank_account: { bank: opts.bankCode, account: opts.accountNumber },
+            customer: { name: opts.accountName },
           },
-          // Sender name shown on recipient's bank alert
           merchant_bears_cost: true,
         }),
       },
     );
-
     const data = await res.json();
-
     if (data?.status === true && data?.data?.reference) {
       return { success: true, transferCode: data.data.reference };
     }
-
-    // Korapay error messages are user-readable
-    const errMsg =
-      data?.message ||
-      data?.data?.message ||
-      "Payment gateway rejected the transfer. Please verify your account details are correct.";
-    return { success: false, error: errMsg };
-  } catch (err: any) {
+    return {
+      success: false,
+      error:
+        data?.message ??
+        data?.data?.message ??
+        "Payment gateway rejected the transfer. Please verify your account details.",
+    };
+  } catch {
     return {
       success: false,
       error:
@@ -120,7 +103,6 @@ async function sendKorapayTransfer(opts: {
   }
 }
 
-// ── Fetch Korapay secret key from admin config ────────────────────────────────
 async function getKorapaySecret(supabase: any): Promise<string | null> {
   try {
     const { data } = await supabase
@@ -134,7 +116,6 @@ async function getKorapaySecret(supabase: any): Promise<string | null> {
   }
 }
 
-// ── Fetch NGN exchange rate (USD → NGN) from config or use fallback ───────────
 async function getUsdToNgnRate(supabase: any): Promise<number> {
   try {
     const { data } = await supabase
@@ -142,17 +123,15 @@ async function getUsdToNgnRate(supabase: any): Promise<number> {
       .select("usd_to_ngn_rate")
       .limit(1)
       .single();
-    if (data?.usd_to_ngn_rate && data.usd_to_ngn_rate > 100) {
+    if (data?.usd_to_ngn_rate && data.usd_to_ngn_rate > 100)
       return Number(data.usd_to_ngn_rate);
-    }
   } catch {}
-  // Safe fallback — update payment_config.usd_to_ngn_rate in admin to override
   return 1600;
 }
 
 export async function POST(req: NextRequest) {
   try {
-    // ── 1. Auth ──────────────────────────────────────────────────────────────
+    // ── 1. Auth ───────────────────────────────────────────────────────────────
     const cookieStore = await cookies();
     const supabase = createServerClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -185,33 +164,25 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ── 2. Business day & holiday check ──────────────────────────────────────
+    // ── 2. Business day & holiday check ───────────────────────────────────────
     if (!isBusinessDay()) {
       const holiday = getTodayHoliday();
       const nextDay = nextBusinessDayLabel();
-      let reason: string;
-
-      if (holiday) {
-        reason = `Today (${holiday.name}) is a public holiday — banks are closed and transfers cannot be processed. Please come back on ${nextDay}.`;
-      } else {
-        const day = new Date().getDay();
-        const dayName = day === 0 ? "Sunday" : "Saturday";
-        reason = `Withdrawals are only processed on business days (Monday–Friday). Today is ${dayName}. Please come back on ${nextDay}.`;
-      }
-
+      const day = new Date().getDay();
+      const dayName = day === 0 ? "Sunday" : "Saturday";
+      const reason = holiday
+        ? `Today (${holiday.name}) is a public holiday — banks are closed. Please come back on ${nextDay}.`
+        : `Withdrawals are only processed on business days (Monday–Friday). Today is ${dayName}. Please come back on ${nextDay}.`;
       return NextResponse.json({ error: reason }, { status: 403 });
     }
 
-    // ── 3. Parse body ─────────────────────────────────────────────────────────
+    // ── 3. Parse & validate body ──────────────────────────────────────────────
     let body: any;
     try {
       body = await req.json();
     } catch {
       return NextResponse.json(
-        {
-          error:
-            "Invalid request format. Please refresh the page and try again.",
-        },
+        { error: "Invalid request format. Please refresh and try again." },
         { status: 400 },
       );
     }
@@ -240,20 +211,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "You have made too many withdrawal attempts in the last hour. Please wait 60 minutes before trying again.",
+            "Too many withdrawal attempts in the last hour. Please wait 60 minutes before trying again.",
         },
         { status: 429 },
       );
     }
 
     // ── 5. PIN verification ───────────────────────────────────────────────────
-    const { data: userData } = await supabase
+    const { data: pinData } = await supabase
       .from("users")
       .select("pin_hash, pin_set")
       .eq("id", user.id)
       .single();
 
-    if (!userData?.pin_set || !userData?.pin_hash) {
+    if (!pinData?.pin_set || !pinData?.pin_hash) {
       return NextResponse.json(
         {
           error:
@@ -262,28 +233,21 @@ export async function POST(req: NextRequest) {
         { status: 403 },
       );
     }
-    const pinValid = userData.pin_hash
-      ? await verifyPin(pin, userData.pin_hash)
-      : false;
-    if (!pinValid) {
+    if (!(await verifyPin(pin, pinData.pin_hash))) {
       return NextResponse.json(
         {
-          error: `Incorrect security PIN. Please double-check your PIN and try again. (${remaining} attempt${remaining !== 1 ? "s" : ""} remaining this hour)`,
+          error: `Incorrect security PIN. (${remaining} attempt${remaining !== 1 ? "s" : ""} remaining this hour)`,
         },
         { status: 403 },
       );
     }
 
-    // ── 6. Load fresh user profile ────────────────────────────────────────────
+    // ── 6. Load profile ───────────────────────────────────────────────────────
+    // NOTE: single-string select literal — string concatenation breaks Supabase TypeScript inference
     const { data: profile, error: profileErr } = await supabase
       .from("users")
       .select(
-        "balance_available, kyc_verified, kyc_status, " +
-          "payout_registered, payout_account_number, payout_gateway, " +
-          "payout_account_name, payout_bank_name, payout_bank_code, " +
-          "payout_kyc_match, payout_currency, " +
-          "status, withdrawals_frozen, withdrawal_freeze_reason, " +
-          "withdrawal_freeze_until, total_withdrawn",
+        "balance_available, kyc_verified, kyc_status, payout_registered, payout_account_number, payout_gateway, payout_account_name, payout_bank_name, payout_bank_code, payout_kyc_match, payout_currency, status, withdrawals_frozen, withdrawal_freeze_reason, withdrawal_freeze_until, total_withdrawn",
       )
       .eq("id", user.id)
       .single();
@@ -292,101 +256,101 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "We could not load your account details. Please refresh the page and try again.",
+            "We could not load your account details. Please refresh and try again.",
         },
         { status: 404 },
       );
     }
 
-    // ── 7. Account status checks (exact messages) ─────────────────────────────
-    if (profile.status === "flagged" || profile.status === "suspended") {
+    // ── 7. Account status checks ──────────────────────────────────────────────
+    const p = profile as any; // typed above via single-string select
+
+    if (p.status === "flagged" || p.status === "suspended") {
       return NextResponse.json(
         {
           error:
-            "Your account has been flagged and withdrawals are suspended. Please contact support at support@omnitaskpro.com for assistance.",
+            "Your account has been flagged and withdrawals are suspended. Please contact support@omnitaskpro.com.",
         },
         { status: 403 },
       );
     }
 
-    if (profile.withdrawals_frozen) {
-      const reason = profile.withdrawal_freeze_reason
-        ? ` Reason: ${profile.withdrawal_freeze_reason}.`
+    if (p.withdrawals_frozen) {
+      const reason = p.withdrawal_freeze_reason
+        ? ` Reason: ${p.withdrawal_freeze_reason}.`
         : "";
       const until =
-        profile.withdrawal_freeze_until &&
-        new Date(profile.withdrawal_freeze_until) > new Date()
-          ? ` Your withdrawals are frozen until ${new Date(profile.withdrawal_freeze_until).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}.`
+        p.withdrawal_freeze_until &&
+        new Date(p.withdrawal_freeze_until) > new Date()
+          ? ` Frozen until ${new Date(p.withdrawal_freeze_until).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}.`
           : "";
       return NextResponse.json(
         {
-          error: `Your withdrawals are currently frozen.${reason}${until} Please contact support@omnitaskpro.com to resolve this.`,
+          error: `Your withdrawals are currently frozen.${reason}${until} Contact support@omnitaskpro.com.`,
         },
         { status: 403 },
       );
     }
 
     if (
-      profile.withdrawal_freeze_until &&
-      new Date(profile.withdrawal_freeze_until) > new Date()
+      p.withdrawal_freeze_until &&
+      new Date(p.withdrawal_freeze_until) > new Date()
     ) {
       return NextResponse.json(
         {
-          error: `Your earnings are locked until ${new Date(profile.withdrawal_freeze_until).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}. You can withdraw after that date.`,
+          error: `Your earnings are locked until ${new Date(p.withdrawal_freeze_until).toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}. You can withdraw after that date.`,
         },
         { status: 403 },
       );
     }
 
-    const kycOk =
-      profile.kyc_verified === true || profile.kyc_status === "approved";
+    const kycOk = p.kyc_verified === true || p.kyc_status === "approved";
     if (!kycOk) {
       return NextResponse.json(
         {
           error:
-            "Your identity (KYC) verification is not yet approved. Go to Dashboard → Verification to complete your KYC, then try again.",
+            "Your identity (KYC) verification is not yet approved. Go to Dashboard → Verification to complete it.",
           action: "complete_kyc",
         },
         { status: 403 },
       );
     }
 
-    if (!profile.payout_registered || !profile.payout_account_number) {
+    if (!p.payout_registered || !p.payout_account_number) {
       return NextResponse.json(
         {
           error:
-            "You have not set up a payout account yet. Go to Dashboard → Verification → Payout Setup to add your bank account or crypto wallet, then try again.",
+            "You have not set up a payout account. Go to Dashboard → Verification → Payout Setup to add your bank account.",
           action: "setup_payout",
         },
         { status: 403 },
       );
     }
 
-    if (!profile.payout_kyc_match) {
+    if (!p.payout_kyc_match) {
       return NextResponse.json(
         {
           error:
-            "Your registered payout account name does not match your verified identity (KYC name mismatch). Please update your payout account to match your KYC name exactly, or contact support.",
+            "Your payout account name does not match your verified identity. Please update your payout account to match your KYC name.",
           action: "fix_payout",
         },
         { status: 403 },
       );
     }
 
-    const availBal = profile.balance_available ?? 0;
+    const availBal = p.balance_available ?? 0;
     if (availBal < 10) {
       return NextResponse.json(
         {
-          error: `Your available balance ($${availBal.toFixed(2)}) is below the $10.00 minimum withdrawal. Please earn more before withdrawing.`,
+          error: `Your available balance ($${availBal.toFixed(2)}) is below the $10.00 minimum withdrawal.`,
         },
         { status: 400 },
       );
     }
-
     if (amount > availBal) {
       return NextResponse.json(
         {
-          error: `You requested $${amount.toFixed(2)} but your available balance is only $${availBal.toFixed(2)}. Please enter an amount within your balance.`,
+          error: `You requested $${amount.toFixed(2)} but your available balance is only $${availBal.toFixed(2)}.`,
         },
         { status: 400 },
       );
@@ -401,14 +365,14 @@ export async function POST(req: NextRequest) {
       .in("status", ["queued", "processing", "paid"])
       .gte("created_at", oneDayAgo);
 
-    const last24h = (recentWDs || []).reduce(
-      (s: number, w: any) => s + (w.amount || 0),
+    const last24h = (recentWDs ?? []).reduce(
+      (s: number, w: any) => s + (w.amount ?? 0),
       0,
     );
     if (last24h + amount > 50_000) {
       return NextResponse.json(
         {
-          error: `You have already withdrawn $${last24h.toFixed(2)} in the last 24 hours. Adding $${amount.toFixed(2)} would exceed the $50,000 daily limit. You may withdraw up to $${(50_000 - last24h).toFixed(2)} more today.`,
+          error: `Daily limit reached. You can withdraw up to $${(50_000 - last24h).toFixed(2)} more today.`,
         },
         { status: 403 },
       );
@@ -420,11 +384,11 @@ export async function POST(req: NextRequest) {
       .eq("user_id", user.id)
       .in("status", ["queued", "processing"]);
 
-    if ((pending || []).length >= 3) {
+    if ((pending ?? []).length >= 3) {
       return NextResponse.json(
         {
           error:
-            "You already have 3 pending withdrawals being processed. Please wait for those to complete before submitting a new one.",
+            "You already have 3 pending withdrawals. Please wait for those to complete before submitting a new one.",
         },
         { status: 403 },
       );
@@ -439,14 +403,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            deductErr?.message ||
-            "Balance could not be deducted — this usually means your balance changed. Please refresh and try again.",
+            deductErr?.message ??
+            "Balance could not be deducted — please refresh and try again.",
         },
         { status: 400 },
       );
     }
 
-    // ── 10. Calculate expected settlement date ────────────────────────────────
+    // ── 10. Settlement date ───────────────────────────────────────────────────
     const expectedDays =
       amount < 500 ? 1 : amount < 5_000 ? 2 : amount < 50_000 ? 5 : 7;
     const expectedDate = new Date(
@@ -454,37 +418,27 @@ export async function POST(req: NextRequest) {
     ).toISOString();
     const withdrawalRef = `WD-${user.id.slice(0, 8)}-${Date.now()}`;
 
-    // ── 11. Determine payout method & attempt auto-transfer ───────────────────
-    const gateway = (profile.payout_gateway || "").toLowerCase();
-    const isCrypto =
-      gateway === "crypto" ||
-      gateway === "crypto_wallet" ||
-      gateway === "usdt" ||
-      gateway === "btc";
-    const isBankTransfer =
-      gateway === "bank_transfer" ||
-      gateway === "korapay" ||
-      gateway === "bank";
+    // ── 11. Payout method & auto-transfer ─────────────────────────────────────
+    const gateway = (p.payout_gateway ?? "").toLowerCase();
+    const isCrypto = ["crypto", "crypto_wallet", "usdt", "btc"].includes(
+      gateway,
+    );
+    const isBankTransfer = ["bank_transfer", "korapay", "bank"].includes(
+      gateway,
+    );
 
     let autoProcessed = false;
     let transferRef: string | undefined;
-    let payoutError: string | undefined;
     let finalStatus = "queued";
 
     if (isBankTransfer) {
-      // Auto-process via Korapay
       const korapayKey = await getKorapaySecret(supabase);
-
-      if (!korapayKey) {
-        // Admin hasn't configured Korapay key — queue for manual processing
-        finalStatus = "queued";
-      } else {
+      if (korapayKey) {
         const rate = await getUsdToNgnRate(supabase);
         const ngnAmount = Math.round(amount * rate);
+        const bankCode = p.payout_bank_code ?? "";
 
-        const bankCode = profile.payout_bank_code || "";
         if (!bankCode) {
-          // Refund and tell user
           await supabase.rpc("atomic_refund_balance", {
             p_user_id: user.id,
             p_amount: amount,
@@ -492,7 +446,7 @@ export async function POST(req: NextRequest) {
           return NextResponse.json(
             {
               error:
-                "Your payout account is missing the bank code. Please go to Verification → Payout Setup and re-enter your bank details, then try again.",
+                "Your payout account is missing the bank code. Please update it in Verification → Payout Setup.",
               action: "fix_payout",
             },
             { status: 400 },
@@ -502,10 +456,9 @@ export async function POST(req: NextRequest) {
         const transfer = await sendKorapayTransfer({
           secretKey: korapayKey,
           amount: ngnAmount,
-          accountNumber: profile.payout_account_number,
+          accountNumber: p.payout_account_number,
           bankCode,
-          accountName: profile.payout_account_name || "Account Holder",
-          // This narration shows as sender on recipient's bank alert
+          accountName: p.payout_account_name ?? "Account Holder",
           narration: `OmniTaskPro Earnings — ${withdrawalRef}`,
           reference: withdrawalRef,
         });
@@ -515,48 +468,41 @@ export async function POST(req: NextRequest) {
           transferRef = transfer.transferCode;
           finalStatus = "processing";
         } else {
-          // Korapay gave a specific error — refund and tell user exactly what it was
           await supabase.rpc("atomic_refund_balance", {
             p_user_id: user.id,
             p_amount: amount,
           });
           return NextResponse.json(
             {
-              error: `Payment gateway error: ${transfer.error} — Your balance has been refunded. Please check your payout account details and try again.`,
+              error: `Payment gateway error: ${transfer.error} — Your balance has been refunded.`,
               action: "fix_payout",
             },
             { status: 422 },
           );
         }
       }
-    } else if (isCrypto) {
-      // Crypto: queue for manual admin processing — do NOT auto-send
-      finalStatus = "queued";
-    } else {
-      // Unknown gateway: queue
-      finalStatus = "queued";
+      // No korapayKey — falls through to finalStatus = "queued"
     }
 
     // ── 12. Insert withdrawal record ──────────────────────────────────────────
     const { error: wdErr } = await supabase.from("withdrawals").insert({
       user_id: user.id,
       amount,
-      wallet_address: profile.payout_account_number,
-      payout_method: profile.payout_gateway,
-      payout_account_name: profile.payout_account_name || null,
-      payout_bank_name: profile.payout_bank_name || null,
-      payout_currency: profile.payout_currency || "USD",
+      wallet_address: p.payout_account_number,
+      payout_method: p.payout_gateway,
+      payout_account_name: p.payout_account_name ?? null,
+      payout_bank_name: p.payout_bank_name ?? null,
+      payout_currency: p.payout_currency ?? "USD",
       status: finalStatus,
       tracking_status: finalStatus,
       expected_date: expectedDate,
-      gateway_reference: transferRef || null,
+      gateway_reference: transferRef ?? null,
       auto_processed: autoProcessed,
       reference: withdrawalRef,
       created_at: new Date().toISOString(),
     });
 
     if (wdErr) {
-      // Refund on insert failure
       await supabase.rpc("atomic_refund_balance", {
         p_user_id: user.id,
         p_amount: amount,
@@ -564,31 +510,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Your withdrawal could not be saved due to a database error. Your balance has been refunded. Please try again.",
+            "Your withdrawal could not be saved. Your balance has been refunded. Please try again.",
         },
         { status: 500 },
       );
     }
 
-    // ── 13. Ledger entry ──────────────────────────────────────────────────────
-    await supabase
+    // ── 13. Ledger entry (non-blocking) ───────────────────────────────────────
+    const { error: ledgerErr } = await supabase
       .from("transaction_ledger")
       .insert({
         user_id: user.id,
         type: "withdrawal",
         amount: -amount,
-        description: `Withdrawal via ${profile.payout_gateway} — Ref: ${withdrawalRef}${autoProcessed ? " (auto-processed)" : " (queued for admin)"}`,
+        description: `Withdrawal via ${p.payout_gateway} — Ref: ${withdrawalRef}${autoProcessed ? " (auto-processed)" : " (queued for admin)"}`,
         reference_id: withdrawalRef,
         created_at: new Date().toISOString(),
-      })
-      .then(() => {});
+      });
+    if (ledgerErr)
+      console.error("[withdraw] Ledger insert error:", ledgerErr.code);
 
     // ── 14. Response ──────────────────────────────────────────────────────────
     const message = autoProcessed
-      ? `Your withdrawal of $${amount.toFixed(2)} has been submitted and is being processed by our payment partner. Expected by ${new Date(expectedDate).toLocaleDateString("en-NG")}.`
+      ? `Your withdrawal of $${amount.toFixed(2)} is being processed. Expected by ${new Date(expectedDate).toLocaleDateString("en-NG")}.`
       : isCrypto
-        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our team will process it to your registered ${profile.payout_gateway?.toUpperCase()} address within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
-        : `Your withdrawal of $${amount.toFixed(2)} has been queued and will be processed by our team within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`;
+        ? `Your crypto withdrawal of $${amount.toFixed(2)} has been queued. Our team will process it within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`
+        : `Your withdrawal of $${amount.toFixed(2)} has been queued and will be processed within ${expectedDays} business day${expectedDays !== 1 ? "s" : ""}.`;
 
     return NextResponse.json({
       success: true,
@@ -600,11 +547,11 @@ export async function POST(req: NextRequest) {
       message,
     });
   } catch (err: any) {
-    console.error("[Withdrawal API] Unhandled error:", err);
+    console.error("[withdraw] Unhandled error:", err.code ?? "unknown");
     return NextResponse.json(
       {
         error:
-          "An unexpected error occurred on our end. Your balance has not been affected. Please refresh the page and try again, or contact support if this persists.",
+          "An unexpected error occurred. Your balance has not been affected. Please refresh and try again.",
       },
       { status: 500 },
     );
