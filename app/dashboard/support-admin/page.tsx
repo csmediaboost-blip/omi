@@ -101,10 +101,10 @@ export default function SupportAdminPage() {
           event: "INSERT",
           schema: "public",
           table: "support_messages",
-          filter: `ticket_id=eq.${selectedTicket.id}`,
+          filter: `ticket_id=eq.${selectedTicket?.id}`,
         },
-        (payload) => {
-          const msg = payload.new as Message;
+        (payload: { new: Message }) => {
+          const msg = payload.new;
           setMessages((prev) => {
             if (prev.find((m) => m.id === msg.id)) return prev;
             return [...prev, msg];
