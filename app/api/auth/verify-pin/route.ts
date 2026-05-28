@@ -1,4 +1,4 @@
-// app/api/verify-pin/route.ts
+// app/api/auth/verify-pin/route.ts
 import { createClient } from "@supabase/supabase-js";
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
@@ -37,7 +37,6 @@ export async function POST(request: NextRequest) {
 
     const token = authHeader.slice(7);
 
-    // Verify the caller's session
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -48,7 +47,6 @@ export async function POST(request: NextRequest) {
       data: { user },
       error: userError,
     } = await supabase.auth.getUser();
-
     if (userError || !user) {
       return NextResponse.json(
         { error: "Session expired. Please sign in again." },
@@ -71,7 +69,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "User not found." }, { status: 404 });
     }
 
-    // Hard stop — account is locked
     if (userData.pin_locked) {
       return NextResponse.json(
         {
@@ -82,7 +79,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Guard: PIN must be configured before it can be verified
     if (!userData.pin_set || !userData.pin_hash) {
       return NextResponse.json(
         { error: "No PIN set. Please set a PIN first." },
@@ -90,16 +86,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ─── PIN comparison ──────────────────────────────────────────────────────
-    // Supports both modern bcrypt hashes and legacy SHA-256 hashes.
-    // On a successful legacy match the hash is silently migrated to bcrypt.
+    // ─── PIN comparison ───────────────────────────────────────────────────────
     let isValidPin = false;
 
     if (userData.pin_hash.startsWith("$2")) {
       // Modern bcrypt hash
       isValidPin = await bcrypt.compare(pin, userData.pin_hash);
     } else {
-      // Legacy SHA-256 hash (pin + userId, hex-encoded)
+      // Legacy SHA-256 hash — compare then migrate to bcrypt on success
       const encoded = new TextEncoder().encode(pin + user.id);
       const hashBuffer = await crypto.subtle.digest("SHA-256", encoded);
       const sha256Hash = Array.from(new Uint8Array(hashBuffer))
@@ -108,19 +102,18 @@ export async function POST(request: NextRequest) {
 
       isValidPin = sha256Hash === userData.pin_hash;
 
-      // Migrate to bcrypt on first successful legacy verify
       if (isValidPin) {
         const migratedHash = await bcrypt.hash(pin, 12);
-        await serviceSupabase
+        const { error: migrateError } = await serviceSupabase
           .from("users")
           .update({ pin_hash: migratedHash })
-          .eq("id", user.id)
-          .catch((err) =>
-            console.error(
-              "[verify-pin] Hash migration failed:",
-              err.code ?? "unknown",
-            ),
+          .eq("id", user.id);
+        if (migrateError) {
+          console.error(
+            "[verify-pin] Hash migration failed:",
+            migrateError.code ?? "unknown",
           );
+        }
       }
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -129,16 +122,16 @@ export async function POST(request: NextRequest) {
       const newAttempts = (userData.pin_attempts ?? 0) + 1;
       const shouldLock = newAttempts >= MAX_ATTEMPTS;
 
-      await serviceSupabase
+      const { error: attemptsError } = await serviceSupabase
         .from("users")
         .update({ pin_attempts: newAttempts, pin_locked: shouldLock })
-        .eq("id", user.id)
-        .catch((err) =>
-          console.error(
-            "[verify-pin] Failed to update attempts:",
-            err.code ?? "unknown",
-          ),
+        .eq("id", user.id);
+      if (attemptsError) {
+        console.error(
+          "[verify-pin] Failed to update attempts:",
+          attemptsError.code ?? "unknown",
         );
+      }
 
       const remaining = MAX_ATTEMPTS - newAttempts;
       return NextResponse.json(
@@ -152,20 +145,20 @@ export async function POST(request: NextRequest) {
     }
 
     // Success — reset lockout counters
-    await serviceSupabase
+    const { error: resetError } = await serviceSupabase
       .from("users")
       .update({
         pin_attempts: 0,
         pin_locked: false,
         last_pin_verified_at: new Date().toISOString(),
       })
-      .eq("id", user.id)
-      .catch((err) =>
-        console.error(
-          "[verify-pin] Failed to reset attempts:",
-          err.code ?? "unknown",
-        ),
+      .eq("id", user.id);
+    if (resetError) {
+      console.error(
+        "[verify-pin] Failed to reset attempts:",
+        resetError.code ?? "unknown",
       );
+    }
 
     return NextResponse.json(
       { success: true, message: "PIN verified successfully." },

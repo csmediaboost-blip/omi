@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     `signin:${ip}`,
     5,
     15 * 60_000,
-  ); // ← await
+  );
 
   if (!allowed) {
     return Response.json(
