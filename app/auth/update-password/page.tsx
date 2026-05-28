@@ -1,6 +1,5 @@
 "use client";
 // app/auth/update-password/page.tsx
-// Fixed: handles both hash-based (implicit) and PKCE flow tokens
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -9,6 +8,7 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import type { AuthChangeEvent, Session } from "@supabase/supabase-js"; // ✅ ADD THIS
 import {
   Lock,
   Eye,
@@ -33,7 +33,6 @@ const UpdatePasswordSchema = z
   });
 
 type UpdatePasswordData = z.infer<typeof UpdatePasswordSchema>;
-
 type PageState = "loading" | "ready" | "error" | "done";
 
 export default function UpdatePasswordPage() {
@@ -54,13 +53,6 @@ export default function UpdatePasswordPage() {
   });
 
   useEffect(() => {
-    // Supabase Auth supports two flows:
-    // 1. Implicit flow  → token is in the URL hash (#access_token=...)
-    // 2. PKCE flow      → token is exchanged via a code in the query string (?code=...)
-    //
-    // onAuthStateChange handles BOTH — we just need to wait for it.
-    // We also guard with a 10s timeout so the spinner doesn't run forever.
-
     const timeout = setTimeout(() => {
       setErrorMsg(
         "Link verification timed out. Please request a new reset link.",
@@ -69,7 +61,8 @@ export default function UpdatePasswordPage() {
     }, 10_000);
 
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (event, session) => {
+      (event: AuthChangeEvent, session: Session | null) => {
+        // ✅ TYPED HERE
         console.log(
           "[update-password] auth event:",
           event,
@@ -81,7 +74,6 @@ export default function UpdatePasswordPage() {
           clearTimeout(timeout);
           setPageState("ready");
         } else if (event === "SIGNED_IN" && session) {
-          // PKCE flow fires SIGNED_IN instead of PASSWORD_RECOVERY
           clearTimeout(timeout);
           setPageState("ready");
         } else if (event === "INITIAL_SESSION" && session) {
@@ -91,7 +83,6 @@ export default function UpdatePasswordPage() {
       },
     );
 
-    // Also check for an already-active session (page reload after token exchange)
     supabase.auth.getSession().then(({ data, error }) => {
       console.log(
         "[update-password] getSession →",
@@ -130,18 +121,19 @@ export default function UpdatePasswordPage() {
       setPageState("done");
       toast.success("Password updated! Redirecting to sign in…");
 
-      // Sign out so the old recovery token is invalidated
       await supabase.auth.signOut();
       setTimeout(() => router.push("/auth/signin"), 2500);
-    } catch (error: any) {
+    } catch (error: unknown) {
+      // ✅ unknown is safer than any
+      const msg =
+        error instanceof Error ? error.message : "Failed to update password";
       console.error("[update-password] submit error:", error);
-      toast.error(error.message || "Failed to update password");
+      toast.error(msg);
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ── Password strength ────────────────────────────────────────────
   const password = watch("password", "");
   const checks = [
     password.length >= 8,
@@ -153,7 +145,6 @@ export default function UpdatePasswordPage() {
   const strengthLabel = ["", "Weak", "Fair", "Good", "Strong"][score];
   const strengthColor = ["", "#ef4444", "#f59e0b", "#10b981", "#10b981"][score];
 
-  // ── Render ───────────────────────────────────────────────────────
   return (
     <div
       className="min-h-screen flex items-center justify-center p-4"
@@ -193,7 +184,7 @@ export default function UpdatePasswordPage() {
           </p>
         </div>
 
-        {/* ── Loading ── */}
+        {/* Loading */}
         {pageState === "loading" && (
           <div
             className="rounded-2xl p-6"
@@ -209,7 +200,7 @@ export default function UpdatePasswordPage() {
           </div>
         )}
 
-        {/* ── Error ── */}
+        {/* Error */}
         {pageState === "error" && (
           <div
             className="rounded-2xl p-6 space-y-4"
@@ -239,7 +230,7 @@ export default function UpdatePasswordPage() {
           </div>
         )}
 
-        {/* ── Done ── */}
+        {/* Done */}
         {pageState === "done" && (
           <div
             className="rounded-2xl p-6"
@@ -262,7 +253,7 @@ export default function UpdatePasswordPage() {
           </div>
         )}
 
-        {/* ── Form ── */}
+        {/* Form */}
         {pageState === "ready" && (
           <div
             className="rounded-2xl p-6 space-y-5"
