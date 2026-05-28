@@ -59,7 +59,13 @@ type SplitState = {
 };
 
 const BANK_TRANSFER_COUNTRIES = new Set([
-  "KE", "GH", "CM", "CI", "EG", "TZ", "NG",
+  "KE",
+  "GH",
+  "CM",
+  "CI",
+  "EG",
+  "TZ",
+  "NG",
 ]);
 
 const CURRENCY_RATES: Record<string, { currency: string; rate: number }> = {
@@ -316,7 +322,10 @@ async function createMiningAllocation(params: {
       .gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString())
       .limit(1);
     if (existing && existing.length > 0) {
-      console.log("[checkout] Allocation already exists, skipping:", existing[0].id);
+      console.log(
+        "[checkout] Allocation already exists, skipping:",
+        existing[0].id,
+      );
       return existing[0].id;
     }
   }
@@ -607,7 +616,9 @@ function SplitPaymentModal({
             <div className="flex justify-between text-[10px] text-slate-600 mb-1.5">
               <span>₦{paidNGN.toLocaleString()} paid</span>
               <span>{progressPct.toFixed(0)}% complete</span>
-              <span>₦{(state.totalNGN - paidNGN).toLocaleString()} remaining</span>
+              <span>
+                ₦{(state.totalNGN - paidNGN).toLocaleString()} remaining
+              </span>
             </div>
             <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
               <div
@@ -652,7 +663,11 @@ function SplitPaymentModal({
                           : isCurrent
                             ? "rgba(245,158,11,0.2)"
                             : "rgba(100,116,139,0.15)",
-                        color: isPaid ? "#10b981" : isCurrent ? "#f59e0b" : "#475569",
+                        color: isPaid
+                          ? "#10b981"
+                          : isCurrent
+                            ? "#f59e0b"
+                            : "#475569",
                       }}
                     >
                       {isPaid ? <CheckCircle size={12} /> : i + 1}
@@ -679,7 +694,11 @@ function SplitPaymentModal({
                     <p
                       className="text-[10px]"
                       style={{
-                        color: isPaid ? "#059669" : isCurrent ? "#d97706" : "#334155",
+                        color: isPaid
+                          ? "#059669"
+                          : isCurrent
+                            ? "#d97706"
+                            : "#334155",
                       }}
                     >
                       {isPaid ? "✓ Paid" : isCurrent ? "→ Next" : "○ Pending"}
@@ -718,7 +737,8 @@ function SplitPaymentModal({
           >
             {loading ? (
               <>
-                <Loader2 size={16} className="animate-spin" /> Connecting to bank…
+                <Loader2 size={16} className="animate-spin" /> Connecting to
+                bank…
               </>
             ) : isFirst ? (
               <>
@@ -861,9 +881,14 @@ function Receipt({
                   ["VRAM", data.vram],
                   [
                     "Payment Model",
-                    isContract ? `Contract — ${contractDurLabel}` : "Pay-As-You-Go",
+                    isContract
+                      ? `Contract — ${contractDurLabel}`
+                      : "Pay-As-You-Go",
                   ],
-                  ["Mining Session", isContract ? contractDurLabel : periodLabel],
+                  [
+                    "Mining Session",
+                    isContract ? contractDurLabel : periodLabel,
+                  ],
                   [
                     "Amount Paid",
                     `$${data.amount.toFixed(2)}${data.discounted ? " (Crypto discount)" : ""}`,
@@ -987,11 +1012,17 @@ function OrderSummary({
                 ...(!isContract
                   ? [
                       ["Mining Duration", periodLabel],
-                      ["Earnings", "Live — visible in your portfolio after activation"],
+                      [
+                        "Earnings",
+                        "Live — visible in your portfolio after activation",
+                      ],
                     ]
                   : [
                       ["Contract Term", contractDurLabel],
-                      ["Earnings", "Accumulate daily — visible in your portfolio"],
+                      [
+                        "Earnings",
+                        "Accumulate daily — visible in your portfolio",
+                      ],
                     ]),
                 ["Instance Type", itype.replace(/_/g, " ")],
               ].map(([l, v]) => (
@@ -1082,7 +1113,9 @@ function OrderSummary({
                 <LicIcon size={22} style={{ color: licConfig.color }} />
               </div>
               <div>
-                <p className="text-white font-black text-sm">{licConfig.label}</p>
+                <p className="text-white font-black text-sm">
+                  {licConfig.label}
+                </p>
                 <p className="text-slate-500 text-xs mt-1">
                   Certified AI Operator Program
                 </p>
@@ -1248,14 +1281,16 @@ function CheckoutInner() {
     let cancelled = false;
 
     // ✅ FIX 1: explicitly type the destructured user parameter
-    supabase.auth.getUser().then(({ data: { user } }: { data: { user: User | null } }) => {
-      if (cancelled) return;
-      if (!user) {
-        router.push("/auth/signin");
-        return;
-      }
-      setUserId(user.id);
-    });
+    supabase.auth
+      .getUser()
+      .then(({ data: { user } }: { data: { user: User | null } }) => {
+        if (cancelled) return;
+        if (!user) {
+          router.push("/auth/signin");
+          return;
+        }
+        setUserId(user.id);
+      });
 
     supabase
       .from("payment_config")
@@ -1322,19 +1357,23 @@ function CheckoutInner() {
             setTransactionId(r);
 
             // ✅ FIX 2: explicitly type the destructured user parameter
-            supabase.auth.getUser().then(async ({ data: { user } }: { data: { user: User | null } }) => {
-              if (!user) return;
-              try {
-                const id = await createMiningAllocation({
-                  ...updated.planData,
-                  userId: user.id,
-                  transactionRef: updated.references.join(","),
-                });
-                if (id) setAllocationId(id);
-              } catch (e) {
-                console.error("[checkout] Split allocation failed:", e);
-              }
-            });
+            supabase.auth
+              .getUser()
+              .then(
+                async ({ data: { user } }: { data: { user: User | null } }) => {
+                  if (!user) return;
+                  try {
+                    const id = await createMiningAllocation({
+                      ...updated.planData,
+                      userId: user.id,
+                      transactionRef: updated.references.join(","),
+                    } as Parameters<typeof createMiningAllocation>[0]);
+                    if (id) setAllocationId(id);
+                  } catch (e) {
+                    console.error("[checkout] Split allocation failed:", e);
+                  }
+                },
+              );
 
             setStep("success");
           } else {
@@ -1370,20 +1409,25 @@ function CheckoutInner() {
       if (saved) {
         sessionStorage.removeItem("korapay_pending_checkout");
         // ✅ FIX 3: explicitly type the destructured user parameter
-        supabase.auth.getUser().then(async ({ data: { user } }: { data: { user: User | null } }) => {
-          if (!user) return;
-          try {
-            const checkoutData = JSON.parse(saved);
-            const id = await createMiningAllocation({
-              ...checkoutData,
-              userId: user.id,
-              transactionRef: r,
-            });
-            if (id) setAllocationId(id);
-          } catch (e) {
-            console.error("[checkout] Failed to create allocation after KoraPay:", e);
-          }
-        });
+        supabase.auth
+          .getUser()
+          .then(async ({ data: { user } }: { data: { user: User | null } }) => {
+            if (!user) return;
+            try {
+              const checkoutData = JSON.parse(saved);
+              const id = await createMiningAllocation({
+                ...checkoutData,
+                userId: user.id,
+                transactionRef: r,
+              } as Parameters<typeof createMiningAllocation>[0]);
+              if (id) setAllocationId(id);
+            } catch (e) {
+              console.error(
+                "[checkout] Failed to create allocation after KoraPay:",
+                e,
+              );
+            }
+          });
       }
     } else if (s === "declined") {
       sessionStorage.removeItem("korapay_pending_checkout");
@@ -1397,7 +1441,9 @@ function CheckoutInner() {
   useEffect(() => {
     if (!countryCode) return;
     setPayMethod(
-      BANK_TRANSFER_COUNTRIES.has(countryCode) ? "bank_transfer" : "crypto_wallet",
+      BANK_TRANSFER_COUNTRIES.has(countryCode)
+        ? "bank_transfer"
+        : "crypto_wallet",
     );
   }, [countryCode]);
 
@@ -1479,7 +1525,9 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_split_checkout");
-        setSplitError(data.error || "Payment initiation failed. Please try again.");
+        setSplitError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
         setSplitLoading(false);
         return;
       }
@@ -1487,7 +1535,9 @@ function CheckoutInner() {
       window.location.href = data.checkoutUrl;
     } catch (err: unknown) {
       sessionStorage.removeItem("korapay_split_checkout");
-      setSplitError("Connection error. Please check your internet and try again.");
+      setSplitError(
+        "Connection error. Please check your internet and try again.",
+      );
       setSplitLoading(false);
     }
   }
@@ -1622,7 +1672,9 @@ function CheckoutInner() {
       const data = await res.json();
       if (!res.ok || !data.checkoutUrl) {
         sessionStorage.removeItem("korapay_pending_checkout");
-        setKpError(data.error || "Payment initiation failed. Please try again.");
+        setKpError(
+          data.error || "Payment initiation failed. Please try again.",
+        );
         setKpLoading(false);
         return;
       }
@@ -1656,7 +1708,9 @@ function CheckoutInner() {
         return;
       }
       if (!cryptoWalletAddress) {
-        setCryptoError("Payment wallet not configured. Please contact support.");
+        setCryptoError(
+          "Payment wallet not configured. Please contact support.",
+        );
         return;
       }
     }
@@ -1713,7 +1767,10 @@ function CheckoutInner() {
         setStep("pending_crypto");
         isSubmittingRef.current = false;
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Failed to submit payment details.";
+        const msg =
+          err instanceof Error
+            ? err.message
+            : "Failed to submit payment details.";
         setErrorMsg(msg);
         setStep("failed");
         isSubmittingRef.current = false;
@@ -1786,7 +1843,8 @@ function CheckoutInner() {
       setStep("success");
       isSubmittingRef.current = false;
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Payment could not be processed.";
+      const msg =
+        err instanceof Error ? err.message : "Payment could not be processed.";
       setErrorMsg(msg);
       setStep("failed");
       isSubmittingRef.current = false;
@@ -1847,7 +1905,8 @@ function CheckoutInner() {
 
   const availablePayMethods = (() => {
     const methods = getPaymentMethodsForCountry(countryCode, price);
-    if (bankTransferBlocked) return methods.filter((m) => m !== "bank_transfer");
+    if (bankTransferBlocked)
+      return methods.filter((m) => m !== "bank_transfer");
     return methods;
   })();
 
@@ -1961,7 +2020,9 @@ function CheckoutInner() {
                     style={{ background: "rgba(0,0,0,0.3)" }}
                   >
                     <p className="text-slate-500 text-[10px] mb-0.5">{l}</p>
-                    <p className="text-white font-bold text-xs break-all">{v}</p>
+                    <p className="text-white font-bold text-xs break-all">
+                      {v}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -2132,7 +2193,10 @@ function CheckoutInner() {
                     border: "1px solid rgba(239,68,68,0.25)",
                   }}
                 >
-                  <AlertTriangle size={15} className="text-red-400 shrink-0 mt-0.5" />
+                  <AlertTriangle
+                    size={15}
+                    className="text-red-400 shrink-0 mt-0.5"
+                  />
                   <div>
                     <p className="text-red-300 text-sm font-black">
                       Bank Transfer Unavailable Today
@@ -2315,7 +2379,10 @@ function CheckoutInner() {
                   />
                   <div className="absolute right-3 top-1/2 -translate-y-1/2">
                     {checkingReferral && (
-                      <Loader2 size={14} className="text-slate-400 animate-spin" />
+                      <Loader2
+                        size={14}
+                        className="text-slate-400 animate-spin"
+                      />
                     )}
                     {!checkingReferral && referralValid === true && (
                       <CheckCircle size={14} className="text-emerald-400" />
@@ -2356,7 +2423,10 @@ function CheckoutInner() {
                           border: "1px solid rgba(245,158,11,0.25)",
                         }}
                       >
-                        <Landmark size={13} className="text-amber-400 mt-0.5 shrink-0" />
+                        <Landmark
+                          size={13}
+                          className="text-amber-400 mt-0.5 shrink-0"
+                        />
                         <div>
                           <p className="text-amber-300 text-xs font-black">
                             Installment Payment Required
@@ -2369,7 +2439,8 @@ function CheckoutInner() {
                             exceeds the ₦200,000 single-transaction limit. It
                             will be split into{" "}
                             <strong className="text-amber-200">
-                              {computeInstallments(localAmount).length} installments
+                              {computeInstallments(localAmount).length}{" "}
+                              installments
                             </strong>{" "}
                             for regulatory compliance.
                           </p>
@@ -2394,7 +2465,8 @@ function CheckoutInner() {
                         <p className="text-emerald-300 text-xs">
                           Approx. amount:{" "}
                           <strong className="text-emerald-200">
-                            {conversionInfo.currency} {localAmount.toLocaleString()}
+                            {conversionInfo.currency}{" "}
+                            {localAmount.toLocaleString()}
                           </strong>
                         </p>
                       </div>
@@ -2414,7 +2486,10 @@ function CheckoutInner() {
                     </div>
                     {kpError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
                         <p className="text-red-300 text-xs">{kpError}</p>
                       </div>
                     )}
@@ -2425,7 +2500,8 @@ function CheckoutInner() {
                     >
                       {kpLoading ? (
                         <>
-                          <Loader2 size={16} className="animate-spin" /> Connecting…
+                          <Loader2 size={16} className="animate-spin" />{" "}
+                          Connecting…
                         </>
                       ) : localAmount && localAmount > MAX_SINGLE_NGN_TXN ? (
                         <>
@@ -2454,12 +2530,16 @@ function CheckoutInner() {
                         Pay with USDT
                       </p>
                       <p className="text-slate-500 text-xs">
-                        Scan the QR or copy the address, then send the exact amount.
+                        Scan the QR or copy the address, then send the exact
+                        amount.
                       </p>
                     </div>
                     {!configLoaded ? (
                       <div className="flex justify-center py-4">
-                        <Loader2 size={24} className="text-violet-400 animate-spin" />
+                        <Loader2
+                          size={24}
+                          className="text-violet-400 animate-spin"
+                        />
                       </div>
                     ) : !cryptoWalletAddress ? (
                       <div
@@ -2585,7 +2665,10 @@ function CheckoutInner() {
 
                     {cryptoError && (
                       <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-                        <AlertCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                        <AlertCircle
+                          size={14}
+                          className="text-red-400 shrink-0 mt-0.5"
+                        />
                         <p className="text-red-300 text-xs">{cryptoError}</p>
                       </div>
                     )}
@@ -2665,7 +2748,9 @@ function CheckoutInner() {
                 <div
                   key={ps.id}
                   className={`flex items-center gap-3 text-sm ${
-                    idx <= processingStep ? "text-emerald-300" : "text-slate-600"
+                    idx <= processingStep
+                      ? "text-emerald-300"
+                      : "text-slate-600"
                   }`}
                 >
                   <div
@@ -2779,7 +2864,9 @@ function CheckoutInner() {
                 }
                 className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg transition-all"
               >
-                {purchaseType === "license" ? "Go to Tasks" : "View Portfolio →"}
+                {purchaseType === "license"
+                  ? "Go to Tasks"
+                  : "View Portfolio →"}
               </button>
             </div>
           </div>
