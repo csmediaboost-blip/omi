@@ -1017,7 +1017,6 @@ export default function FinancialsPage() {
           }
         },
       )
-      // FIX #6: users table UPDATE (e.g. balance_available credited after claim)
       .on(
         "postgres_changes",
         {
@@ -1026,8 +1025,8 @@ export default function FinancialsPage() {
           table: "users",
           filter: `id=eq.${userId}`,
         },
-        (payload) => {
-          const updated = payload.new as any;
+        (payload: { new: Record<string, unknown> }) => {
+          const updated = payload.new;
           if (updated?.balance_available !== undefined) {
             // Optimistically update balance shown — full reload will follow
             setProfile((prev) =>
