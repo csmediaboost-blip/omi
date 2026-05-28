@@ -2721,12 +2721,10 @@ export default function GPUPlansPage() {
           table: "node_allocations",
           filter: `user_id=eq.${userId}`,
         },
-        (payload) => {
+        (payload: { new: Allocation }) => {
           setAllocations((prev) =>
             prev.map((a) =>
-              a.id === (payload.new as Allocation).id
-                ? (payload.new as Allocation)
-                : a,
+              a.id === payload.new.id ? (payload.new as Allocation) : a,
             ),
           );
         },
