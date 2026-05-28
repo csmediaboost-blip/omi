@@ -1000,7 +1000,6 @@ export default function FinancialsPage() {
         },
         () => loadData(),
       )
-      // FIX #2: node_allocations UPDATE (mining_completed → true) must trigger reload
       .on(
         "postgres_changes",
         {
@@ -1009,8 +1008,8 @@ export default function FinancialsPage() {
           table: "node_allocations",
           filter: `user_id=eq.${userId}`,
         },
-        (payload) => {
-          const updated = payload.new as any;
+        (payload: { new: Record<string, unknown> }) => {
+          const updated = payload.new;
           // When a session completes, the cron/API sets mining_completed=true and
           // credits balance_available. Force a full reload to show the new balance.
           if (updated?.mining_completed === true) {
