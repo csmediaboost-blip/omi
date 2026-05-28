@@ -185,12 +185,6 @@ export default function RootLayout({
             font-weight: 400;
           }
           html.light { background-color: #f1f5f9; color: #1e293b; }
-          /* Prevent layout shift during font load */
-          @font-face {
-            font-family: var(--font-geist-sans);
-            src: url(${geistSans.src || ""}) format('woff2');
-            font-display: swap;
-          }
         `,
           }}
         />
