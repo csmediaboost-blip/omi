@@ -397,31 +397,28 @@ try {
     );
     if (!confirmed) return;
 
-    setSaving(true);
-    try {
-      const { data, error } = await withTimeout(
-        supabase.rpc("request_payout_change", { p_user_id: profile.id }),
-        15000,
-        "Request payout change",
-      );
+   setSaving(true);
+   try {
+     const { data, error } = await supabase.rpc("request_payout_change", {
+       p_user_id: profile.id,
+     });
+     if (!mountedRef.current) return;
 
-      if (!mountedRef.current) return;
-
-      if (error) {
-        showToast(error.message, false);
-      } else {
-        showToast(
-          data?.message ||
-            "Change request submitted. Complete new KYC to proceed.",
-        );
-        load();
-      }
-    } catch (err: any) {
-      if (mountedRef.current)
-        showToast(err.message || "Request failed — please retry", false);
-    } finally {
-      if (mountedRef.current) setSaving(false);
-    }
+     if (error) {
+       showToast(error.message, false);
+     } else {
+       showToast(
+         data?.message ||
+           "Change request submitted. Complete new KYC to proceed.",
+       );
+       load();
+     }
+   } catch (err: any) {
+     if (mountedRef.current)
+       showToast(err.message || "Request failed — please retry", false);
+   } finally {
+     if (mountedRef.current) setSaving(false);
+   }
   }
 
   // ── Loading state with retry button ───────────────────────────────────────
