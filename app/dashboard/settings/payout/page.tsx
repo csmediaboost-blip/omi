@@ -264,17 +264,13 @@ export default function PayoutSettingsPage() {
       }
 
       // FIX: DB select also wrapped in timeout
-      const { data, error } = await withTimeout(
-        supabase
-          .from("users")
-          .select(
-            "id,full_name,kyc_full_name,kyc_verified,payout_registered,payout_account_name,payout_account_number,payout_bank_name,payout_account_type,payout_kyc_match,payout_locked,payout_change_requested,kyc_status,country",
-          )
-          .eq("id", user.id)
-          .single(),
-        12000,
-        "Profile load",
-      );
+      const { data, error } = await supabase
+        .from("users")
+        .select(
+          "id,full_name,kyc_full_name,kyc_verified,payout_registered,payout_account_name,payout_account_number,payout_bank_name,payout_account_type,payout_kyc_match,payout_locked,payout_change_requested,kyc_status,country",
+        )
+        .eq("id", user.id)
+        .single();
 
       if (!mountedRef.current) return;
 
