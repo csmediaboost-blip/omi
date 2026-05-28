@@ -2320,29 +2320,81 @@ function PlanCard({
             </div>
           )}
 
-          {/* Node Details disclosure — keeps main UI clean */}
-          <button
-            onClick={() => setShowDetails(v => !v)}
-            className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all"
-            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", color: "#64748b" }}
-          >
-            <span className="flex items-center gap-1.5">
-              <Info size={11} /> Node Specs, Use Cases & Legal
-            </span>
-            <ChevronDown size={12} className={showDetails ? "rotate-180 transition-transform" : "transition-transform"} />
-          </button>
-          {showDetails && <div className="flex gap-1.5 flex-wrap">
-            {INFO_SECTIONS.map(({ id, lbl, Icon }) => (
-              <button
-                key={id}
-                onClick={() => setSection(section === id ? null : id)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all ${section === id ? "text-white border-slate-600 bg-slate-700/60" : "text-slate-500 border-slate-800/50 hover:border-slate-600 hover:text-slate-300"}`}
-              >
-                <Icon size={10} />
-                {lbl}
-              </button>
-            ))}
-          </div>
+          {showDetails && (
+  <div className="flex gap-1.5 flex-wrap">
+    {INFO_SECTIONS.map(({ id, lbl, Icon }) => (
+      <button
+        key={id}
+        onClick={() => setSection(section === id ? null : id)}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all ${section === id ? "text-white border-slate-600 bg-slate-700/60" : "text-slate-500 border-slate-800/50 hover:border-slate-600 hover:text-slate-300"}`}
+      >
+        <Icon size={10} />
+        {lbl}
+      </button>
+    ))}
+  </div>
+)}
+
+{showDetails && section && (
+  <div
+    className="rounded-xl overflow-hidden"
+    style={{ border: "1px solid rgba(255,255,255,0.07)" }}
+  >
+    <div className="p-4 space-y-3" style={{ background: "rgba(8,13,24,0.85)" }}>
+      {section === "specs" && (
+        <div className="grid grid-cols-2 gap-2">
+          {SPEC_ROWS.map(({ lbl, val, Icon }) => (
+            <div key={lbl} className="rounded-lg p-2.5 space-y-1" style={{ background: "rgba(15,23,42,0.9)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <div className="flex items-center gap-1">
+                <Icon size={10} className="text-slate-600" />
+                <span className="text-slate-600 text-[9px] uppercase tracking-wider">{lbl}</span>
+              </div>
+              <p className={`text-xs font-bold leading-tight ${cs.accent}`}>{val}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {section === "usecases" && (
+        <div className="space-y-2">
+          {plan.use_cases.map((uc) => (
+            <div key={uc} className="flex items-start gap-3 p-3 rounded-lg" style={{ background: "rgba(15,23,42,0.7)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ background: cs.bg, border: `1px solid ${cs.border}` }}>
+                <Zap size={11} className={cs.accent} />
+              </div>
+              <div>
+                <p className="text-white text-xs font-bold">{uc}</p>
+                <p className="text-slate-500 text-[11px] mt-0.5">{UC_DESC[uc] ?? "High-performance GPU compute allocation."}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {section === "risk" && (
+        <div className="space-y-3">
+          <Disclaimer />
+          <p className="text-slate-400 text-xs leading-relaxed">GPU compute demand is variable. Mining rewards fluctuate with network load and are not guaranteed.</p>
+        </div>
+      )}
+      {section === "legal" && (
+        <div className="space-y-2">
+          {[
+            ["Not a Security", "Node allocations are not classified as securities under applicable regulations."],
+            ["No Guaranteed Returns", "All projected figures are estimates. We make no guarantee of minimum returns."],
+            ["AML / KYC", "Withdrawals require identity verification. KYC must be approved before any payout is processed."],
+          ].map(([t, d]) => (
+            <div key={t} className="flex gap-2.5 p-3 rounded-lg" style={{ background: "rgba(15,23,42,0.7)", border: "1px solid rgba(255,255,255,0.05)" }}>
+              <BookOpen size={11} className="text-slate-500 mt-0.5 shrink-0" />
+              <div>
+                <p className="text-white text-xs font-bold">{t}</p>
+                <p className="text-slate-400 text-[11px] mt-0.5">{d}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </div>
+)}
 
           {section && (
             <div
