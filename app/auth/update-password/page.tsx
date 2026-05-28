@@ -8,7 +8,11 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import type { AuthChangeEvent, Session } from "@supabase/supabase-js"; // ✅ ADD THIS
+import type {
+  AuthChangeEvent,
+  Session,
+  AuthError,
+} from "@supabase/supabase-js";
 import {
   Lock,
   Eye,
@@ -62,7 +66,6 @@ export default function UpdatePasswordPage() {
 
     const { data: listener } = supabase.auth.onAuthStateChange(
       (event: AuthChangeEvent, session: Session | null) => {
-        // ✅ TYPED HERE
         console.log(
           "[update-password] auth event:",
           event,
@@ -83,17 +86,27 @@ export default function UpdatePasswordPage() {
       },
     );
 
-    supabase.auth.getSession().then(({ data, error }) => {
-      console.log(
-        "[update-password] getSession →",
-        data.session?.user?.email,
-        error,
+    supabase.auth
+      .getSession()
+      .then(
+        ({
+          data,
+          error,
+        }: {
+          data: { session: Session | null };
+          error: AuthError | null;
+        }) => {
+          console.log(
+            "[update-password] getSession →",
+            data.session?.user?.email,
+            error,
+          );
+          if (data.session) {
+            clearTimeout(timeout);
+            setPageState("ready");
+          }
+        },
       );
-      if (data.session) {
-        clearTimeout(timeout);
-        setPageState("ready");
-      }
-    });
 
     return () => {
       clearTimeout(timeout);
@@ -124,7 +137,6 @@ export default function UpdatePasswordPage() {
       await supabase.auth.signOut();
       setTimeout(() => router.push("/auth/signin"), 2500);
     } catch (error: unknown) {
-      // ✅ unknown is safer than any
       const msg =
         error instanceof Error ? error.message : "Failed to update password";
       console.error("[update-password] submit error:", error);
@@ -262,7 +274,7 @@ export default function UpdatePasswordPage() {
               border: "1px solid rgba(255,255,255,0.07)",
             }}
           >
-            {/* New password */}
+            {/* New Password */}
             <div className="space-y-1.5">
               <label className="text-slate-400 text-xs font-semibold uppercase tracking-wide">
                 New Password
@@ -315,7 +327,7 @@ export default function UpdatePasswordPage() {
               )}
             </div>
 
-            {/* Confirm password */}
+            {/* Confirm Password */}
             <div className="space-y-1.5">
               <label className="text-slate-400 text-xs font-semibold uppercase tracking-wide">
                 Confirm Password
