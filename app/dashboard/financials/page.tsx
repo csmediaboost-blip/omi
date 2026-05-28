@@ -1011,21 +1011,7 @@ export default function FinancialsPage() {
         (payload: { new: Record<string, unknown> }) => {
           const updated = payload.new;
           // When a session completes, the cron/API sets mining_completed=true and
-          // credits balance_available. Force a full reload to show the new balance.
-          if (updated?.mining_completed === true) {
-            setTimeout(() => loadData(), 600);
-          }
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "users",
-          filter: `id=eq.${userId}`,
-        },
-        (payload: { new: Record<string, unknown> }) => {
+          (payload: { new: Record<string, unknown> }) => {
           const updated = payload.new;
           if (updated?.balance_available !== undefined) {
             // Optimistically update balance shown — full reload will follow
@@ -1033,10 +1019,9 @@ export default function FinancialsPage() {
               prev
                 ? {
                     ...prev,
-                    balance_available: updated.balance_available,
-                    total_earned: updated.total_earned ?? prev.total_earned,
-                    total_withdrawn:
-                      updated.total_withdrawn ?? prev.total_withdrawn,
+                    balance_available: updated.balance_available as number,
+                    total_earned: (updated.total_earned as number) ?? prev.total_earned,
+                    total_withdrawn: (updated.total_withdrawn as number) ?? prev.total_withdrawn,
                   }
                 : prev,
             );
