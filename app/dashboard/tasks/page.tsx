@@ -2159,8 +2159,8 @@ export default function TasksPage() {
           table: "users",
           filter: `id=eq.${userId}`,
         },
-        (payload) => {
-          const b = (payload.new as any)?.balance_available;
+        (payload: { new: Record<string, unknown> }) => {
+          const b = payload.new?.balance_available as number | null;
           if (b != null) setBalance(b);
         },
       )
@@ -2169,7 +2169,6 @@ export default function TasksPage() {
       supabase.removeChannel(ch);
     };
   }, [userId]);
-
   function handleEarned(amt: number) {
     setTotalEarnedToday((t) => t + amt);
   }
