@@ -838,11 +838,12 @@ export default function NetworkPage() {
       .order("created_at", { ascending: false });
     setReferrals(refs || []);
 
-    const now = new Date();
-    const active = (refs || []).filter(
-      (r) => r.node_expiry_date && new Date(r.node_expiry_date) > now,
-    );
-    setActiveCount(active.length);
+   const now = new Date();
+   const active = (refs || []).filter(
+     (r: { node_expiry_date: string | null }) =>
+       r.node_expiry_date && new Date(r.node_expiry_date) > now,
+   );
+   setActiveCount(active.length);
 
     const monthStart = new Date(
       now.getFullYear(),
