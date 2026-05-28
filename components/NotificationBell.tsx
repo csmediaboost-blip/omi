@@ -98,6 +98,7 @@ export default function NotificationBell() {
       supabase.removeChannel(channel);
     };
   }, [userId]);
+
   async function loadNotifications(uid: string) {
     const { data } = await supabase
       .from("notifications")
@@ -106,7 +107,7 @@ export default function NotificationBell() {
       .order("created_at", { ascending: false })
       .limit(20);
     setNotifications(data || []);
-    setUnread((data || []).filter((n) => !n.read).length);
+    setUnread((data || []).filter((n: { read: boolean }) => !n.read).length);
   }
 
   async function markAllRead() {
