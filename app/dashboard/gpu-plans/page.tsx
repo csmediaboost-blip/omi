@@ -2422,9 +2422,7 @@ function PlanCard({
                             {lbl}
                           </span>
                         </div>
-                        <p
-                          className={`text-xs font-bold leading-tight ${cs.accent}`}
-                        >
+                        <p className={`text-xs font-bold leading-tight ${cs.accent}`}>
                           {val}
                         </p>
                       </div>
@@ -2446,7 +2444,7 @@ function PlanCard({
                           className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0"
                           style={{
                             background: cs.bg,
-                            border: `1px solid ${cs.border}`,
+                            border: "1px solid " + cs.border,
                           }}
                         >
                           <Zap size={11} className={cs.accent} />
@@ -2454,8 +2452,7 @@ function PlanCard({
                         <div>
                           <p className="text-white text-xs font-bold">{uc}</p>
                           <p className="text-slate-500 text-[11px] mt-0.5">
-                            {UC_DESC[uc] ??
-                              "High-performance GPU compute allocation."}
+                            {UC_DESC[uc] ?? "High-performance GPU compute allocation."}
                           </p>
                         </div>
                       </div>
@@ -2467,7 +2464,7 @@ function PlanCard({
                     <Disclaimer />
                     <p className="text-slate-400 text-xs leading-relaxed">
                       GPU compute demand is variable. Mining rewards fluctuate
-                      with network load and are not guaranteed.
+                      with network load.
                     </p>
                   </div>
                 )}
@@ -2479,7 +2476,7 @@ function PlanCard({
                         "Node allocations are not classified as securities under applicable regulations.",
                       ],
                       [
-                        "No Guaranteed Returns",
+                        "",
                         "All projected figures are estimates. We make no guarantee of minimum returns.",
                       ],
                       [
@@ -2495,15 +2492,10 @@ function PlanCard({
                           border: "1px solid rgba(255,255,255,0.05)",
                         }}
                       >
-                        <BookOpen
-                          size={11}
-                          className="text-slate-500 mt-0.5 shrink-0"
-                        />
+                        <BookOpen size={11} className="text-slate-500 mt-0.5 shrink-0" />
                         <div>
                           <p className="text-white text-xs font-bold">{t}</p>
-                          <p className="text-slate-400 text-[11px] mt-0.5">
-                            {d}
-                          </p>
+                          <p className="text-slate-400 text-[11px] mt-0.5">{d}</p>
                         </div>
                       </div>
                     ))}
@@ -2513,8 +2505,7 @@ function PlanCard({
             </div>
           )}
 
-          </div>}
-{/* CTA */}
+          {/* CTA */}
           <div
             className="pt-1 border-t"
             style={{ borderColor: "rgba(255,255,255,0.06)" }}
