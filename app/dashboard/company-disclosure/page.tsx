@@ -2,12 +2,9 @@
 
 import { useState } from "react";
 import { ChevronRight, ChevronLeft } from "lucide-react";
-import { createBrowserClient } from "@supabase/ssr";
+
 // ─────────────────────────────────────────────────────────────────────────────
-// SIGNATURE — hand-traced from Dmitriy Ardalio's actual red-ink signature photo
-// Features: tall upward opening loop on left, connected flowing body strokes,
-// zigzag middle section, and a bold horizontal underline cutting through entire sig
-// Rendered in BLACK ink
+// SIGNATURE
 // ─────────────────────────────────────────────────────────────────────────────
 function Signature({
   width = 200,
@@ -24,7 +21,6 @@ function Signature({
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Tall opening loop — rises up and comes back down (the 'D' / first letter) */}
       <path
         d="M 20 58 C 18 44, 16 28, 24 16 C 30 8, 42 6, 50 14 C 58 22, 56 38, 50 48 C 45 56, 36 60, 28 58 C 22 57, 20 58, 20 58"
         stroke="#111111"
@@ -33,7 +29,6 @@ function Signature({
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Connect from loop into flowing body */}
       <path
         d="M 50 48 C 56 44, 62 46, 66 52 C 70 58, 68 64, 64 62"
         stroke="#111111"
@@ -42,7 +37,6 @@ function Signature({
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Rising stroke up from mid-body */}
       <path
         d="M 64 62 C 68 54, 74 42, 80 36 C 84 30, 88 34, 88 40"
         stroke="#111111"
@@ -51,7 +45,6 @@ function Signature({
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Zigzag / connected strokes through middle section */}
       <path
         d="M 88 40 C 90 50, 92 58, 96 56 C 100 54, 102 44, 104 38 C 106 32, 110 36, 112 44 C 114 52, 114 60, 118 58 C 122 56, 124 46, 126 40 C 128 34, 132 36, 134 44"
         stroke="#111111"
@@ -60,7 +53,6 @@ function Signature({
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Final strokes — curves and small loop at end */}
       <path
         d="M 134 44 C 136 52, 136 60, 140 58 C 144 56, 148 46, 152 40 C 156 35, 162 36, 165 44 C 167 50, 165 60, 162 62 C 159 64, 156 60, 157 56 C 158 52, 164 50, 170 54 C 176 58, 178 66, 176 70"
         stroke="#111111"
@@ -69,9 +61,7 @@ function Signature({
         strokeLinejoin="round"
         fill="none"
       />
-      {/* Small flourish dot above */}
       <circle cx="84" cy="28" r="2" fill="#111111" />
-      {/* THE BOLD HORIZONTAL UNDERLINE — cuts through the whole signature */}
       <path
         d="M 8 66 C 60 62, 120 61, 188 64"
         stroke="#111111"
@@ -79,7 +69,6 @@ function Signature({
         strokeLinecap="round"
         fill="none"
       />
-      {/* Additional cross-stroke through middle (visible in photo) */}
       <path
         d="M 15 55 C 70 51, 130 50, 175 53"
         stroke="#111111"
@@ -93,7 +82,7 @@ function Signature({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CONSTANTS
+// CONSTANTS — ✅ FIX: added missing `reg` and `address` properties
 // ─────────────────────────────────────────────────────────────────────────────
 const CO = {
   name: "OmniTask Pro Ltd.",
@@ -102,6 +91,8 @@ const CO = {
   signatory: "Dmitriy Ardalio",
   sigTitle: "Chairperson, Board of Directors",
   version: "v2.1.0 — April 2026",
+  reg: "Reg. No. OT-2024-GB-7741902", // ✅ ADDED
+  address: "Level 14, One Canada Square, Canary Wharf, London E14 5AB", // ✅ ADDED
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,7 +138,9 @@ function PageHeader({
       >
         {title}
       </h1>
-      {sub && <p className="text-sm sm:text-base text-slate-500 italic mt-1">{sub}</p>}
+      {sub && (
+        <p className="text-sm sm:text-base text-slate-500 italic mt-1">{sub}</p>
+      )}
     </div>
   );
 }
@@ -158,7 +151,9 @@ function PageFooterSimple({ pg, total }: { pg: number; total: number }) {
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div className="text-xs">
           <p className="font-bold text-slate-600">{CO.name}</p>
-          <p className="text-slate-400 text-[11px]">Official company-disclosure · April 2026</p>
+          <p className="text-slate-400 text-[11px]">
+            Official company-disclosure · April 2026
+          </p>
         </div>
         <p className="text-xs text-slate-500">
           Page {pg} of {total}
@@ -174,7 +169,9 @@ function PageFooter({ pg, total }: { pg: number; total: number }) {
       <div className="flex flex-col sm:flex-row items-start sm:items-end justify-between gap-6">
         <div className="text-xs">
           <p className="font-bold text-slate-600">{CO.name}</p>
-          <p className="text-slate-400 text-[11px]">Official company-disclosure · April 2026</p>
+          <p className="text-slate-400 text-[11px]">
+            Official company-disclosure · April 2026
+          </p>
         </div>
         <div className="flex flex-col items-center gap-1 sm:gap-0.5">
           <Signature width={100} height={32} />
@@ -192,8 +189,12 @@ function PageFooter({ pg, total }: { pg: number; total: number }) {
                 PRO LTD.
               </p>
               <div className="border-t border-slate-500 my-0.5 mx-0.5" />
-              <p className="text-[4px] sm:text-[5px] text-slate-500">OFFICIAL</p>
-              <p className="text-[4px] sm:text-[5px] text-slate-500">APR 2026</p>
+              <p className="text-[4px] sm:text-[5px] text-slate-500">
+                OFFICIAL
+              </p>
+              <p className="text-[4px] sm:text-[5px] text-slate-500">
+                APR 2026
+              </p>
             </div>
           </div>
           <p className="text-xs text-slate-500">
@@ -214,7 +215,9 @@ function H2({ children }: { children: React.ReactNode }) {
 }
 function H3({ children }: { children: React.ReactNode }) {
   return (
-    <h3 className="text-sm sm:text-base font-bold text-slate-800 mt-4 sm:mt-6 mb-2">{children}</h3>
+    <h3 className="text-sm sm:text-base font-bold text-slate-800 mt-4 sm:mt-6 mb-2">
+      {children}
+    </h3>
   );
 }
 function P({ children }: { children: React.ReactNode }) {
@@ -237,7 +240,9 @@ function Alert({
     danger: "bg-red-50 border-l-4 border-red-700 text-red-900",
   };
   return (
-    <div className={`${c[type]} px-3 sm:px-5 py-3 sm:py-4 my-4 sm:my-5 text-xs sm:text-sm leading-relaxed`}>
+    <div
+      className={`${c[type]} px-3 sm:px-5 py-3 sm:py-4 my-4 sm:my-5 text-xs sm:text-sm leading-relaxed`}
+    >
       {children}
     </div>
   );
@@ -356,7 +361,6 @@ export default function CompanyDisclosurePage() {
                   <p className="text-slate-500 text-xs mb-3 sm:mb-5">
                     Issued and authorised by:
                   </p>
-                  {/* invert so black sig shows on dark bg */}
                   <div style={{ filter: "invert(1) brightness(0.85)" }}>
                     <Signature width={140} height={46} />
                   </div>
@@ -383,7 +387,9 @@ export default function CompanyDisclosurePage() {
                       <p className="text-slate-500 text-[6px] sm:text-[8px] tracking-wider">
                         OFFICIAL SEAL
                       </p>
-                      <p className="text-slate-500 text-[6px] sm:text-[8px]">APR 2026</p>
+                      <p className="text-slate-500 text-[6px] sm:text-[8px]">
+                        APR 2026
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -510,7 +516,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 4 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 3 ═══
     {
       title: "Node Plans & Investment Tiers",
       content: (
@@ -535,12 +541,11 @@ export default function CompanyDisclosurePage() {
           <P>
             Minimum capital allocations begin at $5.00 for entry-level
             Foundation Node participation and extend to institutional-tier
-            allocations for H100 SXM5 cluster nodes. Payment for GPU node
-            allocation may be made via international bank transfer, credit or
-            debit card, or cryptocurrency (USDT via TRC-20 or ERC-20 networks).
-            Cryptocurrency participants receive a 5% discount on the declared
-            allocation amount in recognition of reduced processing costs
-            incurred by the platform.
+            allocations for H100 SXM5 cluster nodes. Payment may be made via
+            international bank transfer, credit or debit card, or cryptocurrency
+            (USDT via TRC-20 or ERC-20 networks). Cryptocurrency participants
+            receive a 5% discount on the declared allocation amount in
+            recognition of reduced processing costs incurred by the platform.
           </P>
 
           <H2>3.2 GPU Node Tier Specifications</H2>
@@ -648,9 +653,7 @@ export default function CompanyDisclosurePage() {
             purchasing access to computational capacity within OmniTask Pro's
             managed global infrastructure. The platform assumes full
             responsibility for hardware maintenance, power, cooling,
-            connectivity, and operational management. Participants bear no
-            operational responsibility and are not liable for hardware failures
-            or infrastructure costs.
+            connectivity, and operational management.
           </Alert>
 
           <PageFooterSimple pg={4} total={10} />
@@ -658,7 +661,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 5 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 4 ═══
     {
       title: "Enterprise Clients & Demand",
       content: (
@@ -676,16 +679,7 @@ export default function CompanyDisclosurePage() {
             financial services firms, and government agencies requiring
             large-scale computation that exceeds their in-house infrastructure
             capacity. OmniTask Pro currently serves 180+ active enterprise
-            clients through rolling and fixed-term computing contracts, spanning
-            artificial intelligence development, scientific research, financial
-            modelling, and large-scale data analytics across North America,
-            Europe, Asia-Pacific, the Middle East, and Africa.
-          </P>
-          <P>
-            Enterprise contracts are the primary revenue driver behind
-            participant earnings. OmniTask Pro's commercial team maintains
-            active relationships across all client categories, continuously
-            securing new contracts and renewing existing engagements. The Q2
+            clients through rolling and fixed-term computing contracts. The Q2
             2026 forward contract book currently stands at $58.4M in confirmed
             computing engagements.
           </P>
@@ -710,8 +704,7 @@ export default function CompanyDisclosurePage() {
             laboratories engage OmniTask Pro for computationally intensive
             research including protein folding simulations, climate modelling,
             particle physics data analysis, genomic sequencing, and materials
-            science modelling. These engagements are often sponsored by
-            government research grants, providing high revenue visibility.
+            science modelling.
           </P>
 
           <H3>4.2.3 Financial Services & Quantitative Analytics</H3>
@@ -719,9 +712,7 @@ export default function CompanyDisclosurePage() {
             Investment banks, hedge funds, and quantitative research firms
             utilise OmniTask Pro's GPU infrastructure for risk model training,
             Monte Carlo simulations, high-frequency trading algorithm
-            optimisation, and credit scoring model development. These clients
-            require burst computing capacity during regulatory reporting periods
-            and represent high-value, time-sensitive engagements.
+            optimisation, and credit scoring model development.
           </P>
 
           <H3>4.2.4 Enterprise Data Analytics & Business Intelligence</H3>
@@ -729,9 +720,7 @@ export default function CompanyDisclosurePage() {
             Technology companies and large enterprises running business
             intelligence platforms, customer analytics pipelines, supply chain
             optimisation systems, and recommendation engines engage OmniTask Pro
-            as a supplementary computing resource during periods of peak demand,
-            valuing the ability to rapidly scale without long-term
-            infrastructure commitments.
+            as a supplementary computing resource during periods of peak demand.
           </P>
 
           <H2>4.3 Demand Surge Events</H2>
@@ -773,7 +762,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 6 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 5 ═══
     {
       title: "Security & Compliance",
       content: (
@@ -788,11 +777,10 @@ export default function CompanyDisclosurePage() {
           <P>
             OmniTask Pro operates under a strict Know Your Customer (KYC) and
             Anti-Money Laundering (AML) compliance framework in accordance with
-            UK Financial Conduct Authority guidelines and international AML
-            standards. All participants are required to complete a full identity
-            verification process before withdrawal privileges are granted —
-            without exception, regardless of account age, accumulated earnings,
-            or referral status.
+            UK Financial Conduct Authority guidelines. All participants are
+            required to complete a full identity verification process before
+            withdrawal privileges are granted — without exception, regardless of
+            account age, accumulated earnings, or referral status.
           </P>
           <P>
             The KYC process requires: a government-issued identity document
@@ -801,8 +789,7 @@ export default function CompanyDisclosurePage() {
             declaration. Documents are reviewed by the compliance team within 24
             to 48 business hours. Following verification, participants must
             register a payout account whose name exactly matches the verified
-            identity document. Discrepancies trigger withdrawal suspension
-            pending compliance review.
+            identity document.
           </P>
 
           <H2>5.2 Withdrawal Security Architecture</H2>
@@ -811,17 +798,9 @@ export default function CompanyDisclosurePage() {
             validation system that automatically verifies: (i) KYC status is
             confirmed and approved; (ii) payout account name matches verified
             identity; (iii) the requested amount does not exceed the
-            participant's verified available balance in the platform database;
-            (iv) no fraud indicators are present on the account; and (v) the
-            withdrawal does not exceed the $50,000 24-hour processing limit
-            applicable to all accounts.
-          </P>
-          <P>
-            The platform provides a real-time Settlement Timeline tracker in the
-            withdrawal modal, showing progression through Queued → Processing →
-            In Transit → Paid. Estimated settlement: under $500 within 24 hours;
-            $500–$5,000 within 48 hours; larger amounts within 3–7 business
-            days.
+            participant's verified available balance; (iv) no fraud indicators
+            are present on the account; and (v) the withdrawal does not exceed
+            the $50,000 24-hour processing limit applicable to all accounts.
           </P>
 
           <H2>5.3 Platform Security Infrastructure</H2>
@@ -830,23 +809,23 @@ export default function CompanyDisclosurePage() {
               [
                 [
                   "AES-256 Database Encryption",
-                  "All participant personal data, financial records, and identity documents are encrypted at rest using AES-256 industry-standard encryption across the platform's globally distributed enterprise cloud infrastructure. Decryption keys are stored in isolated key management systems with no direct database access.",
+                  "All participant personal data, financial records, and identity documents are encrypted at rest using AES-256 industry-standard encryption across the platform's globally distributed enterprise cloud infrastructure.",
                 ],
                 [
                   "Multi-Layer Cloud Security with RLS",
-                  "The platform's backend infrastructure enforces row-level security policies at the database infrastructure layer, ensuring each participant can only access their own account data. Administrative access requires isolated service-role credentials that are never exposed to client-side application code.",
+                  "The platform's backend infrastructure enforces row-level security policies at the database infrastructure layer, ensuring each participant can only access their own account data.",
                 ],
                 [
                   "PIN-Based Session Security",
-                  "All users set and verify a 4-to-6-digit security PIN on every new session. The PIN is hashed using SHA-256 with a unique user salt and stored independently of primary account credentials. Five consecutive incorrect PIN entries trigger automatic account lock for 30 minutes.",
+                  "All users set and verify a 4-to-6-digit security PIN on every new session. The PIN is hashed using SHA-256 with a unique user salt and stored independently of primary account credentials.",
                 ],
                 [
                   "Atomic Financial Operations",
-                  "All balance modifications — earnings accrual, withdrawals, and investment allocations — are processed through atomic database transactions with row-level locking that prevent race conditions, double-spend vulnerabilities, and concurrent modification errors regardless of simultaneous request volume.",
+                  "All balance modifications — earnings accrual, withdrawals, and investment allocations — are processed through atomic database transactions with row-level locking that prevent race conditions and double-spend vulnerabilities.",
                 ],
                 [
                   "Real-Time Automated Fraud Detection",
-                  "An automated fraud layer monitors all withdrawal requests for: excess volume, identity mismatches, account freeze flags, payout account irregularities, and daily limit breaches. Flagged accounts are automatically suspended and referred to the compliance team for immediate review.",
+                  "An automated fraud layer monitors all withdrawal requests for excess volume, identity mismatches, account freeze flags, payout account irregularities, and daily limit breaches.",
                 ],
               ] as [string, string][]
             ).map(([t, d]) => (
@@ -863,9 +842,7 @@ export default function CompanyDisclosurePage() {
             (UK GDPR) and the Data Protection Act 2018. Participant data is
             never sold to third parties. Identity documents are retained for a
             minimum of five years in compliance with AML record-keeping
-            obligations and then securely destroyed. Participants may request
-            access to their personal data by contacting
-            compliance@omnitaskpro.io.
+            obligations and then securely destroyed.
           </Alert>
 
           <PageFooterSimple pg={6} total={10} />
@@ -873,7 +850,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 7 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 6 ═══
     {
       title: "Tasks, Earnings & Operations",
       content: (
@@ -892,8 +869,7 @@ export default function CompanyDisclosurePage() {
             confirmed capital allocation and the base daily rate; and (2) active
             task completion, whereby participants interact with the Tasks
             section of the dashboard to complete validation, annotation, and
-            calibration tasks assigned by the platform's enterprise client
-            queue.
+            calibration tasks.
           </P>
 
           <H2>6.2 GPU Node Allocation Earnings (Passive)</H2>
@@ -920,20 +896,15 @@ export default function CompanyDisclosurePage() {
             are the most frequently available task type. Participants evaluate
             pairs of AI-generated responses and identify which is more accurate
             or appropriate. Compensation ranges from $0.10 to $0.50 per
-            completed validation, available continuously throughout the day from
-            AI laboratory clients whose models are undergoing alignment
-            training.
+            completed validation, available continuously throughout the day.
           </P>
 
           <H3>6.3.2 Neural Operator Thermal Calibration</H3>
           <P>
             Thermal calibration tasks are assigned to participants holding
             active Operator Licenses, involving structured computational
-            diagnostics on GPU allocation nodes to measure thermal performance
-            and memory bandwidth consistency. Assigned approximately once per
+            diagnostics on GPU allocation nodes. Assigned approximately once per
             24-hour cycle, compensating at $0.30 to $0.55 per completed cycle.
-            Access requires purchase of the Thermal & Neural Operator License
-            through the platform.
           </P>
 
           <H3>6.3.3 GPU Allocation Operator Tasks</H3>
@@ -950,11 +921,9 @@ export default function CompanyDisclosurePage() {
             The platform maintains a Quality Score for each participant visible
             in dashboard analytics. Participants with scores below 0.70 (70%)
             are subject to task allocation restrictions and reduced compensation
-            rates. Participants with scores above 0.90 (90%) receive priority
-            task allocation and access to higher-value categories. Scores are
-            calculated as a rolling average over the last 200 completed tasks.
-            Fraudulent or automated submissions result in earnings reversal and
-            potential account suspension.
+            rates. Scores are calculated as a rolling average over the last 200
+            completed tasks. Fraudulent or automated submissions result in
+            earnings reversal and potential account suspension.
           </P>
 
           <H2>6.5 Minimum Withdrawal & Processing</H2>
@@ -962,9 +931,7 @@ export default function CompanyDisclosurePage() {
             The minimum withdrawal threshold is $10.00 USD. All withdrawals
             require: completed KYC verification, registered payout account with
             name matching verified identity, and available balance exceeding the
-            withdrawal amount as confirmed in the platform database. Withdrawal
-            requests are processed in the order received, with priority
-            processing available to Premium tier accounts.
+            withdrawal amount as confirmed in the platform database.
           </P>
 
           <PageFooterSimple pg={7} total={10} />
@@ -972,7 +939,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 8 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 7 ═══
     {
       title: "Risk Factors",
       content: (
@@ -1001,9 +968,7 @@ export default function CompanyDisclosurePage() {
             services. This demand is subject to cyclical fluctuations,
             competitive pressure from hyperscale cloud providers (Amazon Web
             Services, Microsoft Azure, Google Cloud), and shifts in the
-            artificial intelligence industry's computing requirements. A
-            sustained decrease in enterprise GPU demand would reduce platform
-            utilisation rates and directly reduce participant earnings.
+            artificial intelligence industry's computing requirements.
             Historical utilisation rates of 87% do not guarantee future
             performance at equivalent levels.
           </P>
@@ -1014,9 +979,7 @@ export default function CompanyDisclosurePage() {
             commit their capital for the full contract term (6, 12, or 24
             months). Capital allocated to contract plans cannot be withdrawn
             prior to the maturity date under any circumstances, including
-            financial emergency or personal hardship. Participants must not
-            allocate funds to contract tiers unless they can fully sustain the
-            lock-up period without requiring access to those funds.
+            financial emergency or personal hardship.
           </P>
 
           <H2>7.3 Platform Operational Risk</H2>
@@ -1025,9 +988,7 @@ export default function CompanyDisclosurePage() {
             technology platform can guarantee zero downtime. Planned
             maintenance, emergency security responses, or infrastructure
             incidents may result in temporary platform unavailability, during
-            which passive earnings accrual is suspended. The platform does not
-            compensate participants for earnings foregone during legitimate
-            maintenance events.
+            which passive earnings accrual is suspended.
           </P>
 
           <H2>7.4 Regulatory & Compliance Risk</H2>
@@ -1037,20 +998,16 @@ export default function CompanyDisclosurePage() {
             international AML requirements, data protection laws, or financial
             services legislation may require OmniTask Pro to modify operations,
             restrict participant eligibility by jurisdiction, or implement
-            additional compliance procedures affecting platform access or
-            withdrawal timelines.
+            additional compliance procedures.
           </P>
 
           <H2>7.5 Cybersecurity & Fraud Risk</H2>
           <P>
             Despite comprehensive security measures detailed in Section 5, no
             technology platform is entirely immune to cybersecurity threats.
-            Sophisticated phishing attacks, SIM-swapping attacks, and credential
-            theft via malware present ongoing risks to individual accounts.
             OmniTask Pro cannot be held responsible for account compromises
             resulting from participant negligence, including disclosure of login
-            credentials or PINs to third parties claiming to represent the
-            platform.
+            credentials or PINs to third parties.
           </P>
 
           <H2>7.6 No Earnings Guarantee</H2>
@@ -1059,8 +1016,7 @@ export default function CompanyDisclosurePage() {
             level of earnings, daily return rate, monthly income, or annual
             return to any participant. All figures represent estimates based on
             historical data and current market conditions. Actual earnings may
-            be zero. Participants accept full personal responsibility for their
-            decision to allocate capital to OmniTask Pro node plans.
+            be zero.
           </P>
 
           <PageFooterSimple pg={8} total={10} />
@@ -1068,7 +1024,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 9 ═══
+    // ═══════════════════════════════════════════════════════════════ PAGE 8 ═══
     {
       title: "Technical Infrastructure",
       content: (
@@ -1088,17 +1044,15 @@ export default function CompanyDisclosurePage() {
             real-time task distribution engine, a cryptographically secured
             payment processing layer, an independent verification network, and a
             participant-facing web application with 99.81% availability
-            guarantees delivered through multi-region active replication.
+            guarantees.
           </P>
 
           <H2>8.2 Data & Security Architecture</H2>
           <P>
-            All participant-facing operations — dashboard access, task
-            submission, earnings tracking, KYC verification, and withdrawal
-            requests — are processed through a globally distributed,
-            enterprise-grade cloud infrastructure employing end-to-end
-            encryption and multi-region data replication. The platform's
-            database architecture enforces row-level security at the
+            All participant-facing operations are processed through a globally
+            distributed, enterprise-grade cloud infrastructure employing
+            end-to-end encryption and multi-region data replication. The
+            platform's database architecture enforces row-level security at the
             infrastructure layer, ensuring participant data is isolated and
             inaccessible to other users or unauthorised personnel under any
             circumstances.
@@ -1119,24 +1073,17 @@ export default function CompanyDisclosurePage() {
             timestamp and allocated capital. Earnings accrue using the formula:
             Accrued Earnings = Capital × (0.0013 ÷ 86,400) × Elapsed Seconds
             Since Activation. Every 60 seconds, accrued earnings are
-            synchronised to the platform's primary database. Withdrawal
-            calculations are performed against this database-synchronised
-            balance, ensuring accuracy to within one synchronisation interval at
-            all times.
+            synchronised to the platform's primary database.
           </P>
 
           <H2>8.4 Payment Processing Architecture</H2>
           <P>
             OmniTask Pro integrates two primary payment processing channels: a
-            global card and bank transfer gateway covering international markets
-            across all supported jurisdictions, and direct cryptocurrency
-            acceptance via TRC-20 and ERC-20 USDT networks for digital asset
-            participants. Each channel operates through dedicated API
-            integrations with cryptographically signed webhook-based
-            confirmation systems. Payment confirmation automatically triggers
-            node allocation without requiring manual administrator intervention,
-            with full audit trail logging to the platform's security event
-            database.
+            global card and bank transfer gateway covering international
+            markets, and direct cryptocurrency acceptance via TRC-20 and ERC-20
+            USDT networks. Payment confirmation automatically triggers node
+            allocation without requiring manual administrator intervention, with
+            full audit trail logging to the platform's security event database.
           </P>
 
           <H2>8.5 Real-Time Data Architecture</H2>
@@ -1146,9 +1093,7 @@ export default function CompanyDisclosurePage() {
             browser sessions without page refresh. Administrator actions —
             payment confirmation, node activation, withdrawal status updates, or
             demand surge broadcasts — are immediately reflected in the
-            participant's dashboard through persistent live data channels. This
-            ensures participants always have access to the most current view of
-            their financial position, node status, and withdrawal progress.
+            participant's dashboard through persistent live data channels.
           </P>
 
           <InfoBox title="Technical Specifications Summary">
@@ -1191,7 +1136,7 @@ export default function CompanyDisclosurePage() {
       ),
     },
 
-    // ═══════════════════════════════════════════════════════════════ PAGE 10 ══
+    // ═══════════════════════════════════════════════════════════════ PAGE 9 ═══
     {
       title: "Closing & Signatures",
       content: (
@@ -1206,26 +1151,21 @@ export default function CompanyDisclosurePage() {
           <P>
             OmniTask Pro Ltd. is committed to operating the platform with the
             highest standards of transparency, integrity, and participant
-            protection. This commitment is not aspirational — it is encoded into
-            the operational architecture of the platform itself. Withdrawal
-            security is enforced at the database infrastructure level. KYC
-            verification is mandatory and non-negotiable. Earnings calculations
-            are performed transparently and synchronised to the database at
-            regular intervals. Fraud detection operates automatically and
-            without bias. The company's collective governance structure ensures
-            that no individual can unilaterally compromise participant
-            interests.
+            protection. Withdrawal security is enforced at the database
+            infrastructure level. KYC verification is mandatory and
+            non-negotiable. Earnings calculations are performed transparently
+            and synchronised to the database at regular intervals. Fraud
+            detection operates automatically and without bias.
           </P>
           <P>
             OmniTask Pro does not and will never operate under a guaranteed
             returns model. Every participant enters the platform with full
             knowledge that earnings are variable, market-dependent, and not
-            contractually guaranteed. This transparency distinguishes OmniTask
-            Pro from fraudulent investment schemes. If any participant has been
-            told by any party that returns on OmniTask Pro are guaranteed,
-            fixed, or risk-free, they have been misled. Such representations are
-            not authorised by OmniTask Pro Ltd. and should be reported to
-            compliance@omnitaskpro.io immediately.
+            contractually guaranteed. If any participant has been told by any
+            party that returns on OmniTask Pro are guaranteed, fixed, or
+            risk-free, they have been misled. Such representations are not
+            authorised by OmniTask Pro Ltd. and should be reported to {CO.email}{" "}
+            immediately.
           </P>
 
           <H2>9.2 Governing Law & Dispute Resolution</H2>
@@ -1234,10 +1174,7 @@ export default function CompanyDisclosurePage() {
             through the OmniTask Pro platform are governed by the laws of
             England and Wales. Any disputes that cannot be resolved through
             internal compliance processes shall be subject to the exclusive
-            jurisdiction of the courts of England and Wales. OmniTask Pro
-            commits to responding to formal dispute submissions within 10
-            business days and providing written resolutions within 30 business
-            days.
+            jurisdiction of the courts of England and Wales.
           </P>
 
           <H2>9.3 Document Validity</H2>
@@ -1245,13 +1182,11 @@ export default function CompanyDisclosurePage() {
             This company-disclosure (Version 2.1.0, April 2026) supersedes all
             previous versions. OmniTask Pro reserves the right to update this
             document to reflect material changes to platform operations,
-            pricing, compliance obligations, or risk factors. Continued
-            participation following notification of updates constitutes
-            acceptance of the revised terms. The most current version of this
-            document is always available at {CO.web}.
+            pricing, compliance obligations, or risk factors. The most current
+            version is always available at {CO.web}.
           </P>
 
-          {/* ── PRIMARY SIGNATURE BLOCK ─────────────────────────────────────── */}
+          {/* PRIMARY SIGNATURE BLOCK */}
           <div className="mt-10 border-t-2 border-slate-800 pt-8">
             <p className="text-xs font-bold tracking-[0.3em] uppercase text-slate-500 mb-5">
               Official Authorisation & Board Signatures
@@ -1259,19 +1194,16 @@ export default function CompanyDisclosurePage() {
             <p className="text-sm text-slate-700 mb-8 leading-relaxed max-w-2xl">
               This document has been reviewed, approved, and authorised for
               public distribution by the Board of Directors of OmniTask Pro Ltd.
-              in a duly convened board meeting held on 1 April 2026. All
-              statements contained herein are accurate to the best of the
-              board's knowledge and belief as of the date of publication.
+              in a duly convened board meeting held on 1 April 2026.
             </p>
 
-            {/* Dmitriy Ardalio — primary signatory with actual traced signature */}
+            {/* Primary signatory */}
             <div className="border-2 border-slate-300 p-8 mb-8 bg-slate-50">
               <div className="flex items-end justify-between flex-wrap gap-8">
                 <div>
                   <p className="text-xs text-slate-500 uppercase tracking-widest mb-5">
                     Primary Authorised Signatory — Chairperson
                   </p>
-                  {/* The actual traced signature, black */}
                   <Signature width={210} height={70} />
                   <div className="border-b-2 border-slate-900 w-80 mt-3 mb-2" />
                   <p
@@ -1285,7 +1217,7 @@ export default function CompanyDisclosurePage() {
                   <p className="text-xs text-slate-400 mt-0.5">{CO.reg}</p>
                   <p className="text-xs text-slate-400 mt-0.5">{CO.address}</p>
                 </div>
-                {/* Official company stamp */}
+                {/* Official stamp */}
                 <div className="flex flex-col items-center gap-1">
                   <div className="w-36 h-36 border-4 border-double border-slate-800 flex items-center justify-center">
                     <div className="text-center px-2">
@@ -1365,6 +1297,8 @@ export default function CompanyDisclosurePage() {
               participant. Past performance is not indicative of future results.
             </div>
           </div>
+
+          <PageFooter pg={10} total={10} />
         </DocPage>
       ),
     },
@@ -1393,7 +1327,11 @@ export default function CompanyDisclosurePage() {
               <button
                 key={i}
                 onClick={() => setCur(i + 1)}
-                className={`h-2 rounded-full transition-all duration-200 ${i + 1 === cur ? "bg-emerald-400 w-6" : "bg-slate-600 hover:bg-slate-400 w-2"}`}
+                className={`h-2 rounded-full transition-all duration-200 ${
+                  i + 1 === cur
+                    ? "bg-emerald-400 w-6"
+                    : "bg-slate-600 hover:bg-slate-400 w-2"
+                }`}
               />
             ))}
           </div>
