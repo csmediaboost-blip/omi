@@ -66,12 +66,14 @@ export default function NotificationBell() {
   const [userId, setUserId] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        setUserId(user.id);
-        loadNotifications(user.id);
-      }
-    });
+    supabase.auth
+      .getUser()
+      .then(({ data }: { data: { user: { id: string } | null } }) => {
+        if (data.user) {
+          setUserId(data.user.id);
+          loadNotifications(data.user.id);
+        }
+      });
   }, []);
 
   // Realtime subscription
