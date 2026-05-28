@@ -76,7 +76,6 @@ export default function NotificationBell() {
       });
   }, []);
 
-  // Realtime subscription
   useEffect(() => {
     if (!userId) return;
     const channel = supabase
@@ -89,10 +88,8 @@ export default function NotificationBell() {
           table: "notifications",
           filter: `user_id=eq.${userId}`,
         },
-        (payload) => {
-          setNotifications((prev) =>
-            [payload.new as Notification, ...prev].slice(0, 20),
-          );
+        (payload: { new: Notification }) => {
+          setNotifications((prev) => [payload.new, ...prev].slice(0, 20));
           setUnread((prev) => prev + 1);
         },
       )
@@ -101,7 +98,6 @@ export default function NotificationBell() {
       supabase.removeChannel(channel);
     };
   }, [userId]);
-
   async function loadNotifications(uid: string) {
     const { data } = await supabase
       .from("notifications")
