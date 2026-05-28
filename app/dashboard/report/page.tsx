@@ -455,9 +455,5 @@ function ReportsContent() {
 }
 
 export default function ReportsPage() {
-  return (
-    <KYCGate>
-      <ReportsContent />
-    </KYCGate>
-  );
+  return <ReportsContent />;
 }
