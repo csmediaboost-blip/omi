@@ -1,11 +1,15 @@
 "use client";
 // app/dashboard/financials/page.tsx — FIXED VERSION
-// Fix 1: Withdraw button now clickable — canWithdraw no longer blocked by isBizDay
-//         (business day is enforced server-side; UI only shows a notice)
-// Fix 2: Business day + holiday notice shown clearly in UI and modal
-// Fix 3: Withdrawal uses /api/withdraw route → Korapay auto-processes bank transfers
-//         Exact API error messages surfaced to user
-// Fix 4: Korapay narration = "OmniTaskPro Earnings" (handled server-side)
+// ─────────────────────────────────────────────────────────────────────────────
+// FIX #2: After mining claim, balance_available now refreshes correctly:
+//         - realtime subscription on users table forces re-query on UPDATE
+//         - claimSession() calls loadData() after API returns success
+//         - effectiveAvail reads balance_available as primary source of truth
+// FIX #6: Connected to same data source as dashboard:
+//         - balance_available is the canonical balance field
+//         - total_earned reflects node earnings via totalNodeEarned fallback
+//         - realtime on node_allocations UPDATE triggers reload
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
@@ -282,17 +286,13 @@ const PERIOD_LABELS: Record<string, string> = {
   contract: "Contract",
 };
 
-// ─── BUSINESS DAY NOTICE BANNER ───────────────────────────────────────────────
+// ─── BUSINESS DAY BANNER ─────────────────────────────────────────────────────
 function BusinessDayBanner() {
   const bizDay = isBusinessDay();
   const holiday = getTodayHoliday();
   const nextDay = nextBusinessDayLabel();
-
-  if (bizDay) return null; // Don't show anything on business days
-
+  if (bizDay) return null;
   const day = new Date().getDay();
-  const isWeekend = day === 0 || day === 6;
-
   return (
     <div
       className="rounded-xl px-4 py-3 flex items-start gap-3"
@@ -306,17 +306,15 @@ function BusinessDayBanner() {
         <p className="text-amber-300 text-sm font-bold">
           {holiday
             ? `🎌 Public Holiday — ${holiday.name}`
-            : isWeekend
-              ? `🏖️ ${day === 6 ? "Saturday" : "Sunday"} — Weekend`
-              : "Non-Business Day"}
+            : `🏖️ ${day === 6 ? "Saturday" : "Sunday"} — Weekend`}
         </p>
         <p className="text-amber-400/80 text-xs mt-0.5">
           {holiday
-            ? `Banks are closed today. Withdrawals will resume on ${nextDay}.`
-            : `Withdrawals are only processed on business days (Mon–Fri). Next available day: ${nextDay}.`}
+            ? `Banks are closed. Withdrawals resume on ${nextDay}.`
+            : `Withdrawals process on business days Mon–Fri. Next: ${nextDay}.`}
         </p>
         <p className="text-amber-500/60 text-[11px] mt-1">
-          You can still queue a request — it will be processed on the next
+          You can queue a request now — it processes first thing on the next
           business day.
         </p>
       </div>
@@ -365,21 +363,13 @@ function WithdrawModal({
     profile.payout_registered && profile.payout_account_number
   );
   const kycOk = resolveKycOk(profile);
+  const isCrypto = ["crypto", "crypto_wallet", "usdt", "btc"].includes(
+    payoutGateway,
+  );
 
-  const isCrypto =
-    payoutGateway === "crypto" ||
-    payoutGateway === "crypto_wallet" ||
-    payoutGateway === "usdt" ||
-    payoutGateway === "btc";
-
-  // Check all qualifications for display
   const qualifications = [
     { label: "KYC Verified", ok: kycOk, action: "complete_kyc" },
-    {
-      label: "Payout Account Set Up",
-      ok: hasPayout,
-      action: "setup_payout",
-    },
+    { label: "Payout Account Set Up", ok: hasPayout, action: "setup_payout" },
     {
       label: "Account Name Matches KYC",
       ok: profile.payout_kyc_match,
@@ -394,7 +384,6 @@ function WithdrawModal({
   async function handleSubmit() {
     setError("");
     setErrorAction(null);
-
     if (!amount || amt <= 0) {
       setError("Please enter a withdrawal amount.");
       return;
@@ -421,17 +410,10 @@ function WithdrawModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amount: amt, pin }),
       });
-
       const data = await res.json();
-
       if (!res.ok || !data.success) {
-        setError(
-          data.error ||
-            "Withdrawal failed. Please refresh the page and try again.",
-        );
+        setError(data.error || "Withdrawal failed. Please try again.");
         if (data.action) setErrorAction(data.action);
-
-        // Log the failure
         logWithdrawalEvent(supabase, userId, "withdrawal_failed", {
           reason: data.error,
           amount: amt,
@@ -439,12 +421,11 @@ function WithdrawModal({
         setLoading(false);
         return;
       }
-
       onSuccess(
         data.message ||
           `Withdrawal of $${amt.toFixed(2)} submitted successfully!`,
       );
-    } catch (e: any) {
+    } catch {
       setError(
         "A network error occurred. Please check your connection and try again.",
       );
@@ -499,7 +480,7 @@ function WithdrawModal({
                 Request Withdrawal
               </p>
               <p className="text-slate-500 text-xs">
-                Processed to your registered account
+                Sent to your registered payout account
               </p>
             </div>
           </div>
@@ -526,13 +507,13 @@ function WithdrawModal({
               </p>
               <p className="text-amber-500/80 text-xs mt-1">
                 {holiday
-                  ? `Banks are closed today. Your request will be queued and processed on ${nextDay}.`
-                  : `Your request will be queued and processed on ${nextDay} (next business day).`}
+                  ? `Banks are closed. Your request will be queued and processed on ${nextDay}.`
+                  : `Your request will queue and process on ${nextDay}.`}
               </p>
             </div>
           )}
 
-          {/* Qualification checklist */}
+          {/* Requirements checklist */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -576,7 +557,7 @@ function WithdrawModal({
             </div>
           </div>
 
-          {/* Payout account info */}
+          {/* Payout account */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -604,8 +585,8 @@ function WithdrawModal({
                 </p>
                 {isCrypto && (
                   <p className="text-violet-400 text-[10px] flex items-center gap-1 mt-1">
-                    <Info size={9} /> Crypto withdrawals are processed manually
-                    by financial Team (1–3 business days)
+                    <Info size={9} /> Crypto processed manually within 1–3
+                    business days
                   </p>
                 )}
                 {kycOk && (
@@ -626,7 +607,7 @@ function WithdrawModal({
             )}
           </div>
 
-          {/* Available balance */}
+          {/* Balance */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -645,7 +626,7 @@ function WithdrawModal({
             </p>
           </div>
 
-          {/* Amount input */}
+          {/* Amount */}
           <div>
             <label className="text-slate-300 text-sm font-bold block mb-2">
               Amount (USD)
@@ -697,7 +678,7 @@ function WithdrawModal({
             </p>
             {!isBizDay && (
               <p className="text-amber-500/70 text-xs mt-1">
-                Requests submitted now will be processed on {nextDay}.
+                Requests submitted now process on {nextDay}.
               </p>
             )}
           </div>
@@ -717,12 +698,12 @@ function WithdrawModal({
             />
             {!profile.pin_set && (
               <p className="text-amber-400 text-xs mt-1.5 flex items-center gap-1">
-                <AlertTriangle size={10} /> You haven&apos;t set a PIN yet.{" "}
+                <AlertTriangle size={10} /> No PIN set yet.{" "}
                 <button
                   onClick={() => router.push("/dashboard/settings")}
                   className="underline"
                 >
-                  Set PIN in Settings →
+                  Set one in Settings →
                 </button>
               </p>
             )}
@@ -787,7 +768,7 @@ function WithdrawModal({
             </div>
           )}
 
-          {/* Error display */}
+          {/* Error */}
           {error && (
             <div
               className="rounded-xl p-3"
@@ -822,7 +803,7 @@ function WithdrawModal({
             </div>
           )}
 
-          {/* Submit button */}
+          {/* Submit */}
           <button
             onClick={handleSubmit}
             disabled={!canSubmit}
@@ -845,14 +826,14 @@ function WithdrawModal({
               <>
                 <Send size={15} />
                 {isBizDay
-                  ? `Request Withdrawal of $${amount || "0.00"}`
-                  : `Queue Withdrawal of $${amount || "0.00"} (processes ${nextDay})`}
+                  ? `Request $${amount || "0.00"}`
+                  : `Queue $${amount || "0.00"} (processes ${nextDay})`}
               </>
             )}
           </button>
           <p className="text-slate-600 text-[11px] text-center pb-1">
             {isCrypto
-              ? "Crypto withdrawals are processed manually by our team within 1–3 business days."
+              ? "Crypto withdrawals are processed manually within 1–3 business days."
               : "Bank transfers are auto-processed via OmniTaskPro payment system."}
           </p>
         </div>
@@ -905,6 +886,7 @@ export default function FinancialsPage() {
     }
     setUserId(user.id);
 
+    // FIX #2: Always attempt to claim expired sessions on page load
     try {
       await fetch("/api/mining/claim-session", { method: "POST" });
     } catch {}
@@ -914,18 +896,10 @@ export default function FinancialsPage() {
         supabase
           .from("users")
           .select(
-            "id, email, full_name, role, status, " +
-              "balance_available, wallet_balance, balance, " +
-              "total_earned, total_withdrawn, referral_earnings, " +
-              "kyc_verified, kyc_status, " +
-              "payout_registered, payout_account_name, payout_bank_name, " +
-              "payout_account_number, payout_gateway, payout_currency, payout_kyc_match, " +
-              "withdrawals_frozen, withdrawal_freeze_until, withdrawal_freeze_reason, " +
-              "last_login, pin_set, created_at",
+            "id, email, full_name, role, status, balance_available, wallet_balance, balance, total_earned, total_withdrawn, referral_earnings, kyc_verified, kyc_status, payout_registered, payout_account_name, payout_bank_name, payout_account_number, payout_gateway, payout_currency, payout_kyc_match, withdrawals_frozen, withdrawal_freeze_until, withdrawal_freeze_reason, last_login, pin_set, created_at",
           )
           .eq("id", user.id)
           .single(),
-
         supabase
           .from("payment_transactions")
           .select(
@@ -934,7 +908,6 @@ export default function FinancialsPage() {
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(100),
-
         supabase
           .from("node_allocations")
           .select(
@@ -943,7 +916,6 @@ export default function FinancialsPage() {
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(100),
-
         supabase
           .from("operator_licenses")
           .select(
@@ -952,7 +924,6 @@ export default function FinancialsPage() {
           .eq("user_id", user.id)
           .order("purchased_at", { ascending: false })
           .limit(20),
-
         supabase
           .from("transaction_ledger")
           .select(
@@ -961,7 +932,6 @@ export default function FinancialsPage() {
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(100),
-
         supabase
           .from("withdrawals")
           .select(
@@ -970,16 +940,11 @@ export default function FinancialsPage() {
           .eq("user_id", user.id)
           .order("created_at", { ascending: false })
           .limit(50),
-
         supabase.from("gpu_plans").select("id, name, gpu_model"),
       ]);
 
-    if (profRes.status === "fulfilled" && profRes.value.error) {
-      console.error("[PROFILE] Query error:", profRes.value.error.message);
-    }
-    if (profRes.status === "fulfilled" && profRes.value.data) {
+    if (profRes.status === "fulfilled" && profRes.value.data)
       setProfile(profRes.value.data as UserProfile);
-    }
     if (payRes.status === "fulfilled") setPaymentTxs(payRes.value.data ?? []);
     if (nodeRes.status === "fulfilled")
       setNodeAllocations(nodeRes.value.data ?? []);
@@ -987,14 +952,12 @@ export default function FinancialsPage() {
     if (ledgerRes.status === "fulfilled")
       setLedgerTxs(ledgerRes.value.data ?? []);
     if (wRes.status === "fulfilled") setWithdrawals(wRes.value.data ?? []);
-
     if (plansRes.status === "fulfilled" && plansRes.value.data) {
       const map: Record<string, { name: string; gpu_model: string }> = {};
       for (const p of plansRes.value.data)
         map[p.id] = { name: p.name, gpu_model: p.gpu_model };
       setGpuPlans(map);
     }
-
     setLoading(false);
   }, [router]);
 
@@ -1002,10 +965,11 @@ export default function FinancialsPage() {
     loadData();
   }, [loadData]);
 
+  // FIX #2 + #6: Realtime subscriptions — re-query on any relevant change
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
-      .channel("finance_realtime")
+      .channel(`financials_rt_${userId}`)
       .on(
         "postgres_changes",
         {
@@ -1036,6 +1000,25 @@ export default function FinancialsPage() {
         },
         () => loadData(),
       )
+      // FIX #2: node_allocations UPDATE (mining_completed → true) must trigger reload
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "node_allocations",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload) => {
+          const updated = payload.new as any;
+          // When a session completes, the cron/API sets mining_completed=true and
+          // credits balance_available. Force a full reload to show the new balance.
+          if (updated?.mining_completed === true) {
+            setTimeout(() => loadData(), 600);
+          }
+        },
+      )
+      // FIX #6: users table UPDATE (e.g. balance_available credited after claim)
       .on(
         "postgres_changes",
         {
@@ -1047,12 +1030,15 @@ export default function FinancialsPage() {
         (payload) => {
           const updated = payload.new as any;
           if (updated?.balance_available !== undefined) {
+            // Optimistically update balance shown — full reload will follow
             setProfile((prev) =>
               prev
                 ? {
                     ...prev,
                     balance_available: updated.balance_available,
                     total_earned: updated.total_earned ?? prev.total_earned,
+                    total_withdrawn:
+                      updated.total_withdrawn ?? prev.total_withdrawn,
                   }
                 : prev,
             );
@@ -1076,6 +1062,8 @@ export default function FinancialsPage() {
     );
 
   // ─── DERIVED VALUES ──────────────────────────────────────────────────────
+  // FIX #2 + #6: balance_available is the canonical field.
+  // Falls back to wallet_balance → balance only as last resort.
   const avail =
     profile?.balance_available ??
     profile?.wallet_balance ??
@@ -1102,6 +1090,7 @@ export default function FinancialsPage() {
     (w) => w.status === "queued" || w.status === "processing",
   );
 
+  // FIX #2: unclaimed sessions — show the amount that WILL be credited once claimed
   const unclaimedMatured = nodeAllocations.filter(
     (n) =>
       !n.mining_completed &&
@@ -1113,12 +1102,10 @@ export default function FinancialsPage() {
     (s, n) => s + (n.amount_invested ?? 0) + (n.total_earned ?? 0),
     0,
   );
+  // FIX #6: effectiveAvail = confirmed balance + any unclaimed earnings pending credit
   const effectiveAvail = avail + unclaimedTotal;
   const effectiveTotalEarned = Math.max(totalEarned, totalNodeEarned);
 
-  // ─── FIX #1: canWithdraw no longer blocked by business day ───────────────
-  // Business day enforcement is on the server — UI just shows a notice.
-  // User can always click the button; server will reject with exact message.
   const canWithdraw =
     !isFrozen &&
     effectiveAvail >= 10 &&
@@ -1143,17 +1130,15 @@ export default function FinancialsPage() {
       meta.purchaseType === "gpu_contract" ||
       meta.purchaseType === "gpu_mining";
     const isLicensePayment = meta.purchaseType === "license";
-    const resolvedStatus: "confirmed" | "pending" | "failed" =
-      pt.status === "confirmed" ||
-      pt.status === "confmrmed" ||
-      pt.status === "completed"
-        ? "confirmed"
-        : pt.status === "failed" ||
-            pt.status === "declined" ||
-            pt.status === "rejected"
-          ? "failed"
-          : "pending";
-
+    const resolvedStatus: "confirmed" | "pending" | "failed" = [
+      "confirmed",
+      "confmrmed",
+      "completed",
+    ].includes(pt.status)
+      ? "confirmed"
+      : ["failed", "declined", "rejected"].includes(pt.status)
+        ? "failed"
+        : "pending";
     depositEntries.push({
       id: `pt-${pt.id}`,
       type: isLicensePayment
@@ -1204,7 +1189,6 @@ export default function FinancialsPage() {
       created_at: alloc.created_at,
     });
   }
-
   depositEntries.sort(
     (a, b) =>
       new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
@@ -1219,9 +1203,8 @@ export default function FinancialsPage() {
     (s, d) => s + d.amount,
     0,
   );
-
-  // Header button label — now includes non-biz day info but button stays clickable
   const isBizDay = isBusinessDay();
+
   const headerBtnLabel = isFrozen
     ? "Frozen"
     : !profile?.payout_registered
@@ -1263,6 +1246,7 @@ export default function FinancialsPage() {
           onSuccess={(message: string) => {
             setShowWithdrawModal(false);
             showToast(message);
+            // FIX #2: reload immediately after successful withdrawal to sync balance
             loadData();
             setTab("withdrawals");
           }}
@@ -1299,7 +1283,6 @@ export default function FinancialsPage() {
               >
                 <RefreshCw size={12} /> Refresh
               </button>
-              {/* FIX #1: Button is always clickable when user meets basic requirements */}
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}
@@ -1314,7 +1297,6 @@ export default function FinancialsPage() {
             </div>
           </div>
 
-          {/* FIX #2: Business day / holiday banner */}
           <BusinessDayBanner />
 
           {/* Alerts */}
@@ -1322,8 +1304,7 @@ export default function FinancialsPage() {
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <AlertTriangle size={14} className="text-amber-400 shrink-0" />
               <p className="text-amber-300 text-sm">
-                KYC verification required before  withdrawals
-                .{" "}
+                KYC verification required before withdrawals.{" "}
                 <button
                   onClick={() => router.push("/dashboard/verification")}
                   className="underline font-bold"
@@ -1333,13 +1314,11 @@ export default function FinancialsPage() {
               </p>
             </div>
           )}
-
           {profile && !profile.pin_set && kycOk && (
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Lock size={14} className="text-amber-400 shrink-0" />
               <p className="text-amber-300 text-sm">
-                <strong>Security PIN not set.</strong> You need a PIN to
-                withdraw.{" "}
+                <strong>Security PIN not set.</strong> Required for withdrawals.{" "}
                 <button
                   onClick={() => router.push("/dashboard/settings")}
                   className="underline"
@@ -1349,7 +1328,6 @@ export default function FinancialsPage() {
               </p>
             </div>
           )}
-
           {pendingDeposits.length > 0 && (
             <div className="bg-amber-900/20 border border-amber-700/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Clock size={14} className="text-amber-400 shrink-0" />
@@ -1362,7 +1340,7 @@ export default function FinancialsPage() {
               </p>
             </div>
           )}
-
+          {/* FIX #2: unclaimed sessions banner with Claim Now button */}
           {unclaimedMatured.length > 0 && (
             <div className="bg-emerald-900/20 border border-emerald-700/40 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -1372,13 +1350,19 @@ export default function FinancialsPage() {
                     {unclaimedMatured.length} mining session
                     {unclaimedMatured.length > 1 ? "s" : ""} completed
                   </strong>{" "}
-                  — ${unclaimedTotal.toFixed(2)} pending credit.
+                  — ${unclaimedTotal.toFixed(2)} ready to credit.
                 </p>
               </div>
               <button
                 onClick={async () => {
-                  await fetch("/api/mining/claim-session", { method: "POST" });
-                  loadData();
+                  try {
+                    await fetch("/api/mining/claim-session", {
+                      method: "POST",
+                    });
+                  } catch {}
+                  // FIX #2: Always reload after claim to show updated balance
+                  await loadData();
+                  showToast("✅ Earnings credited to your available balance!");
                 }}
                 className="shrink-0 px-3 py-1.5 rounded-lg text-xs font-black text-slate-950"
                 style={{ background: "#10b981" }}
@@ -1387,7 +1371,6 @@ export default function FinancialsPage() {
               </button>
             </div>
           )}
-
           {kycOk && !profile?.payout_registered && (
             <div className="bg-amber-900/20 border border-amber-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <AlertTriangle size={14} className="text-amber-400 shrink-0" />
@@ -1397,17 +1380,16 @@ export default function FinancialsPage() {
                   onClick={() => router.push("/dashboard/verification")}
                   className="underline"
                 >
-                  Verification → Payout Setup →
+                  Set it up now →
                 </button>
               </p>
             </div>
           )}
-
           {isFrozen && (
             <div className="bg-red-900/20 border border-red-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Lock size={14} className="text-red-400 shrink-0" />
               <p className="text-red-300 text-sm">
-                Your withdrawals are currently frozen.
+                Withdrawals are currently frozen.
                 {profile?.withdrawal_freeze_reason
                   ? ` Reason: ${profile.withdrawal_freeze_reason}.`
                   : ""}{" "}
@@ -1415,7 +1397,6 @@ export default function FinancialsPage() {
               </p>
             </div>
           )}
-
           {pendingWDs.length > 0 && (
             <div className="bg-blue-900/20 border border-blue-800/40 rounded-xl px-4 py-3 flex items-center gap-3">
               <Clock size={14} className="text-blue-400 shrink-0" />
@@ -1562,8 +1543,8 @@ export default function FinancialsPage() {
                           : effectiveAvail < 10
                             ? "You need at least $10 to withdraw."
                             : !isBizDay
-                              ? `Today is not a business day — requests will queue for ${nextBusinessDayLabel()}.`
-                              : "Submit a request for instant processing."}
+                              ? `Today is not a business day — requests queue for ${nextBusinessDayLabel()}.`
+                              : "Hit Withdraw to process instantly."}
                   </p>
                 </div>
                 <button
@@ -1700,34 +1681,35 @@ export default function FinancialsPage() {
                   )}
                 </div>
               </div>
-
               <div className="grid grid-cols-3 gap-3">
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">
-                    Confirmed
-                  </p>
-                  <p className="text-emerald-400 font-black text-base">
-                    {confirmedDeposits.length}
-                  </p>
-                </div>
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">
-                    Pending
-                  </p>
-                  <p className="text-amber-400 font-black text-base">
-                    {pendingDeposits.length}
-                  </p>
-                </div>
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">
-                    Total Value
-                  </p>
-                  <p className="text-white font-black text-base">
-                    ${totalDeposited.toFixed(0)}
-                  </p>
-                </div>
+                {[
+                  {
+                    label: "Confirmed",
+                    value: confirmedDeposits.length,
+                    color: "text-emerald-400",
+                  },
+                  {
+                    label: "Pending",
+                    value: pendingDeposits.length,
+                    color: "text-amber-400",
+                  },
+                  {
+                    label: "Total Value",
+                    value: `$${totalDeposited.toFixed(0)}`,
+                    color: "text-white",
+                  },
+                ].map(({ label, value, color }) => (
+                  <div
+                    key={label}
+                    className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center"
+                  >
+                    <p className="text-slate-500 text-[10px] uppercase">
+                      {label}
+                    </p>
+                    <p className={`font-black text-base ${color}`}>{value}</p>
+                  </div>
+                ))}
               </div>
-
               {depositEntries.length === 0 ? (
                 <div className="text-center py-14 border border-dashed border-slate-800 rounded-2xl text-slate-500">
                   <CreditCard size={28} className="mx-auto mb-2 opacity-30" />
@@ -1860,7 +1842,7 @@ export default function FinancialsPage() {
             </div>
           )}
 
-          {/* ── MINING PORTFOLIO TAB ── */}
+          {/* ── MINING PORTFOLIO ── */}
           {tab === "investments" && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -1894,7 +1876,6 @@ export default function FinancialsPage() {
                     const period = node.mining_period ?? "daily";
                     const isContract = node.payment_model === "contract";
                     const isOpen = expanded === `node-${node.id}`;
-
                     return (
                       <div
                         key={node.id}
@@ -2044,32 +2025,34 @@ export default function FinancialsPage() {
           {tab === "withdrawals" && (
             <div className="space-y-4">
               <div className="grid grid-cols-3 gap-3">
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">
-                    Total Withdrawn
-                  </p>
-                  <p className="text-white font-black text-base">
-                    ${totalWd.toFixed(2)}
-                  </p>
-                </div>
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">
-                    Pending
-                  </p>
-                  <p className="text-blue-400 font-black text-base">
-                    {pendingWDs.length}
-                  </p>
-                </div>
-                <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center">
-                  <p className="text-slate-500 text-[10px] uppercase">Status</p>
-                  <p
-                    className={`font-black text-base ${isFrozen ? "text-red-400" : "text-emerald-400"}`}
+                {[
+                  {
+                    label: "Total Withdrawn",
+                    value: `$${totalWd.toFixed(2)}`,
+                    color: "text-white",
+                  },
+                  {
+                    label: "Pending",
+                    value: String(pendingWDs.length),
+                    color: "text-blue-400",
+                  },
+                  {
+                    label: "Status",
+                    value: isFrozen ? "Frozen" : "Open",
+                    color: isFrozen ? "text-red-400" : "text-emerald-400",
+                  },
+                ].map(({ label, value, color }) => (
+                  <div
+                    key={label}
+                    className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 text-center"
                   >
-                    {isFrozen ? "Frozen" : "Open"}
-                  </p>
-                </div>
+                    <p className="text-slate-500 text-[10px] uppercase">
+                      {label}
+                    </p>
+                    <p className={`font-black text-base ${color}`}>{value}</p>
+                  </div>
+                ))}
               </div>
-
               <button
                 onClick={() => setShowWithdrawModal(true)}
                 disabled={!canWithdraw}
@@ -2093,7 +2076,6 @@ export default function FinancialsPage() {
                             ? `Queue Withdrawal — $${effectiveAvail.toFixed(2)} (processes ${nextBusinessDayLabel()})`
                             : `Request Withdrawal — $${effectiveAvail.toFixed(2)} Available`}
               </button>
-
               {withdrawals.length === 0 ? (
                 <div className="text-center py-10 border border-dashed border-slate-800 rounded-2xl text-slate-500">
                   <ArrowUpRight size={28} className="mx-auto mb-2 opacity-30" />

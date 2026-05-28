@@ -71,63 +71,37 @@ import {
 // Keyed by tier_index (0–3) which is always present on every plan from DB.
 // Also keyed by every possible name/slug variant for maximum compatibility.
 
-type RoiRates = {
-  hourly: number;
-  daily: number;
-  weekly: number;
-  monthly: number;
-};
+type RoiRates = { hourly: number; daily: number; weekly: number; monthly: number };
 
 // Tier 0 = Foundation Node  (min $5)
 // Tier 1 = RTX 4090 Node    (min $50)
 // Tier 2 = A100 GPU Node    (min $250)
 // Tier 3 = H100 PCIe Node   (min $1,000)
 const TIER_ROI: RoiRates[] = [
-  { hourly: 0.003, daily: 0.02, weekly: 0.12, monthly: 0.45 }, // Tier 0 — Foundation
-  { hourly: 0.005, daily: 0.03, weekly: 0.18, monthly: 0.7 }, // Tier 1 — RTX 4090
-  { hourly: 0.008, daily: 0.05, weekly: 0.35, monthly: 1.2 }, // Tier 2 — A100
-  { hourly: 0.012, daily: 0.08, weekly: 0.6, monthly: 2.5 }, // Tier 3 — H100 PCIe
+  { hourly: 0.003,  daily: 0.02,  weekly: 0.12, monthly: 0.45  }, // Tier 0 — Foundation
+  { hourly: 0.005,  daily: 0.03,  weekly: 0.18, monthly: 0.70  }, // Tier 1 — RTX 4090
+  { hourly: 0.008,  daily: 0.05,  weekly: 0.35, monthly: 1.20  }, // Tier 2 — A100
+  { hourly: 0.012,  daily: 0.08,  weekly: 0.60, monthly: 2.50  }, // Tier 3 — H100 PCIe
 ];
 
 // Name → tier_index map — catches any slug/name variant the DB might use
 const NAME_TO_TIER: Record<string, number> = {
   // Tier 0 variants
-  foundation: 0,
-  "foundation node": 0,
-  "foundation-node": 0,
-  foundationnode: 0,
-  t4: 0,
-  l4: 0,
-  entry: 0,
-  shared: 0,
+  "foundation":         0, "foundation node":    0, "foundation-node":    0,
+  "foundationnode":     0, "t4":                 0, "l4":                 0,
+  "entry":              0, "shared":             0,
   // Tier 1 variants
-  rtx: 1,
-  "rtx 4090": 1,
-  "rtx-4090": 1,
-  rtx4090: 1,
-  "rtx 4090 node": 1,
-  "rtx-4090-node": 1,
-  rtx4090node: 1,
-  "4090": 1,
+  "rtx":                1, "rtx 4090":           1, "rtx-4090":           1,
+  "rtx4090":            1, "rtx 4090 node":      1, "rtx-4090-node":      1,
+  "rtx4090node":        1, "4090":               1,
   // Tier 2 variants
-  a100: 2,
-  "a100 gpu": 2,
-  "a100-gpu": 2,
-  a100gpu: 2,
-  "a100 gpu node": 2,
-  "a100-gpu-node": 2,
-  a100gpunode: 2,
-  "a100 node": 2,
+  "a100":               2, "a100 gpu":           2, "a100-gpu":           2,
+  "a100gpu":            2, "a100 gpu node":      2, "a100-gpu-node":      2,
+  "a100gpunode":        2, "a100 node":          2,
   // Tier 3 variants
-  h100: 3,
-  "h100 pcie": 3,
-  "h100-pcie": 3,
-  h100pcie: 3,
-  "h100 pcie node": 3,
-  "h100-pcie-node": 3,
-  h100pcienode: 3,
-  "h100 node": 3,
-  frontier: 3,
+  "h100":               3, "h100 pcie":          3, "h100-pcie":          3,
+  "h100pcie":           3, "h100 pcie node":     3, "h100-pcie-node":     3,
+  "h100pcienode":       3, "h100 node":          3, "frontier":           3,
 };
 
 /**
@@ -146,15 +120,9 @@ function resolveTier(plan: Plan): number {
 
   // 2. Try name / short_name lookup (normalise to lowercase, strip punctuation)
   const normalise = (s: string) =>
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9 ]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 
-  const candidates = [plan.short_name, plan.name, plan.gpu_model].filter(
-    Boolean,
-  );
+  const candidates = [plan.short_name, plan.name, plan.gpu_model].filter(Boolean);
   for (const raw of candidates) {
     const key = normalise(raw);
     if (NAME_TO_TIER[key] !== undefined) return NAME_TO_TIER[key];
@@ -165,8 +133,8 @@ function resolveTier(plan: Plan): number {
 
   // 3. Fall back to price_min bracket
   if (plan.price_min >= 1000) return 3;
-  if (plan.price_min >= 250) return 2;
-  if (plan.price_min >= 50) return 1;
+  if (plan.price_min >= 250)  return 2;
+  if (plan.price_min >= 50)   return 1;
   return 0;
 }
 
@@ -189,52 +157,13 @@ export async function syncPlanRatesToDB() {
   // Matches by price_min bracket — works no matter what short_name is in the DB.
   // Also writes tier_index so the fast lookup path always works going forward.
   const updates = [
-    {
-      price_min_match: 5,
-      tier_index: 0,
-      price_min: 5,
-      hourly_pct: 0.003,
-      daily_pct: 0.02,
-      base_daily_profit_min: 2.0,
-      base_daily_profit_max: 2.0,
-      roi_tier_multiplier: 1.0,
-    },
-    {
-      price_min_match: 50,
-      tier_index: 1,
-      price_min: 50,
-      hourly_pct: 0.005,
-      daily_pct: 0.03,
-      base_daily_profit_min: 3.0,
-      base_daily_profit_max: 3.0,
-      roi_tier_multiplier: 1.0,
-    },
-    {
-      price_min_match: 250,
-      tier_index: 2,
-      price_min: 250,
-      hourly_pct: 0.008,
-      daily_pct: 0.05,
-      base_daily_profit_min: 5.0,
-      base_daily_profit_max: 5.0,
-      roi_tier_multiplier: 1.0,
-    },
-    {
-      price_min_match: 1000,
-      tier_index: 3,
-      price_min: 1000,
-      hourly_pct: 0.012,
-      daily_pct: 0.08,
-      base_daily_profit_min: 8.0,
-      base_daily_profit_max: 8.0,
-      roi_tier_multiplier: 1.0,
-    },
+    { price_min_match: 5,    tier_index: 0, price_min: 5,    hourly_pct: 0.003, daily_pct: 0.02, base_daily_profit_min: 2.0,  base_daily_profit_max: 2.0,  roi_tier_multiplier: 1.0 },
+    { price_min_match: 50,   tier_index: 1, price_min: 50,   hourly_pct: 0.005, daily_pct: 0.03, base_daily_profit_min: 3.0,  base_daily_profit_max: 3.0,  roi_tier_multiplier: 1.0 },
+    { price_min_match: 250,  tier_index: 2, price_min: 250,  hourly_pct: 0.008, daily_pct: 0.05, base_daily_profit_min: 5.0,  base_daily_profit_max: 5.0,  roi_tier_multiplier: 1.0 },
+    { price_min_match: 1000, tier_index: 3, price_min: 1000, hourly_pct: 0.012, daily_pct: 0.08, base_daily_profit_min: 8.0,  base_daily_profit_max: 8.0,  roi_tier_multiplier: 1.0 },
   ];
   for (const { price_min_match, ...fields } of updates) {
-    await supabase
-      .from("gpu_plans")
-      .update(fields)
-      .eq("price_min", price_min_match);
+    await supabase.from("gpu_plans").update(fields).eq("price_min", price_min_match);
   }
 }
 
@@ -487,15 +416,7 @@ function useLiveMiningEarnings(
 
   const period = alloc.mining_period ?? "daily";
   // plan may be undefined for a brief moment — use a safe fallback Plan shell
-  const safePlan =
-    plan ??
-    ({
-      tier_index: 0,
-      price_min: 5,
-      short_name: "",
-      name: "",
-      gpu_model: "",
-    } as unknown as Plan);
+  const safePlan = plan ?? { tier_index: 0, price_min: 5, short_name: "", name: "", gpu_model: "" } as unknown as Plan;
 
   // Total profit for this session = capital × exact ROI rate for this period
   const totalPeriodProfit = calcProfit(alloc.amount_invested, safePlan, period);
@@ -504,8 +425,7 @@ function useLiveMiningEarnings(
   // Per-second tick rate
   const flexPerSec = totalPeriodProfit / (periodMs / 1000);
   // Contract uses daily rate ticking every second
-  const contractDailyProfit =
-    alloc.amount_invested * getPlanRoi(safePlan, "daily");
+  const contractDailyProfit = alloc.amount_invested * getPlanRoi(safePlan, "daily");
   const contractPerSec = contractDailyProfit / 86400;
   const perSec = isFlexible ? flexPerSec : contractPerSec;
 
@@ -688,7 +608,9 @@ function EstimatedProfitBanner({
             maximumFractionDigits: 2,
           })}
         </p>
-        <p className="text-slate-600 text-[10px] mt-1">for {periodLabel}</p>
+        <p className="text-slate-600 text-[10px] mt-1">
+          for {periodLabel}
+        </p>
       </div>
 
       {/* Disclaimer note */}
@@ -1401,15 +1323,7 @@ function PortfolioCard({
 
   // Per-second rate for display (using exact ROI)
   const period = alloc.mining_period ?? "daily";
-  const safePlan2 =
-    plan ??
-    ({
-      tier_index: 0,
-      price_min: 5,
-      short_name: "",
-      name: "",
-      gpu_model: "",
-    } as unknown as Plan);
+  const safePlan2 = plan ?? { tier_index: 0, price_min: 5, short_name: "", name: "", gpu_model: "" } as unknown as Plan;
   const totalProfit = calcProfit(alloc.amount_invested, safePlan2, period);
   const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
   const perSec = miningDone ? 0 : totalProfit / (pMs / 1000);
@@ -1984,8 +1898,8 @@ function PlanCard({
   const cap = useCapacity(index);
   const [amountStr, setAmountStr] = useState(String(plan.price_min));
   const amount = parseFloat(amountStr) || 0;
-  const [open, setOpen] = useState(false);
   const [section, setSection] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
 
   const showFlex =
     plan.payment_model === "flexible" || plan.payment_model === "both";
@@ -2011,21 +1925,23 @@ function PlanCard({
         : null;
 
   // Issue #12: Only show quick-select values within plan's valid range
-  const quickVals = [5, 50, 100, 250, 500, 1000, 5000]
-    .filter((v) => v >= plan.price_min && v <= plan.price_max)
-    .slice(0, 4);
+  const quickVals = [5, 50, 100, 250, 500, 1000, 5000].filter(
+    (v) => v >= plan.price_min && v <= plan.price_max,
+  ).slice(0, 4);
 
   // ── Estimated profit — single amount, no range, no % shown ────────────────
   // Flexible: capital × exact ROI for selected period
-  const flexEstProfit =
-    !amountErr && amount > 0 ? calcProfit(amount, plan, minPeriod.key) : 0;
+  const flexEstProfit = !amountErr && amount > 0
+    ? calcProfit(amount, plan, minPeriod.key)
+    : 0;
 
   // Contract: use monthly ROI as the base, scale by contract months
   // 6m = 6 × monthly rate, 12m = 12 × monthly rate, 24m = 24 × monthly rate
   const monthlyRate = getPlanRoi(plan, "monthly");
   const contractMonths = term.months;
-  const contractEstProfit =
-    !amountErr && amount > 0 ? amount * monthlyRate * contractMonths : 0;
+  const contractEstProfit = !amountErr && amount > 0
+    ? amount * monthlyRate * contractMonths
+    : 0;
   // ────────────────────────────────────────────────────────────────────────────
 
   const INFO_SECTIONS: Array<{ id: string; lbl: string; Icon: IconComponent }> =
@@ -2055,9 +1971,9 @@ function PlanCard({
     <div
       className="rounded-2xl overflow-hidden transition-all duration-300"
       style={{
-        background: open ? cs.bg : "rgba(10,16,28,0.7)",
-        border: `1px solid ${open ? cs.border : "rgba(255,255,255,0.07)"}`,
-        boxShadow: open ? `0 0 40px ${cs.glow}` : "none",
+        background: cs.bg,
+        border: `1px solid ${cs.border}`,
+        boxShadow: `0 0 30px ${cs.glow}`,
       }}
     >
       {isSurge && (
@@ -2075,10 +1991,7 @@ function PlanCard({
         </div>
       )}
 
-      <div
-        className="flex items-start gap-3 p-4 cursor-pointer select-none"
-        onClick={() => setOpen((o) => !o)}
-      >
+      <div className="flex items-start gap-3 p-4">
         <div
           className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 mt-0.5"
           style={{ background: cs.bg, border: `1px solid ${cs.border}` }}
@@ -2128,19 +2041,9 @@ function PlanCard({
             <span className="text-slate-600 text-[10px]">{plan.vram} VRAM</span>
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <div className="text-right hidden sm:block">
-            <p className="text-white font-black text-sm">
-              ${plan.price_min.toLocaleString()}
-            </p>
-            <p className="text-slate-600 text-[10px]">min</p>
-          </div>
-          <div
-            className={`w-6 h-6 rounded-xl flex items-center justify-center transition-all ${open ? "rotate-180" : ""}`}
-            style={{ background: "rgba(255,255,255,0.06)" }}
-          >
-            <ChevronDown size={13} className="text-slate-400" />
-          </div>
+        <div className="shrink-0 text-right">
+          <p className="text-white font-black text-sm">${plan.price_min.toLocaleString()}</p>
+          <p className="text-slate-600 text-[10px]">min stake</p>
         </div>
       </div>
 
@@ -2160,8 +2063,7 @@ function PlanCard({
         </div>
       </div>
 
-      {open && (
-        <div
+      <div
           className="border-t px-4 py-4 space-y-4"
           style={{ borderColor: "rgba(255,255,255,0.06)" }}
         >
@@ -2196,15 +2098,13 @@ function PlanCard({
                   ⛏️ Pay-As-You-Go Mining
                 </p>
                 <p className="text-slate-400 text-xs leading-relaxed">
-                  Stake your capital into a dedicated GPU node. The node mines
-                  for your chosen period — when done, capital and earnings
-                  return to your wallet automatically.
+                  Stake for as little as 1 hour. Your GPU node earns from the moment it activates — capital plus all profits land in your wallet the instant the session ends.
                 </p>
               </div>
 
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
-                  Stake Amount
+                  How much would you like to stake?
                 </label>
                 <div className="relative">
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-lg">
@@ -2253,7 +2153,7 @@ function PlanCard({
               {/* Period selector */}
               <div>
                 <label className="text-slate-400 text-xs font-bold block mb-2">
-                  Select Mining Duration
+                  Choose your earning period
                 </label>
                 <div className="grid grid-cols-2 gap-2">
                   {MINING_PERIODS.map((p) => (
@@ -2281,44 +2181,18 @@ function PlanCard({
                     isContract={false}
                   />
 
-                  <div
-                    className="rounded-xl p-4 space-y-2"
-                    style={{
-                      background: "rgba(59,130,246,0.05)",
-                      border: "1px solid rgba(59,130,246,0.15)",
-                    }}
-                  >
-                    <p className="text-blue-300 text-xs font-black uppercase tracking-wide">
-                      How This Session Works
-                    </p>
+                  <div className="flex items-center gap-3 py-2">
                     {[
-                      {
-                        Icon: PlayCircle,
-                        text: `Node starts mining immediately for ${minPeriod.durationLabel}`,
-                      },
-                      {
-                        Icon: Pickaxe,
-                        text: "Live earnings appear in your portfolio — tick by tick in real time",
-                      },
-                      {
-                        Icon: Coins,
-                        text: "When session ends, capital + profits are sent to your wallet",
-                      },
-                      {
-                        Icon: RotateCcw,
-                        text: "Start a new session anytime after completion",
-                      },
-                    ].map(({ Icon, text }) => (
-                      <div key={text} className="flex items-start gap-2">
-                        <Icon
-                          size={11}
-                          className="text-blue-400 shrink-0 mt-0.5"
-                        />
-                        <p className="text-slate-400 text-xs">{text}</p>
+                      { icon: "⚡", text: "Mines immediately" },
+                      { icon: "📊", text: "Live earnings tracker" },
+                      { icon: "💰", text: "Capital returned on completion" },
+                    ].map(s => (
+                      <div key={s.icon} className="flex-1 text-center p-2 rounded-xl" style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.12)" }}>
+                        <p className="text-base mb-0.5">{s.icon}</p>
+                        <p className="text-emerald-300/80 text-[10px] font-semibold leading-tight">{s.text}</p>
                       </div>
                     ))}
                   </div>
-                  <Disclaimer />
                 </>
               )}
             </div>
@@ -2338,12 +2212,7 @@ function PlanCard({
                   📋 Contract-Based (Fixed Term)
                 </p>
                 <p className="text-slate-400 text-xs leading-relaxed">
-                  Commit your capital for a fixed period. Earnings accumulate
-                  every second and are visible live in your portfolio. Capital
-                  locked until maturity.{" "}
-                  <strong className="text-slate-300">
-                    Returns not guaranteed.
-                  </strong>
+                  Commit for 6–24 months and earn at our highest rates. Watch your balance grow every second in your portfolio. Capital and all earnings are released in full at maturity. <strong className="text-slate-300">Earnings not guaranteed.</strong>
                 </p>
               </div>
 
@@ -2434,51 +2303,35 @@ function PlanCard({
                     isContract={true}
                   />
 
-                  <div
-                    className="rounded-xl p-4 space-y-2"
-                    style={{
-                      background: "rgba(139,92,246,0.06)",
-                      border: "1px solid rgba(139,92,246,0.2)",
-                    }}
-                  >
-                    <p className="text-violet-300 text-xs font-black uppercase tracking-wide">
-                      What Happens After You Lock In
-                    </p>
+                  <div className="flex items-center gap-3 py-2">
                     {[
-                      {
-                        Icon: Lock,
-                        text: `$${amount.toLocaleString()} locked for ${term.label}`,
-                      },
-                      {
-                        Icon: TrendingUp,
-                        text: "Earnings accumulate every second — visible live in your portfolio",
-                      },
-                      {
-                        Icon: Coins,
-                        text: "Earnings are not withdrawable until your contract matures",
-                      },
-                      {
-                        Icon: CheckCircle,
-                        text: "At maturity: withdraw capital + all accumulated earnings",
-                      },
-                    ].map(({ Icon, text }) => (
-                      <div key={text} className="flex items-start gap-2">
-                        <Icon
-                          size={11}
-                          className="text-violet-400 shrink-0 mt-0.5"
-                        />
-                        <p className="text-slate-400 text-xs">{text}</p>
+                      { icon: "🔒", text: `Locked ${term.label}` },
+                      { icon: "📈", text: "Earns every second" },
+                      { icon: "💰", text: "Full payout at maturity" },
+                    ].map(s => (
+                      <div key={s.icon} className="flex-1 text-center p-2 rounded-xl" style={{ background: "rgba(139,92,246,0.06)", border: "1px solid rgba(139,92,246,0.12)" }}>
+                        <p className="text-base mb-0.5">{s.icon}</p>
+                        <p className="text-violet-300/80 text-[10px] font-semibold leading-tight">{s.text}</p>
                       </div>
                     ))}
                   </div>
-                  <Disclaimer />
                 </>
               )}
             </div>
           )}
 
-          {/* Info section tabs */}
-          <div className="flex gap-1.5 flex-wrap">
+          {/* Node Details disclosure — keeps main UI clean */}
+          <button
+            onClick={() => setShowDetails(v => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all"
+            style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", color: "#64748b" }}
+          >
+            <span className="flex items-center gap-1.5">
+              <Info size={11} /> Node Specs, Use Cases & Legal
+            </span>
+            <ChevronDown size={12} className={showDetails ? "rotate-180 transition-transform" : "transition-transform"} />
+          </button>
+          {showDetails && <div className="flex gap-1.5 flex-wrap">
             {INFO_SECTIONS.map(({ id, lbl, Icon }) => (
               <button
                 key={id}
@@ -2608,6 +2461,8 @@ function PlanCard({
             </div>
           )}
 
+          </div>}
+
           {/* CTA */}
           <div
             className="pt-1 border-t"
@@ -2664,7 +2519,7 @@ function PlanCard({
             )}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -2851,7 +2706,7 @@ export default function GPUPlansPage() {
       )) {
         const plan = plans.find((p) => p.id === alloc.plan_id);
         const period = alloc.mining_period ?? "daily";
-        // planSlug removed — use safePlan object directly
+  // planSlug removed — use safePlan object directly
         const base = alloc.total_earned ?? 0;
         const elapsed = Math.max(
           0,
@@ -2860,22 +2715,10 @@ export default function GPUPlansPage() {
         );
 
         // planObj is the resolved Plan — calcProfit uses tier_index for correct ROI
-        const planObj =
-          plan ??
-          ({
-            tier_index: 0,
-            price_min: 5,
-            short_name: "",
-            name: "",
-            gpu_model: "",
-          } as unknown as Plan);
+        const planObj = plan ?? { tier_index: 0, price_min: 5, short_name: "", name: "", gpu_model: "" } as unknown as Plan;
         let newEarned: number;
         if (alloc.payment_model === "flexible") {
-          const totalProfit = calcProfit(
-            alloc.amount_invested,
-            planObj,
-            period,
-          );
+          const totalProfit = calcProfit(alloc.amount_invested, planObj, period);
           const pMs = PERIOD_DURATIONS_MS[period] ?? PERIOD_DURATIONS_MS.daily;
           newEarned = Math.min(
             base + (totalProfit / (pMs / 1000)) * elapsed,
@@ -2883,11 +2726,7 @@ export default function GPUPlansPage() {
           );
         } else {
           // Contract: daily ROI per second
-          const dailyProfit = calcProfit(
-            alloc.amount_invested,
-            planObj,
-            "daily",
-          );
+          const dailyProfit = calcProfit(alloc.amount_invested, planObj, "daily");
           newEarned = base + (dailyProfit / 86400) * elapsed;
         }
 
@@ -2940,7 +2779,7 @@ export default function GPUPlansPage() {
         node: planId,
         name: plan.name,
         price: amount.toString(),
-        daily: calcProfit(amount, plan, "daily").toFixed(6),
+        daily: (calcProfit(amount, plan, "daily")).toFixed(6),
         itype,
         gpu: plan.gpu_model,
         vram: plan.vram,
@@ -3098,14 +2937,14 @@ export default function GPUPlansPage() {
               )}
             </div>
             <h1 className="text-2xl md:text-4xl font-black tracking-tight leading-tight">
-              GPU Cloud Mining
+              Put Your Capital
               <br />
-              <span className="text-emerald-400">Infrastructure</span>
+              <span className="text-emerald-400">To Work 24/7</span>
             </h1>
             <p className="text-slate-400 mt-3 leading-relaxed text-sm">
-              Stake capital into dedicated GPU nodes inside Tier III/IV data
-              centres. Your node processes AI training and inference workloads
-              24/7, generating real-time mining income.
+              Stake capital into enterprise-grade GPU nodes. Your node earns
+              around the clock processing real AI workloads — and you watch every
+              dollar appear in real time.
             </p>
             <div className="grid grid-cols-2 gap-2 mt-4">
               {MARKET_STATS.map(({ label, value, icon: Icon }) => (
@@ -3379,106 +3218,13 @@ export default function GPUPlansPage() {
           {/* ── PLANS TAB ── */}
           {activeTab === "plans" && (
             <>
-              <section>
-                <h2 className="text-white font-black text-xl mb-1">
-                  Two Ways to Earn
-                </h2>
-                <p className="text-slate-500 text-sm mb-4">
-                  Pay-As-You-Go sessions or fixed-term contracts
-                </p>
-                <div className="grid grid-cols-1 gap-3">
-                  <div
-                    className="rounded-2xl p-4"
-                    style={{
-                      background: "rgba(16,185,129,0.04)",
-                      border: "1px solid rgba(16,185,129,0.15)",
-                    }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-9 h-9 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center shrink-0">
-                        <Pickaxe size={16} className="text-emerald-400" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-white font-black text-sm mb-1">
-                          ⛏️ Pay-As-You-Go (Flexible)
-                        </h3>
-                        <p className="text-slate-400 text-xs leading-relaxed mb-2">
-                          Stake for 1 hour, 1 day, 1 week, or 1 month. When
-                          done, capital + earnings return automatically.
-                        </p>
-                        <div className="space-y-1">
-                          {[
-                            "No KYC required to start mining",
-                            "Capital + profits returned when session ends",
-                            "KYC only required at withdrawal",
-                          ].map((f) => (
-                            <div key={f} className="flex items-center gap-2">
-                              <CheckCircle
-                                size={9}
-                                className="text-emerald-400 shrink-0"
-                              />
-                              <span className="text-slate-300 text-xs">
-                                {f}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div
-                    className="rounded-2xl p-4"
-                    style={{
-                      background: "rgba(139,92,246,0.04)",
-                      border: "1px solid rgba(139,92,246,0.15)",
-                    }}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="w-9 h-9 bg-violet-500/10 border border-violet-500/20 rounded-xl flex items-center justify-center shrink-0">
-                        <Lock size={16} className="text-violet-400" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-white font-black text-sm mb-1">
-                          📋 Fixed-Term Contract
-                        </h3>
-                        <p className="text-slate-400 text-xs leading-relaxed mb-2">
-                          Commit 6–24 months. Capital locked until maturity.{" "}
-                          <strong className="text-slate-300">
-                            Returns not guaranteed.
-                          </strong>
-                        </p>
-                        <div className="space-y-1">
-                          {[
-                            "Earnings visible live in your portfolio",
-                            "Capital + earnings released at maturity",
-                            "Higher returns for longer commitments",
-                          ].map((f) => (
-                            <div key={f} className="flex items-center gap-2">
-                              <CheckCircle
-                                size={9}
-                                className="text-violet-400 shrink-0"
-                              />
-                              <span className="text-slate-300 text-xs">
-                                {f}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-3">
-                  <Disclaimer />
-                </div>
-              </section>
 
               <section>
                 <h2 className="text-white font-black text-xl mb-1">
-                  Select Your Mining Node
+                  Choose Your GPU Node
                 </h2>
                 <p className="text-slate-500 text-sm mb-4">
-                  Tap any node to stake and start mining immediately
+                  Enter your stake amount and start earning in 30 seconds
                 </p>
                 <div className="space-y-3">
                   {plans.map((plan, i) => (
@@ -3500,53 +3246,24 @@ export default function GPUPlansPage() {
                 </div>
               </section>
 
-              <section>
-                <h2 className="text-white font-black text-xl mb-1">
-                  Results from the Community
-                </h2>
-                <p className="text-slate-500 text-sm mb-4">
-                  Stories from active miners
-                </p>
-                <div className="space-y-3">
-                  {TESTIMONIALS.map((t) => (
-                    <div
-                      key={t.name}
-                      className="rounded-2xl p-4"
-                      style={{
-                        background: "rgba(15,23,42,0.7)",
-                        border: "1px solid rgba(255,255,255,0.07)",
-                      }}
-                    >
-                      <div className="flex text-amber-400 gap-0.5 mb-2">
-                        {Array(5)
-                          .fill(0)
-                          .map((_, i) => (
-                            <Star key={i} size={11} fill="currentColor" />
-                          ))}
-                      </div>
-                      <p className="text-slate-300 text-xs leading-relaxed mb-3">
-                        "{t.text}"
-                      </p>
-                      <div className="flex items-center justify-between pt-3 border-t border-slate-800/60">
-                        <div>
-                          <p className="text-white font-bold text-sm">
-                            {t.name} {t.country}
-                          </p>
-                          <p className="text-slate-500 text-[11px]">{t.role}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-emerald-400 font-black text-sm">
-                            {t.earnings}
-                          </p>
-                          <p className="text-slate-600 text-[10px]">
-                            {t.period}
-                          </p>
-                        </div>
+              <div className="rounded-2xl p-4 mt-4" style={{ background: "rgba(16,185,129,0.04)", border: "1px solid rgba(16,185,129,0.12)" }}>
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: "Avg. Payout Time", value: "Within 2 business days", icon: "⚡" },
+                    { label: "Node Uptime SLA", value: "99.7% guaranteed", icon: "🟢" },
+                    { label: "Capital Protection", value: "Returned at session end", icon: "🔒" },
+                    { label: "Withdrawals", value: "Mon–Fri business days", icon: "💳" },
+                  ].map(s => (
+                    <div key={s.label} className="flex items-start gap-2.5">
+                      <span className="text-xl shrink-0 mt-0.5">{s.icon}</span>
+                      <div>
+                        <p className="text-white text-xs font-black">{s.value}</p>
+                        <p className="text-slate-500 text-[10px]">{s.label}</p>
                       </div>
                     </div>
                   ))}
                 </div>
-              </section>
+              </div>
             </>
           )}
         </div>

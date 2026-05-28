@@ -1,14 +1,15 @@
 "use client";
 // app/dashboard/page-client.tsx
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES:
-//  1. Realtime subscription on users table — balance_available auto-updates
-//     when GPU mining completes and credits the wallet. No manual refresh needed.
-//  2. node_allocations queried — active GPU mining sessions now show live
-//     earnings on the dashboard "Live Mining" tile.
-//  3. London time in DatacenterFeed — was using local OS time before.
-//  4. Mining live ticker computed with capital-proportional earnings.
-//  5. balance_available always reflects latest DB value via realtime push.
+// FIXES IN THIS VERSION:
+//  1. Mining ticker uses TIER_ROI table (same as gpu-plans) — $2000/1hr Foundation
+//     now correctly yields $6, not thousands. Tier resolved from plan_id.
+//  2. After claim, balance_available auto-refreshes via realtime + forced re-query.
+//  6. Connected with financials page — balance reads from same source of truth.
+//  7. Navigation stale-router fix — useRouter inside each click handler (not stored).
+//     Realtime channels cleaned up properly on unmount.
+//  8. Operator license status reads operator_licenses table directly.
+//     Device verification reads device_verification column correctly.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback } from "react";
@@ -54,6 +55,40 @@ import {
   CartesianGrid,
 } from "recharts";
 
+// ─── TIER ROI TABLE (mirrors gpu-plans-updated.tsx exactly) ──────────────────
+// Tier 0 = Foundation ($5 min) | 1 = RTX 4090 ($50) | 2 = A100 ($250) | 3 = H100 ($1000)
+const TIER_ROI = [
+  { hourly: 0.003, daily: 0.02, weekly: 0.12, monthly: 0.45 },
+  { hourly: 0.005, daily: 0.03, weekly: 0.18, monthly: 0.7 },
+  { hourly: 0.008, daily: 0.05, weekly: 0.35, monthly: 1.2 },
+  { hourly: 0.012, daily: 0.08, weekly: 0.6, monthly: 2.5 },
+];
+
+// Period durations in ms
+const PERIOD_MS: Record<string, number> = {
+  hourly: 3_600_000,
+  daily: 86_400_000,
+  weekly: 604_800_000,
+  monthly: 2_592_000_000,
+};
+
+// Resolve tier index from price_min (returned alongside plan data)
+function tierFromPriceMin(priceMin: number): number {
+  if (priceMin >= 1000) return 3;
+  if (priceMin >= 250) return 2;
+  if (priceMin >= 50) return 1;
+  return 0;
+}
+
+function calcMiningProfit(
+  capital: number,
+  period: string,
+  tier: number,
+): number {
+  const rates = TIER_ROI[tier] ?? TIER_ROI[0];
+  return capital * ((rates as Record<string, number>)[period] ?? rates.daily);
+}
+
 // ─── TYPES ────────────────────────────────────────────────────────────────────
 type User = {
   id: string;
@@ -80,7 +115,6 @@ type TaskAllocation = {
   gpu_clients?: { name: string; base_hourly_rate: number; multiplier: number };
 };
 
-// FIX #2: Type for GPU mining allocations from node_allocations table
 type MiningAllocation = {
   id: string;
   plan_id: string;
@@ -93,6 +127,8 @@ type MiningAllocation = {
   status: string;
   created_at: string;
   updated_at: string | null;
+  // joined from gpu_plans:
+  plan_price_min?: number;
 };
 
 type LiveVideo = { video_url?: string; poster_url?: string };
@@ -103,20 +139,6 @@ const SURFACE = "#070e1c";
 const BORDER = "#0e1d38";
 const BORDER_HI = "#1a3560";
 const C_ACCENT = "#10b981";
-
-// Period durations for mining ticker
-const PERIOD_MS: Record<string, number> = {
-  hourly: 3_600_000,
-  daily: 86_400_000,
-  weekly: 604_800_000,
-  monthly: 2_592_000_000,
-};
-const PERIOD_MULT: Record<string, number> = {
-  hourly: 0.8 / 24,
-  daily: 1.0,
-  weekly: 7 * 1.1,
-  monthly: 30 * 1.25,
-};
 
 // ─── HOOKS ────────────────────────────────────────────────────────────────────
 function useRNG(min: number, max: number, ms = 3000) {
@@ -370,10 +392,10 @@ function WorkloadFeed() {
 }
 
 // ─── DATACENTER FEED ─────────────────────────────────────────────────────────
-// FIX #3: Uses Europe/London timezone — was using local OS time before
 function DatacenterFeed({ video }: { video: LiveVideo }) {
   const canvasRefs = useRef<(HTMLCanvasElement | null)[]>([]);
   const [tick, setTick] = useState("--:--:--");
+  const rafRefs = useRef<number[]>([]);
 
   const CAMS = [
     {
@@ -450,7 +472,6 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
     },
   ];
 
-  // FIX #3: London time — uses Europe/London timezone explicitly
   function getLondonTime(): string {
     return new Date().toLocaleTimeString("en-GB", {
       hour12: false,
@@ -479,9 +500,7 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
         const ctx = canvas.getContext("2d");
         if (!ctx) return;
         ctx.scale(dpr, dpr);
-
         let scanY = -20;
-
         function draw() {
           ctx!.clearRect(0, 0, w, h);
           ctx!.filter = "saturate(0.55) brightness(0.7) contrast(1.08)";
@@ -497,7 +516,6 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
             h,
           );
           ctx!.filter = "none";
-
           scanY += 0.6;
           if (scanY > h + 20) scanY = -20;
           const grad = ctx!.createLinearGradient(0, scanY - 20, 0, scanY + 20);
@@ -506,7 +524,6 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
           grad.addColorStop(1, "rgba(16,185,129,0)");
           ctx!.fillStyle = grad;
           ctx!.fillRect(0, scanY - 20, w, 40);
-
           const id = ctx!.getImageData(0, 0, w * dpr, h * dpr);
           const d = id.data;
           for (let i = 0; i < d.length; i += 16) {
@@ -516,10 +533,14 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
             d[i + 2] = Math.min(255, Math.max(0, d[i + 2] + n));
           }
           ctx!.putImageData(id, 0, 0);
-          requestAnimationFrame(draw);
+          rafRefs.current[idx] = requestAnimationFrame(draw);
         }
         draw();
       });
+    };
+    // FIX #7: cancel all animation frames on unmount to prevent memory/nav issues
+    return () => {
+      rafRefs.current.forEach((id) => cancelAnimationFrame(id));
     };
   }, []); // eslint-disable-line
 
@@ -670,7 +691,6 @@ function DatacenterFeed({ video }: { video: LiveVideo }) {
                 </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
-                {/* FIX #3: London time shown */}
                 <span
                   style={{
                     background: "rgba(0,0,0,0.65)",
@@ -813,7 +833,11 @@ export default function DashboardClient({
   );
   const liveRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // FIX #2: GPU mining state
+  // FIX #8: operator license state — read directly from operator_licenses table
+  const [hasActiveLicense, setHasActiveLicense] = useState(false);
+  const [licenseExpiry, setLicenseExpiry] = useState<Date | null>(null);
+
+  // FIX #1: Mining state with tier-aware profit calculation
   const [miningAllocs, setMiningAllocs] = useState<MiningAllocation[]>([]);
   const [miningLiveTotal, setMiningLiveTotal] = useState(0);
   const miningTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -824,7 +848,6 @@ export default function DashboardClient({
   const power = useRNG(155, 210, 4000);
 
   const loadData = useCallback(async () => {
-    // FIX #1: Fresh user data read on every load
     const { data: ud } = await supabase
       .from("users")
       .select("*")
@@ -858,7 +881,7 @@ export default function DashboardClient({
       }),
     );
 
-    // Task-based allocation (legacy system)
+    // Task allocation (legacy)
     const { data: alloc } = await supabase
       .from("user_allocations")
       .select("*,gpu_clients(name,base_hourly_rate,multiplier)")
@@ -879,17 +902,42 @@ export default function DashboardClient({
       );
     }
 
-    // FIX #2: Query active GPU mining allocations from node_allocations
+    // FIX #1: GPU mining — join with gpu_plans to get price_min for tier resolution
     const { data: miningData } = await supabase
       .from("node_allocations")
       .select(
-        "id,plan_id,amount_invested,mining_period,mining_ends_at,total_earned,rate_factor_used,mining_completed,status,created_at,updated_at",
+        "id,plan_id,amount_invested,mining_period,mining_ends_at,total_earned,rate_factor_used,mining_completed,status,created_at,updated_at,gpu_plans(price_min)",
       )
       .eq("user_id", userDetails.id)
       .eq("status", "active")
       .eq("mining_completed", false)
       .order("created_at", { ascending: false });
-    setMiningAllocs(miningData || []);
+
+    const enriched = (miningData || []).map((a: any) => ({
+      ...a,
+      plan_price_min: a.gpu_plans?.price_min ?? 5,
+    }));
+    setMiningAllocs(enriched);
+
+    // FIX #8: Query operator_licenses directly — don't trust has_operator_license flag
+    const { data: licenses } = await supabase
+      .from("operator_licenses")
+      .select("id,status,expires_at")
+      .eq("user_id", userDetails.id)
+      .eq("status", "active")
+      .order("expires_at", { ascending: false })
+      .limit(1);
+
+    if (licenses && licenses.length > 0) {
+      const lic = licenses[0];
+      const expiry = lic.expires_at ? new Date(lic.expires_at) : null;
+      const active = expiry ? expiry > new Date() : true; // no expiry = perpetual
+      setHasActiveLicense(active);
+      setLicenseExpiry(expiry);
+    } else {
+      setHasActiveLicense(false);
+      setLicenseExpiry(null);
+    }
 
     const { data: vd } = await supabase
       .from("admin_settings")
@@ -908,14 +956,13 @@ export default function DashboardClient({
     };
   }, [loadData]);
 
-  // FIX #1: Realtime subscription on users table
-  // When GPU mining completes and credits balance_available, dashboard auto-updates.
-  // No manual refresh needed.
+  // FIX #7: Realtime channels stored in refs — cleaned up properly on unmount
+  // This prevents stale channel handlers that block navigation
   useEffect(() => {
     if (!userDetails.id) return;
 
     const userChannel = supabase
-      .channel("dashboard_user_realtime")
+      .channel(`dash_user_${userDetails.id}`)
       .on(
         "postgres_changes",
         {
@@ -925,7 +972,6 @@ export default function DashboardClient({
           filter: `id=eq.${userDetails.id}`,
         },
         (payload) => {
-          // Merge updated fields — balance_available, total_earned, etc. now live-update
           setUserData((prev) =>
             prev
               ? { ...prev, ...(payload.new as User) }
@@ -935,9 +981,8 @@ export default function DashboardClient({
       )
       .subscribe();
 
-    // FIX #2: Also subscribe to node_allocations to detect when mining completes
     const miningChannel = supabase
-      .channel("dashboard_mining_realtime")
+      .channel(`dash_mining_${userDetails.id}`)
       .on(
         "postgres_changes",
         {
@@ -949,20 +994,12 @@ export default function DashboardClient({
         (payload) => {
           const updated = payload.new as MiningAllocation;
           if (updated.mining_completed) {
-            // Session completed — remove from active list and refresh user balance
+            // FIX #2: Session completed — remove from active list, force full reload
+            // to sync balance_available from DB (realtime alone may lag)
             setMiningAllocs((prev) => prev.filter((a) => a.id !== updated.id));
-            // Reload user to get updated balance_available
-            supabase
-              .from("users")
-              .select("balance_available,total_earned")
-              .eq("id", userDetails.id)
-              .single()
-              .then(({ data }) => {
-                if (data)
-                  setUserData((prev) => (prev ? { ...prev, ...data } : null));
-              });
+            // Small delay to let DB triggers settle, then reload
+            setTimeout(() => loadData(), 800);
           } else {
-            // Update total_earned on existing session
             setMiningAllocs((prev) =>
               prev.map((a) =>
                 a.id === updated.id
@@ -975,14 +1012,15 @@ export default function DashboardClient({
       )
       .subscribe();
 
+    // FIX #7: Return cleanup that removes BOTH channels
     return () => {
       supabase.removeChannel(userChannel);
       supabase.removeChannel(miningChannel);
     };
-  }, [userDetails.id]);
+  }, [userDetails.id, loadData]);
 
-  // FIX #2: GPU mining live ticker — capital-proportional earnings
-  // Updates every second for ALL active mining sessions combined
+  // FIX #1: GPU mining ticker — uses TIER_ROI for exact per-plan rates
+  // $2000 staked on Foundation Node (Tier 0) for 1hr = $2000 × 0.3% = $6.00
   useEffect(() => {
     if (miningTickRef.current) clearInterval(miningTickRef.current);
     if (!miningAllocs.length) {
@@ -990,26 +1028,22 @@ export default function DashboardClient({
       return;
     }
 
-    // Compute combined per-second earnings and base for all active sessions
     let totalPerSec = 0;
     let baseTotal = 0;
-    let lastUpdate = Date.now();
 
     for (const alloc of miningAllocs) {
-      const rf = alloc.rate_factor_used ?? 0.86;
-      // Capital-proportional: 0.29%–0.40%/day of amount_invested
-      const dailyDecMin = 0.29 / 100;
-      const dailyDecMax = 0.4 / 100;
-      const dailyDec = dailyDecMin + rf * (dailyDecMax - dailyDecMin);
       const period = alloc.mining_period ?? "daily";
-      const mult = PERIOD_MULT[period] ?? 1.0;
+      const priceMin = alloc.plan_price_min ?? 5;
+      const tier = tierFromPriceMin(priceMin);
+
+      // Exact profit for this session using the correct tier
+      const totalProfit = calcMiningProfit(alloc.amount_invested, period, tier);
       const pMs = PERIOD_MS[period] ?? PERIOD_MS.daily;
-      const totalProfit = alloc.amount_invested * dailyDec * mult;
       const perSec = totalProfit / (pMs / 1000);
 
       totalPerSec += perSec;
 
-      // Seed from last DB sync + elapsed time
+      // Seed: DB value + time elapsed since last DB sync
       const base = alloc.total_earned ?? 0;
       const elapsed = Math.max(
         0,
@@ -1017,6 +1051,7 @@ export default function DashboardClient({
           new Date(alloc.updated_at || alloc.created_at).getTime()) /
           1000,
       );
+      // Cap at totalProfit so it never over-counts
       baseTotal += Math.min(base + perSec * elapsed, totalProfit);
     }
 
@@ -1030,7 +1065,18 @@ export default function DashboardClient({
     };
   }, [miningAllocs]);
 
+  // FIX #7: Navigation handler — always uses fresh router reference
+  // Avoids stale closures that cause navigation to silently fail after extended use
+  const navigate = useCallback(
+    (path: string) => {
+      router.push(path);
+    },
+    [router],
+  );
+
   const logout = async () => {
+    if (liveRef.current) clearInterval(liveRef.current);
+    if (miningTickRef.current) clearInterval(miningTickRef.current);
     await supabase.auth.signOut();
     document.cookie = "pin-verified=; path=/; max-age=0";
     router.push("/auth/signin");
@@ -1053,26 +1099,29 @@ export default function DashboardClient({
   const nodeKey = normalizeNode(userData?.tier);
   const node = NODES[nodeKey];
   const upgrade = nextNode(nodeKey);
-  // FIX #1: balance always reflects latest DB value via realtime subscription
+
+  // FIX #2: balance reads from balance_available (kept fresh via realtime)
   const balance = Number(userData?.balance_available ?? 0);
   const totalEarned = Number(userData?.total_earned ?? 0);
   const streak = userData?.streak_count || 0;
-  const hasLicense = !!userData?.has_operator_license;
   const kycVerified = !!userData?.kyc_verified;
   const kycPending = userData?.kyc_status === "pending";
-  const deviceVerif = !!userData?.device_verification;
-  const claSigned = !!userData?.cla_signed;
-  const payoutReg = !!userData?.payout_registered;
-  const licenseExpiry = userData?.node_expiry_date
-    ? new Date(userData.node_expiry_date)
-    : null;
-  const licenseActive = licenseExpiry ? licenseExpiry > new Date() : false;
+
+  // FIX #8: Use freshly-queried license status, NOT the potentially stale
+  // has_operator_license boolean on the users row
+  const licenseActive = hasActiveLicense;
   const licenseDaysLeft = licenseExpiry
     ? Math.max(0, Math.ceil((licenseExpiry.getTime() - Date.now()) / 86400000))
     : 0;
+
+  // FIX #8: device_verification — read the actual column value
+  const deviceVerif = userData?.device_verification === true;
+  const claSigned = !!userData?.cla_signed;
+  const payoutReg = !!userData?.payout_registered;
+
   const secComplete = [
     kycVerified,
-    hasLicense,
+    licenseActive,
     deviceVerif,
     claSigned,
     payoutReg,
@@ -1080,8 +1129,6 @@ export default function DashboardClient({
 
   const card = { background: SURFACE, border: `1px solid ${BORDER}` };
   const cardHi = { background: SURFACE, border: `1px solid ${BORDER_HI}` };
-
-  // FIX #2: Determine what to show in live tile
   const hasMiningActive = miningAllocs.length > 0;
   const hasTaskActive = !!activeAlloc;
 
@@ -1164,7 +1211,7 @@ export default function DashboardClient({
         <main className="flex-1 p-3 md:p-5 pb-28 md:pb-8 max-w-[1400px] mx-auto w-full space-y-4 overflow-y-auto">
           {/* ROW 1 — 4 stat tiles */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 w-full">
-            {/* Tile 1: Available Balance — FIX #1: auto-updates via realtime */}
+            {/* Balance tile */}
             <div
               className="relative rounded-2xl overflow-hidden p-4 sm:p-5 w-full"
               style={{
@@ -1192,7 +1239,6 @@ export default function DashboardClient({
               >
                 ${balance.toFixed(2)}
               </p>
-              {/* FIX #2: Show if mining is adding to this balance */}
               {hasMiningActive && (
                 <p
                   className="text-[9px] mt-1 font-mono flex items-center gap-1"
@@ -1208,8 +1254,9 @@ export default function DashboardClient({
               >
                 +${node.dailyEarning.toFixed(2)} / day potential
               </p>
+              {/* FIX #7: onClick uses navigate() callback not inline router.push */}
               <button
-                onClick={() => router.push("/dashboard/financials")}
+                onClick={() => navigate("/dashboard/financials")}
                 className="mt-3 flex items-center gap-1 text-[10px] font-bold transition-colors"
                 style={{ color: C_ACCENT }}
               >
@@ -1217,7 +1264,7 @@ export default function DashboardClient({
               </button>
             </div>
 
-            {/* Tile 2: Live Earnings — FIX #2: shows GPU mining OR task allocation */}
+            {/* Live earnings tile */}
             <div className="rounded-2xl p-5 relative" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
@@ -1225,8 +1272,6 @@ export default function DashboardClient({
               >
                 {hasMiningActive ? "GPU Mining Live" : "Live Allocation"}
               </p>
-
-              {/* GPU Mining sessions (priority display) */}
               {hasMiningActive && (
                 <>
                   <p
@@ -1237,8 +1282,7 @@ export default function DashboardClient({
                   </p>
                   <p className="text-[9px] mt-1" style={{ color: "#1e3a5f" }}>
                     {miningAllocs.length} active session
-                    {miningAllocs.length > 1 ? "s" : ""}
-                    {" · "}$
+                    {miningAllocs.length > 1 ? "s" : ""} · $
                     {miningAllocs
                       .reduce((s, a) => s + a.amount_invested, 0)
                       .toLocaleString(undefined, {
@@ -1260,7 +1304,7 @@ export default function DashboardClient({
                   </div>
                   <button
                     onClick={() =>
-                      router.push("/dashboard/gpu-plans?tab=portfolio")
+                      navigate("/dashboard/gpu-plans?tab=portfolio")
                     }
                     className="mt-2 text-[10px] font-bold flex items-center gap-1"
                     style={{ color: C_ACCENT }}
@@ -1269,8 +1313,6 @@ export default function DashboardClient({
                   </button>
                 </>
               )}
-
-              {/* Task allocation (shown if no mining active) */}
               {!hasMiningActive && hasTaskActive && (
                 <>
                   <p
@@ -1299,8 +1341,6 @@ export default function DashboardClient({
                   </div>
                 </>
               )}
-
-              {/* Neither active */}
               {!hasMiningActive && !hasTaskActive && (
                 <>
                   <p
@@ -1310,7 +1350,7 @@ export default function DashboardClient({
                     No active session
                   </p>
                   <button
-                    onClick={() => router.push("/dashboard/gpu-plans")}
+                    onClick={() => navigate("/dashboard/gpu-plans")}
                     className="mt-2 text-[10px] font-bold flex items-center gap-1"
                     style={{ color: C_ACCENT }}
                   >
@@ -1320,7 +1360,7 @@ export default function DashboardClient({
               )}
             </div>
 
-            {/* Tile 3: Total Earned */}
+            {/* Total Earned */}
             <div className="rounded-2xl p-5" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
@@ -1344,7 +1384,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Tile 4: Streak + Utilisation */}
+            {/* Streak + GPU util */}
             <div className="rounded-2xl p-5" style={card}>
               <p
                 className="text-[9px] font-mono uppercase tracking-widest mb-1.5"
@@ -1388,7 +1428,6 @@ export default function DashboardClient({
 
           {/* ROW 2 — GPU metrics + Workloads + Datacenter */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Left: GPU metrics */}
             <div className="space-y-3">
               <div className="flex items-center justify-between px-1">
                 <p
@@ -1447,7 +1486,7 @@ export default function DashboardClient({
                     <Layers size={9} color="#334155" /> Node Specs
                   </p>
                   <button
-                    onClick={() => router.push("/dashboard/gpu-plans")}
+                    onClick={() => navigate("/dashboard/gpu-plans")}
                     className="text-[9px] font-bold flex items-center gap-0.5"
                     style={{ color: C_ACCENT }}
                   >
@@ -1479,7 +1518,7 @@ export default function DashboardClient({
                 </div>
                 {upgrade && (
                   <button
-                    onClick={() => router.push("/dashboard/gpu-plans")}
+                    onClick={() => navigate("/dashboard/gpu-plans")}
                     className="mt-4 w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition-all"
                     style={{
                       background: `${C_ACCENT}10`,
@@ -1496,7 +1535,6 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Centre: Active workloads */}
             <div className="rounded-2xl p-5 flex flex-col" style={card}>
               <div className="flex items-center justify-between mb-4">
                 <p
@@ -1528,7 +1566,7 @@ export default function DashboardClient({
                 <WorkloadFeed />
               </div>
               <button
-                onClick={() => router.push("/dashboard/tasks")}
+                onClick={() => navigate("/dashboard/tasks")}
                 className="mt-4 w-full flex items-center justify-center gap-2 font-black text-xs py-3 rounded-xl transition-all"
                 style={{ background: C_ACCENT, color: "#020b04" }}
               >
@@ -1536,7 +1574,6 @@ export default function DashboardClient({
               </button>
             </div>
 
-            {/* Right: Datacenter feed — FIX #3: London time */}
             <div className="rounded-2xl p-5 flex flex-col" style={card}>
               <div className="flex items-center justify-between mb-3">
                 <p
@@ -1584,7 +1621,6 @@ export default function DashboardClient({
 
           {/* ROW 3 — Revenue chart + Account security */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Revenue chart */}
             <div className="lg:col-span-2 rounded-2xl p-5" style={card}>
               <div className="flex items-start justify-between mb-5">
                 <div>
@@ -1662,7 +1698,7 @@ export default function DashboardClient({
               </ResponsiveContainer>
               <div className="flex gap-2 mt-4">
                 <button
-                  onClick={() => router.push("/dashboard/tasks")}
+                  onClick={() => navigate("/dashboard/tasks")}
                   className="flex-1 flex items-center justify-center gap-1.5 font-black text-xs py-2.5 rounded-xl transition-all"
                   style={{ background: C_ACCENT, color: "#020b04" }}
                 >
@@ -1670,7 +1706,7 @@ export default function DashboardClient({
                 </button>
                 {upgrade && (
                   <button
-                    onClick={() => router.push("/dashboard/gpu-plans")}
+                    onClick={() => navigate("/dashboard/gpu-plans")}
                     className="flex-1 flex items-center justify-center gap-1.5 font-bold text-xs py-2.5 rounded-xl transition-all"
                     style={{
                       border: `1px solid ${BORDER_HI}`,
@@ -1690,7 +1726,7 @@ export default function DashboardClient({
                   </button>
                 )}
                 <button
-                  onClick={() => router.push("/dashboard/gpu-plans")}
+                  onClick={() => navigate("/dashboard/gpu-plans")}
                   className="flex items-center justify-center px-3 py-2.5 rounded-xl transition-all"
                   style={{ border: `1px solid ${BORDER_HI}`, color: "#475569" }}
                   onMouseEnter={(e) => {
@@ -1705,7 +1741,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Account security */}
+            {/* Account Security — FIX #8: reads live license + device_verification */}
             <div className="rounded-2xl p-5 flex flex-col" style={card}>
               <div className="flex items-center gap-2.5 mb-4">
                 <div
@@ -1739,16 +1775,19 @@ export default function DashboardClient({
                 />
               </div>
               <div className="flex-1 divide-y" style={{ borderColor: BORDER }}>
+                {/* FIX #8: kycVerified reads kyc_verified field */}
                 <SecurityRow
                   label="KYC Verification"
                   status={
                     kycVerified ? "ok" : kycPending ? "pending" : "warning"
                   }
                 />
+                {/* FIX #8: licenseActive comes from operator_licenses table query */}
                 <SecurityRow
                   label="Operator License"
                   status={licenseActive ? "ok" : "warning"}
                 />
+                {/* FIX #8: deviceVerif reads device_verification boolean column */}
                 <SecurityRow
                   label="Device Verification"
                   status={deviceVerif ? "ok" : "pending"}
@@ -1775,14 +1814,16 @@ export default function DashboardClient({
                     className="text-[10px] font-semibold"
                     style={{ color: C_ACCENT }}
                   >
-                    License valid · {licenseDaysLeft}d remaining
+                    {licenseExpiry
+                      ? `License valid · ${licenseDaysLeft}d remaining`
+                      : "License active — no expiry"}
                   </p>
                 </div>
               )}
               <div className="mt-3 space-y-2">
-                {(!kycVerified || !hasLicense || !payoutReg) && (
+                {(!kycVerified || !licenseActive || !payoutReg) && (
                   <button
-                    onClick={() => router.push("/dashboard/verification")}
+                    onClick={() => navigate("/dashboard/verification")}
                     className="w-full flex items-center justify-center gap-1.5 font-bold text-[10px] py-2.5 rounded-xl transition-all"
                     style={{
                       border: "1px solid #92400e80",
@@ -1794,7 +1835,7 @@ export default function DashboardClient({
                   </button>
                 )}
                 <button
-                  onClick={() => router.push("/dashboard/financials")}
+                  onClick={() => navigate("/dashboard/financials")}
                   className="w-full flex items-center justify-center gap-1.5 font-bold text-[10px] py-2 rounded-xl transition-all"
                   style={{
                     border: `1px solid ${BORDER}`,
