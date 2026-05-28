@@ -965,7 +965,6 @@ export default function FinancialsPage() {
     loadData();
   }, [loadData]);
 
-  // FIX #2 + #6: Realtime subscriptions — re-query on any relevant change
   useEffect(() => {
     if (!userId) return;
     const ch = supabase
@@ -1010,18 +1009,32 @@ export default function FinancialsPage() {
         },
         (payload: { new: Record<string, unknown> }) => {
           const updated = payload.new;
-          // When a session completes, the cron/API sets mining_completed=true and
-          (payload: { new: Record<string, unknown> }) => {
+          if (updated?.mining_completed === true) {
+            setTimeout(() => loadData(), 600);
+          }
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "users",
+          filter: `id=eq.${userId}`,
+        },
+        (payload: { new: Record<string, unknown> }) => {
           const updated = payload.new;
           if (updated?.balance_available !== undefined) {
-            // Optimistically update balance shown — full reload will follow
             setProfile((prev) =>
               prev
                 ? {
                     ...prev,
                     balance_available: updated.balance_available as number,
-                    total_earned: (updated.total_earned as number) ?? prev.total_earned,
-                    total_withdrawn: (updated.total_withdrawn as number) ?? prev.total_withdrawn,
+                    total_earned:
+                      (updated.total_earned as number) ?? prev.total_earned,
+                    total_withdrawn:
+                      (updated.total_withdrawn as number) ??
+                      prev.total_withdrawn,
                   }
                 : prev,
             );
