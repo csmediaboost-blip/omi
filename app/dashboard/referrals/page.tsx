@@ -65,13 +65,22 @@ export default function ReferralsPage() {
             r.commission_status !== "claimed",
         ).length || 0;
       const totalCommission =
-        referralList?.reduce((sum, r) => sum + (r.commission_amount || 0), 0) ||
-        0;
+        referralList?.reduce(
+          (sum: number, r: { commission_amount: number }) =>
+            sum + (r.commission_amount || 0),
+          0,
+        ) || 0;
       const pendingCommission =
         referralList
-          ?.filter((r) => r.commission_status === "pending")
-          .reduce((sum, r) => sum + (r.commission_amount || 0), 0) || 0;
-
+          ?.filter(
+            (r: { commission_status: string }) =>
+              r.commission_status === "pending",
+          )
+          .reduce(
+            (sum: number, r: { commission_amount: number }) =>
+              sum + (r.commission_amount || 0),
+            0,
+          ) || 0;
       setData({
         totalReferrals,
         totalCommission,
