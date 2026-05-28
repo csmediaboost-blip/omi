@@ -67,6 +67,7 @@ export default function SupportAdminPage() {
     if (!selectedTicket) return;
 
     async function loadMessages() {
+      if (!selectedTicket) return;
       const { data, error } = await supabase
         .from("support_messages")
         .select("*")
@@ -75,7 +76,6 @@ export default function SupportAdminPage() {
 
       if (!error && data) {
         setMessages(data);
-        
         // Mark messages as seen by admin
         await supabase
           .from("support_messages")
