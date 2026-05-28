@@ -26,8 +26,8 @@ export default function LicenseStatusBadge({ userId }: { userId: string }) {
     if (!userId) return;
     supabase
       .rpc("get_license_status", { p_user_id: userId })
-      .then(({ data }) => setStatus(data));
-  }, [userId]);
+      .then(({ data }: { data: LicenseStatus | null }) => setStatus(data));
+  }, [userId]);;
 
   if (!status) return null;
 
