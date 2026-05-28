@@ -1,12 +1,12 @@
 // app/api/webhooks/korapay/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function getSupabaseAdmin() {
+function getSupabaseAdmin(): SupabaseClient {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -14,6 +14,7 @@ function getSupabaseAdmin() {
   );
 }
 
+// In-memory dedup guard (resets on cold start — good enough for most replays)
 const processedWebhooks = new Set<string>();
 
 function verifySignature(
@@ -36,10 +37,13 @@ function verifySignature(
   }
 }
 
-async function activateGPUNode(payment: any, meta: any) {
-  const supabaseAdmin = getSupabaseAdmin();
+async function activateGPUNode(
+  supabase: SupabaseClient,
+  payment: any,
+  meta: any,
+) {
   const now = new Date().toISOString();
-  const paymentModel = meta.paymentModel || "flexible";
+  const paymentModel = meta.paymentModel ?? "flexible";
   const isContract = paymentModel === "contract";
   const contractMonths = meta.contractMonths
     ? parseInt(meta.contractMonths)
@@ -51,23 +55,24 @@ async function activateGPUNode(payment: any, meta: any) {
         ).toISOString()
       : null;
 
-  const { data: existing } = await supabaseAdmin
+  // Idempotency — skip if a matching allocation was created in the last 5 minutes
+  const { data: existing } = await supabase
     .from("node_allocations")
     .select("id")
     .eq("user_id", payment.user_id)
     .eq("plan_id", payment.node_key)
     .eq("amount_invested", payment.amount)
-    .gte("created_at", new Date(Date.now() - 300000).toISOString());
+    .gte("created_at", new Date(Date.now() - 300_000).toISOString());
   if (existing && existing.length > 0) return;
 
-  const { error } = await supabaseAdmin.from("node_allocations").insert({
+  const { error } = await supabase.from("node_allocations").insert({
     user_id: payment.user_id,
     plan_id: payment.node_key,
     amount_invested: payment.amount,
     currency: "USD",
     payment_model: paymentModel,
     contract_months: contractMonths,
-    contract_label: meta.contractLabel || null,
+    contract_label: meta.contractLabel ?? null,
     contract_min_pct: meta.contractMinPct
       ? parseFloat(meta.contractMinPct)
       : null,
@@ -77,9 +82,9 @@ async function activateGPUNode(payment: any, meta: any) {
     maturity_date: maturityDate,
     lock_in_months: meta.lockInMonths ? parseInt(meta.lockInMonths) : 0,
     lock_in_label:
-      meta.lockInLabel || (isContract ? meta.contractLabel : "Flexible"),
+      meta.lockInLabel ?? (isContract ? meta.contractLabel : "Flexible"),
     lock_in_multiplier: 1,
-    instance_type: meta.itype || payment.node_key,
+    instance_type: meta.itype ?? payment.node_key,
     status: "active",
     total_earned: 0,
     total_withdrawn: 0,
@@ -88,20 +93,24 @@ async function activateGPUNode(payment: any, meta: any) {
   });
   if (error) throw new Error("Node activation failed: " + error.message);
 
-  const { data: u } = await supabaseAdmin
+  const { data: u } = await supabase
     .from("users")
     .select("balance_locked")
     .eq("id", payment.user_id)
     .single();
-  await supabaseAdmin
+
+  const { error: balErr } = await supabase
     .from("users")
     .update({
-      balance_locked: ((u as any)?.balance_locked || 0) + payment.amount,
+      balance_locked: ((u as any)?.balance_locked ?? 0) + payment.amount,
     })
     .eq("id", payment.user_id);
+  if (balErr)
+    console.error("[korapay] balance_locked update error:", balErr.code);
 
-  try {
-    await supabaseAdmin.from("transaction_ledger").insert({
+  const { error: ledgerErr } = await supabase
+    .from("transaction_ledger")
+    .insert({
       user_id: payment.user_id,
       type: "investment",
       amount: payment.amount,
@@ -109,18 +118,23 @@ async function activateGPUNode(payment: any, meta: any) {
       reference_id: String(payment.id),
       created_at: now,
     });
-  } catch (_) {}
+  if (ledgerErr)
+    console.error("[korapay] ledger insert error:", ledgerErr.code);
 }
 
-async function activateLicense(payment: any, meta: any) {
+async function activateLicense(
+  supabase: SupabaseClient,
+  payment: any,
+  meta: any,
+) {
   const now = new Date().toISOString();
-  const licenseType = meta.licenseType || payment.node_key;
+  const licenseType = meta.licenseType ?? payment.node_key;
   const resolvedType = licenseType === "operator_license" ? "all" : licenseType;
   const fourYears = new Date(
     Date.now() + 4 * 365 * 24 * 3600 * 1000,
   ).toISOString();
 
-  await supabaseAdmin.from("operator_licenses").upsert(
+  const { error: licErr } = await supabase.from("operator_licenses").upsert(
     {
       user_id: payment.user_id,
       license_type: resolvedType,
@@ -131,8 +145,9 @@ async function activateLicense(payment: any, meta: any) {
     },
     { onConflict: "user_id,license_type" },
   );
+  if (licErr) console.error("[korapay] license upsert error:", licErr.code);
 
-  await supabaseAdmin
+  const { error: userErr } = await supabase
     .from("users")
     .update({
       has_operator_license: true,
@@ -140,28 +155,33 @@ async function activateLicense(payment: any, meta: any) {
       node_activated_at: now,
     })
     .eq("id", payment.user_id);
+  if (userErr)
+    console.error("[korapay] user license update error:", userErr.code);
 }
 
 export async function POST(req: NextRequest) {
   try {
     const rawBody = await req.text();
-    const signature = req.headers.get("x-korapay-signature") || "";
-    const secret = process.env.KORAPAY_WEBHOOK_SECRET || "";
+    const signature = req.headers.get("x-korapay-signature") ?? "";
+    const secret = process.env.KORAPAY_WEBHOOK_SECRET ?? "";
+
+    const supabase = getSupabaseAdmin(); // single instance for this request
 
     if (!verifySignature(rawBody, signature, secret)) {
-      console.error("KoraPay: invalid webhook signature");
-      try {
-        await supabaseAdmin.from("security_audit_log").insert({
+      console.error("[korapay] Invalid webhook signature");
+      const { error: auditErr } = await supabase
+        .from("security_audit_log")
+        .insert({
           action: "webhook_signature_fail",
           metadata: { source: "korapay", ip: req.headers.get("x-real-ip") },
           severity: "critical",
         });
-      } catch (_) {}
+      if (auditErr) console.error("[korapay] audit log error:", auditErr.code);
       return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
     }
 
     const event = JSON.parse(rawBody);
-    const eventId = event.id || event.data?.reference;
+    const eventId = event.id ?? event.data?.reference;
 
     if (eventId && processedWebhooks.has(eventId)) {
       return NextResponse.json({ received: true, note: "duplicate" });
@@ -175,10 +195,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ received: true });
     }
 
-    const reference = event.data?.reference || event.data?.payment_reference;
+    const reference = event.data?.reference ?? event.data?.payment_reference;
     if (!reference) return NextResponse.json({ received: true });
 
-    const { data: payment } = await supabaseAdmin
+    const { data: payment } = await supabase
       .from("payment_transactions")
       .select("*")
       .or(
@@ -192,21 +212,23 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ received: true, note: "already processed" });
     }
 
-    const webhookAmount = parseFloat(event.data?.amount || "0");
+    const webhookAmount = parseFloat(event.data?.amount ?? "0");
     if (webhookAmount > 0 && Math.abs(webhookAmount - payment.amount) > 0.01) {
-      try {
-        await supabaseAdmin.from("security_audit_log").insert({
+      const { error: mismatchErr } = await supabase
+        .from("security_audit_log")
+        .insert({
           user_id: payment.user_id,
           action: "webhook_amount_mismatch",
           metadata: { expected: payment.amount, received: webhookAmount },
           severity: "critical",
         });
-      } catch (_) {}
+      if (mismatchErr)
+        console.error("[korapay] audit log error:", mismatchErr.code);
       return NextResponse.json({ error: "Amount mismatch" }, { status: 400 });
     }
 
     const now = new Date().toISOString();
-    await supabaseAdmin
+    await supabase
       .from("payment_transactions")
       .update({
         status: "confirmed",
@@ -218,25 +240,26 @@ export async function POST(req: NextRequest) {
 
     const meta = (() => {
       try {
-        return JSON.parse(payment.metadata || "{}");
+        return JSON.parse(payment.metadata ?? "{}");
       } catch {
         return {};
       }
     })();
-    const purchaseType = meta.purchaseType || "gpu_plan";
+
+    const purchaseType = meta.purchaseType ?? "gpu_plan";
 
     if (purchaseType === "license") {
-      await activateLicense(payment, meta);
+      await activateLicense(supabase, payment, meta);
     } else {
-      await activateGPUNode(payment, meta);
+      await activateGPUNode(supabase, payment, meta);
     }
 
     console.log(
-      `KoraPay: activated ${purchaseType} for user ${payment.user_id}`,
+      `[korapay] Activated ${purchaseType} for user ${payment.user_id}`,
     );
     return NextResponse.json({ success: true });
   } catch (err: any) {
-    console.error("KoraPay webhook error:", err.message);
+    console.error("[korapay] Webhook error:", err.message ?? "unknown");
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
