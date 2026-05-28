@@ -2707,8 +2707,8 @@ export default function GPUPlansPage() {
           table: "node_allocations",
           filter: `user_id=eq.${userId}`,
         },
-        (payload) => {
-          setAllocations((prev) => [payload.new as Allocation, ...prev]);
+        (payload: { new: Allocation }) => {
+          setAllocations((prev) => [payload.new, ...prev]);
           showToast("⛏️ Mining session activated! Your node is now live.");
           setActiveTab("portfolio");
         },
