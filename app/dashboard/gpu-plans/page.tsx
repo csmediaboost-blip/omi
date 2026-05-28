@@ -2515,7 +2515,7 @@ function PlanCard({
 
           </div>}
 
-          {/* CTA */}
+         {/* CTA */}
           <div
             className="pt-1 border-t"
             style={{ borderColor: "rgba(255,255,255,0.06)" }}
@@ -2530,7 +2530,7 @@ function PlanCard({
             ) : waitOnly && !userAlloc ? (
               waitlisted ? (
                 <div className="text-center py-3 rounded-xl text-sm font-bold text-amber-400 bg-amber-900/10 border border-amber-800/20">
-                  ✓ You're on the waitlist
+                  {"✓ You're on the waitlist"}
                 </div>
               ) : (
                 <button
@@ -2572,7 +2572,6 @@ function PlanCard({
           </div>
         </div>
       </div>
-    </div>
   );
 }
 
