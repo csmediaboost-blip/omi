@@ -986,8 +986,8 @@ const userChannel = supabase
           table: "node_allocations",
           filter: `user_id=eq.${userDetails.id}`,
         },
-        (payload) => {
-          const updated = payload.new as MiningAllocation;
+        (payload: { new: MiningAllocation }) => {
+          const updated = payload.new;
           if (updated.mining_completed) {
             // FIX #2: Session completed — remove from active list, force full reload
             // to sync balance_available from DB (realtime alone may lag)
