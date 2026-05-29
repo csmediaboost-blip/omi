@@ -8,6 +8,8 @@ import React, {
   ReactNode,
 } from "react";
 import { User as SupabaseUser, Session } from "@supabase/supabase-js";
+// ✅ FIX: import AuthChangeEvent so the onAuthStateChange callback is fully typed
+import type { AuthChangeEvent } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 import type { User } from "./validators";
 
@@ -53,9 +55,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       setUserProfile(data);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown profile error";
       console.error("[v0] Unexpected profile error:", err);
-      setError(err.message);
+      setError(msg);
     }
   };
 
@@ -86,10 +89,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         setLoading(false);
         setIsReady(true);
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error ? err.message : "Failed to initialise session";
         console.error("[v0] Failed to get initial session:", err);
         if (mounted) {
-          setError(err.message);
+          setError(msg);
           setLoading(false);
           setIsReady(true);
         }
@@ -98,26 +103,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     initializeAuth();
 
-    let subscription: any;
+    let subscription: { unsubscribe: () => void } | undefined;
+
     if (supabase && supabase.auth) {
       const {
         data: { subscription: sub },
-      } = supabase.auth.onAuthStateChange(async (event, authSession) => {
-        if (!mounted) return;
-        console.log("[v0] Auth state changed:", event);
-        setSession(authSession);
-        setCurrentUser(authSession?.user ?? null);
-        setError(null);
+      } = supabase.auth.onAuthStateChange(
+        // ✅ FIX: explicitly type both callback parameters
+        async (event: AuthChangeEvent, authSession: Session | null) => {
+          if (!mounted) return;
+          console.log("[v0] Auth state changed:", event);
+          setSession(authSession);
+          setCurrentUser(authSession?.user ?? null);
+          setError(null);
 
-        if (authSession?.user) {
-          await fetchUserProfile(authSession.user.id);
-        } else {
-          setUserProfile(null);
-        }
+          if (authSession?.user) {
+            await fetchUserProfile(authSession.user.id);
+          } else {
+            setUserProfile(null);
+          }
 
-        setLoading(false);
-        setIsReady(true);
-      });
+          setLoading(false);
+          setIsReady(true);
+        },
+      );
       subscription = sub;
     }
 
@@ -138,9 +147,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUserProfile(null);
       setSession(null);
       setError(null);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Logout failed";
       console.error("[v0] Logout error:", err);
-      setError(err.message);
+      setError(msg);
       throw err;
     } finally {
       setLoading(false);
