@@ -2,11 +2,6 @@
  * ═══════════════════════════════════════════════════════════════════════════════
  * WITHDRAWAL & FRAUD PROTECTION UTILITIES
  * ═══════════════════════════════════════════════════════════════════════════════
- * FIXED: All column names now match actual DB schema:
- *   withdwals_fronzen      → withdrawals_frozen
- *   last_withhrawal_at     → last_login
- *   account_flagged        → status (check status !== 'active')
- *   earnings_locked_until  → withdrawal_freeze_until
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -18,12 +13,12 @@ export interface UserSecurityProfile {
   kyc_status: string | null;
   payout_registered: boolean;
   payout_account_number: string | null;
-  status: string | null; // was: account_flagged
-  withdrawals_frozen: boolean; // was: withdwals_fronzen
-  withdrawal_freeze_until: string | null; // was: earnings_locked_until
+  status: string | null;
+  withdrawals_frozen: boolean;
+  withdrawal_freeze_until: string | null;
   balance_available: number;
   wallet_balance: number;
-  last_login: string | null; // was: last_withhrawal_at
+  last_login: string | null;
 }
 
 export interface WithdrawalFraudCheck {
@@ -33,17 +28,10 @@ export interface WithdrawalFraudCheck {
   requiresPayoutSetup?: boolean;
 }
 
-/**
- * CRITICAL: Verify user has completed KYC
- * Accepts EITHER kyc_verified=true OR kyc_status="approved"
- */
 export function isKYCApproved(profile: UserSecurityProfile): boolean {
   return profile.kyc_verified === true || profile.kyc_status === "approved";
 }
 
-/**
- * CRITICAL: Comprehensive fraud and compliance check for all withdrawals
- */
 export async function runWithdrawalSecurityChecks(
   supabase: ReturnType<typeof createClient>,
   userId: string,
@@ -54,7 +42,6 @@ export async function runWithdrawalSecurityChecks(
   console.log("[SECURITY] Starting withdrawal check for user:", userId);
 
   // ─── CHECK 1: Account Status ───────────────────────────────────
-  // account_flagged no longer exists — use status field instead
   if (profile.status && profile.status === "flagged") {
     console.warn("[FRAUD] Account flagged for user:", userId);
     return {
@@ -70,7 +57,6 @@ export async function runWithdrawalSecurityChecks(
     };
   }
 
-  // was: profile.withdwals_fronzen — FIXED: profile.withdrawals_frozen
   if (profile.withdrawals_frozen) {
     console.warn("[FRAUD] Withdrawals frozen for user:", userId);
     return {
@@ -116,7 +102,6 @@ export async function runWithdrawalSecurityChecks(
   }
 
   // ─── CHECK 4: Withdrawal Freeze Until ─────────────────────────
-  // was: earnings_locked_until — FIXED: withdrawal_freeze_until
   if (
     profile.withdrawal_freeze_until &&
     new Date(profile.withdrawal_freeze_until) > new Date()
@@ -252,7 +237,7 @@ export async function atomicDeductBalance(
   amount: number,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { data, error } = await supabase.rpc("atomic_deduct_balance", {
+    const { error } = await (supabase as any).rpc("atomic_deduct_balance", {
       p_user_id: userId,
       p_amount: amount,
     });
@@ -286,7 +271,6 @@ export async function atomicDeductBalance(
       .update({
         balance_available: newBal,
         wallet_balance: newBal,
-        // was: last_withhrawal_at — that column doesn't exist, use updated_at
         updated_at: new Date().toISOString(),
       })
       .eq("id", userId);
@@ -336,7 +320,7 @@ export async function recordWithdrawalLedger(
   payoutGateway: string,
 ): Promise<void> {
   try {
-    await supabase.from("transaction_ledger").insert({
+    await (supabase.from("transaction_ledger") as any).insert({
       user_id: userId,
       type: "withdrawal",
       amount: -amount,
