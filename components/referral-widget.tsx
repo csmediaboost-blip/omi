@@ -168,17 +168,25 @@ export function ReferralInlineBanner() {
   const router = useRouter();
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (!user) return;
-      supabase
-        .from("users")
-        .select("referral_code")
-        .eq("id", user.id)
-        .single()
-        .then(({ data }) => {
-          if (data?.referral_code) setCode(data.referral_code);
-        });
-    });
+    supabase.auth
+      .getUser()
+      .then(({ data }: { data: { user: { id: string } | null } }) => {
+        if (!data.user) return;
+        supabase
+          .from("users")
+          .select("referral_code")
+          .eq("id", data.user.id)
+          .single()
+          .then(
+            ({
+              data: userData,
+            }: {
+              data: { referral_code: string } | null;
+            }) => {
+              if (userData?.referral_code) setCode(userData.referral_code);
+            },
+          );
+      });
   }, []);
 
   if (!code) return null;
