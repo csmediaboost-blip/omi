@@ -246,7 +246,7 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             }
           },
         )
-        .subscribe((status) => {
+        .subscribe((status: string) => {
           if (status === "SUBSCRIBED")
             console.log("[realtime] support subscribed");
         });
