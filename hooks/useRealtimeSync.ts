@@ -227,9 +227,10 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             schema: "public",
             table: "support_messages",
           },
-          },
-          async (payload) => {
-            const msg = payload.new as { ticket_id: string; is_admin: boolean };
+          async (payload: {
+            new: { ticket_id: string; is_admin: boolean };
+          }) => {
+            const msg = payload.new;
             if (!msg.is_admin) return; // Only care about admin replies
 
             // Verify this ticket belongs to us
