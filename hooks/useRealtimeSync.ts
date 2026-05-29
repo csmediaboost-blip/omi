@@ -75,8 +75,6 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
       userId.current = user.id;
 
       // ── 1. User notifications (all admin → user messages) ──────────────────
-      // This is the primary channel — KYC approval, balance changes, withdrawals,
-      // support replies, license changes, etc. all send through here
       const notifChannel = supabase
         .channel(`user_notifications:${user.id}`)
         .on(
@@ -90,9 +88,7 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
           (payload: { new: Notification }) => {
             const n = payload.new;
             callbacks.onNotification?.(n);
-            // Auto-trigger specific callbacks based on notification type
             if (n.type === "kyc_approved" || n.type === "kyc_rejected") {
-              // Refresh KYC status
               refreshUserProfile(user.id);
             }
             if (
@@ -120,7 +116,7 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             }
           },
         )
-        .subscribe((status) => {
+        .subscribe((status: string) => {
           if (status === "SUBSCRIBED")
             console.log("[realtime] notifications subscribed");
           if (status === "CHANNEL_ERROR")
@@ -128,7 +124,6 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
         });
 
       // ── 2. Users table — watch own row for direct column changes ───────────
-      // Admin updates: balance, kyc_status, tier, withdwals_fronzen, etc.
       const userRowChannel = supabase
         .channel(`users_self:${user.id}`)
         .on(
@@ -139,17 +134,13 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             table: "users",
             filter: `id=eq.${user.id}`,
           },
-          (payload) => {
-            const updated = payload.new as Record<string, unknown>;
-
-            // Balance changed
+          (payload: { new: Record<string, unknown> }) => {
+            const updated = payload.new;
             const newBal = (updated.balance_available ??
               updated.wallet_balance) as number;
             const newPending = (updated.balance_pending ??
               updated.pending_balance) as number;
             callbacks.onBalanceChange?.(newBal, newPending);
-
-            // KYC changed
             if (
               updated.kyc_status !== undefined ||
               updated.kyc_verified !== undefined
@@ -159,39 +150,34 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
                 updated.kyc_verified as boolean,
               );
             }
-
-            // Freeze changed
             if (updated.withdwals_fronzen !== undefined) {
               callbacks.onFreezeChange?.(
                 updated.withdwals_fronzen as boolean,
                 null,
               );
             }
-
-            // GPU plan / tier changed
             if (updated.tier !== undefined) {
               callbacks.onPlanChange?.(updated.tier as string);
             }
           },
         )
-        .subscribe((status) => {
+        .subscribe((status: string) => {
           if (status === "SUBSCRIBED")
             console.log("[realtime] user row subscribed");
         });
 
-      // ── 3. Platform announcements — admin posts, user sees immediately ──────
+      // ── 3. Platform announcements ──────────────────────────────────────────
       const announcementChannel = supabase
         .channel("platform_announcements_live")
         .on(
           "postgres_changes",
           {
-            event: "*", // INSERT, UPDATE, DELETE
+            event: "*",
             schema: "public",
             table: "platform_announcements",
             filter: "is_active=eq.true",
           },
           async () => {
-            // Refetch all active announcements
             const { data } = await supabase
               .from("platform_announcements")
               .select("*")
@@ -200,12 +186,12 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             callbacks.onAnnouncementChange?.((data as Announcement[]) || []);
           },
         )
-        .subscribe((status) => {
+        .subscribe((status: string) => {
           if (status === "SUBSCRIBED")
             console.log("[realtime] announcements subscribed");
         });
 
-      // ── 4. Withdrawal freeze — user sees freeze/unfreeze instantly ──────────
+      // ── 4. Withdrawal freeze ───────────────────────────────────────────────
       const freezeChannel = supabase
         .channel("withdrawal_freeze_live")
         .on(
@@ -215,7 +201,7 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             schema: "public",
             table: "withdrawal_freeze",
           },
-          (payload) => {
+          (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
             const row = (payload.new || payload.old) as {
               is_frozen?: boolean;
               reason?: string;
@@ -226,12 +212,12 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             );
           },
         )
-        .subscribe((status) => {
+        .subscribe((status: string) => {
           if (status === "SUBSCRIBED")
             console.log("[realtime] freeze subscribed");
         });
 
-      // ── 5. Support messages — admin replies appear instantly in chat ─────────
+      // ── 5. Support messages ────────────────────────────────────────────────
       const supportChannel = supabase
         .channel(`support_messages:${user.id}`)
         .on(
@@ -240,8 +226,7 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             event: "INSERT",
             schema: "public",
             table: "support_messages",
-            // We can't filter on user_id here (it's on the ticket, not the message)
-            // So we filter on is_admin=true to only get admin replies
+          },
           },
           async (payload) => {
             const msg = payload.new as { ticket_id: string; is_admin: boolean };
