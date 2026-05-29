@@ -33,14 +33,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const [session, setSession] = useState<Session | null>(null);
 
-  // ✅ FIXED FUNCTION
   const fetchUserProfile = async (uid: string) => {
     try {
       const { data, error } = await supabase
         .from("profiles")
         .select("*")
         .eq("id", uid)
-        .maybeSingle(); // ✅ no error if no row
+        .maybeSingle();
 
       if (error) {
         console.error("[v0] Error fetching user profile:", error);
@@ -49,7 +48,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (!data) {
-        // no profile yet (normal)
         setUserProfile(null);
         return;
       }
@@ -61,13 +59,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // ✅ CORRECT useEffect (outside function)
   useEffect(() => {
     let mounted = true;
 
     const initializeAuth = async () => {
       try {
-        // Check if supabase is available and properly initialized
         if (!supabase || !supabase.auth) {
           console.warn("[v0] Supabase not initialized - env vars missing");
           setLoading(false);
@@ -92,7 +88,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setIsReady(true);
       } catch (err: any) {
         console.error("[v0] Failed to get initial session:", err);
-
         if (mounted) {
           setError(err.message);
           setLoading(false);
@@ -103,33 +98,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     initializeAuth();
 
-   let subscription: any;
-   if (supabase && supabase.auth) {
-     const {
-       data: { subscription: sub },
-     } = supabase.auth.onAuthStateChange(
-       async (
-         event: string,
-         authSession: { user: { id: string; email?: string } } | null,
-       ) => {
-         if (!mounted) return;
-         console.log("[v0] Auth state changed:", event);
-         setSession(authSession);
-         setCurrentUser(authSession?.user || null);
-         setError(null);
+    let subscription: any;
+    if (supabase && supabase.auth) {
+      const {
+        data: { subscription: sub },
+      } = supabase.auth.onAuthStateChange(
+        async (event: string, authSession: Session | null) => {
+          if (!mounted) return;
+          console.log("[v0] Auth state changed:", event);
+          setSession(authSession);
+          setCurrentUser(authSession?.user || null);
+          setError(null);
 
-         if (authSession?.user) {
-           await fetchUserProfile(authSession.user.id);
-         } else {
-           setUserProfile(null);
-         }
+          if (authSession?.user) {
+            await fetchUserProfile(authSession.user.id);
+          } else {
+            setUserProfile(null);
+          }
 
-         setLoading(false);
-         setIsReady(true);
-       },
-     );
-     subscription = sub;
-   }
+          setLoading(false);
+          setIsReady(true);
+        },
+      );
+      subscription = sub;
+    }
 
     return () => {
       mounted = false;
@@ -140,13 +132,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     try {
       setLoading(true);
-
-      // Only call signOut if supabase is properly initialized
       if (supabase && supabase.auth) {
         const { error: err } = await supabase.auth.signOut();
         if (err) throw err;
       }
-
       setCurrentUser(null);
       setUserProfile(null);
       setSession(null);
