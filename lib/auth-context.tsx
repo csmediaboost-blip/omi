@@ -107,23 +107,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    if (supabase && supabase.auth) {
      const {
        data: { subscription: sub },
-     } = supabase.auth.onAuthStateChange(async (event: string, authSession) => {
-       if (!mounted) return;
-       console.log("[v0] Auth state changed:", event);
+     } = supabase.auth.onAuthStateChange(
+       async (
+         event: string,
+         authSession: { user: { id: string; email?: string } } | null,
+       ) => {
+         if (!mounted) return;
+         console.log("[v0] Auth state changed:", event);
+         setSession(authSession);
+         setCurrentUser(authSession?.user || null);
+         setError(null);
 
-       setSession(authSession);
-       setCurrentUser(authSession?.user || null);
-       setError(null);
+         if (authSession?.user) {
+           await fetchUserProfile(authSession.user.id);
+         } else {
+           setUserProfile(null);
+         }
 
-       if (authSession?.user) {
-         await fetchUserProfile(authSession.user.id);
-       } else {
-         setUserProfile(null);
-       }
-
-       setLoading(false);
-       setIsReady(true);
-     });
+         setLoading(false);
+         setIsReady(true);
+       },
+     );
      subscription = sub;
    }
 
