@@ -87,10 +87,9 @@ export function useRealtimeSync(callbacks: SyncCallbacks = {}) {
             table: "user_notifications",
             filter: `user_id=eq.${user.id}`,
           },
-          (payload) => {
-            const n = payload.new as Notification;
+          (payload: { new: Notification }) => {
+            const n = payload.new;
             callbacks.onNotification?.(n);
-
             // Auto-trigger specific callbacks based on notification type
             if (n.type === "kyc_approved" || n.type === "kyc_rejected") {
               // Refresh KYC status
