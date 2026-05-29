@@ -138,17 +138,17 @@ export async function getClientProfile(clientId: string): Promise<Client | null>
 export async function checkAndUpgradeTier(userId: string): Promise<UserTier> {
   try {
     const user = await getUserProfile(userId);
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     let newTier: UserTier = user.tier;
-
     // Auto-upgrade logic based on total_earnings
-    if (user.total_earnings >= 50000) {
-      newTier = 'enterprise';
-    } else if (user.total_earnings >= 10000) {
-      newTier = 'premium';
-    } else if (user.total_earnings >= 1000) {
-      newTier = 'pro';
+    const userWithEarnings = user as typeof user & { total_earnings?: number };
+    if ((userWithEarnings.total_earnings ?? 0) >= 50000) {
+      newTier = "enterprise";
+    } else if ((userWithEarnings.total_earnings ?? 0) >= 10000) {
+      newTier = "premium";
+    } else if ((userWithEarnings.total_earnings ?? 0) >= 1000) {
+      newTier = "pro";
     }
 
     if (newTier !== user.tier) {
