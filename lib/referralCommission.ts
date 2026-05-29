@@ -85,42 +85,41 @@ export async function processReferralCommission(
     });
 
     // 6. Ledger entries
-    await supabaseAdmin
-      .from("transaction_ledger")
-      .insert([
-        {
-          user_id: referrerId,
-          type: "referral_commission",
-          amount: referrerEarns,
-          description: `${REFERRER_PCT}% referral commission from payment of $${paymentAmount}`,
-          reference_id: paymentRef,
-          created_at: new Date().toISOString(),
-        },
-        ...(!paidUser.referral_bonus_claimed
-          ? [
-              {
-                user_id: paidUserId,
-                type: "referral_bonus",
-                amount: referredBonus,
-                description: `${REFERRED_PCT}% welcome bonus from referral`,
-                reference_id: paymentRef,
-                created_at: new Date().toISOString(),
-              },
-            ]
-          : []),
-      ]);
+    await supabaseAdmin.from("transaction_ledger").insert([
+      {
+        user_id: referrerId,
+        type: "referral_commission",
+        amount: referrerEarns,
+        description: `${REFERRER_PCT}% referral commission from payment of $${paymentAmount}`,
+        reference_id: paymentRef,
+        created_at: new Date().toISOString(),
+      },
+      ...(!paidUser.referral_bonus_claimed
+        ? [
+            {
+              user_id: paidUserId,
+              type: "referral_bonus",
+              amount: referredBonus,
+              description: `${REFERRED_PCT}% welcome bonus from referral`,
+              reference_id: paymentRef,
+              created_at: new Date().toISOString(),
+            },
+          ]
+        : []),
+    ]);
 
     // 7. Notify referrer
-    await supabaseAdmin
-      .from("user_notifications")
-      .insert({
+    try {
+      await supabaseAdmin.from("user_notifications").insert({
         user_id: referrerId,
         type: "referral",
         title: "💰 Referral Commission Earned!",
         body: `You earned $${referrerEarns.toFixed(2)} (${REFERRER_PCT}%) from a payment made by someone in your network.`,
         created_at: new Date().toISOString(),
-      })
-      .catch(() => {});
+      });
+    } catch {
+      // ignore notification failure
+    }
 
     console.log(
       `Referral commission: referrer ${referrerId} earned $${referrerEarns}, referred ${paidUserId} earned $${referredBonus} bonus`,
