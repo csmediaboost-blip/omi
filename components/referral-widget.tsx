@@ -50,7 +50,8 @@ export function ReferralWidget({ trigger = "idle", className = "" }: Props) {
         .select("node_expiry_date")
         .eq("referred", user.id);
       const active = (collabs || []).filter(
-        (c) => c.node_expiry_date && new Date(c.node_expiry_date) > now,
+        (c: { node_expiry_date: string | null }) =>
+          c.node_expiry_date && new Date(c.node_expiry_date) > now,
       ).length;
       setActiveNodes(active);
     }
