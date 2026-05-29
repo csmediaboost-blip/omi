@@ -960,26 +960,21 @@ export default function DashboardClient({
   // This prevents stale channel handlers that block navigation
   useEffect(() => {
     if (!userDetails.id) return;
-
-    const userChannel = supabase
-      .channel(`dash_user_${userDetails.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "users",
-          filter: `id=eq.${userDetails.id}`,
-        },
-        (payload) => {
-          setUserData((prev) =>
-            prev
-              ? { ...prev, ...(payload.new as User) }
-              : (payload.new as User),
-          );
-        },
-      )
-      .subscribe();
+const userChannel = supabase
+  .channel(`dash_user_${userDetails.id}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "UPDATE",
+      schema: "public",
+      table: "users",
+      filter: `id=eq.${userDetails.id}`,
+    },
+    (payload: { new: User }) => {
+      setUserData((prev) => (prev ? { ...prev, ...payload.new } : payload.new));
+    },
+  )
+  .subscribe();
 
     const miningChannel = supabase
       .channel(`dash_mining_${userDetails.id}`)
