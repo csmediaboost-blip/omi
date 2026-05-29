@@ -41,6 +41,8 @@ export async function runWithdrawalSecurityChecks(
 ): Promise<WithdrawalFraudCheck> {
   console.log("[SECURITY] Starting withdrawal check for user:", userId);
 
+  const db = supabase as any;
+
   // ─── CHECK 1: Account Status ───────────────────────────────────
   if (profile.status && profile.status === "flagged") {
     console.warn("[FRAUD] Account flagged for user:", userId);
@@ -118,7 +120,7 @@ export async function runWithdrawalSecurityChecks(
   }
 
   // ─── CHECK 6: Balance Verification (Re-check from DB) ──────────
-  const { data: fresh, error: balErr } = await supabase
+  const { data: fresh, error: balErr } = await db
     .from("users")
     .select("balance_available, wallet_balance")
     .eq("id", userId)
@@ -131,8 +133,7 @@ export async function runWithdrawalSecurityChecks(
     };
   }
 
-  const freshBalance =
-    (fresh as any)?.balance_available ?? (fresh as any)?.wallet_balance ?? 0;
+  const freshBalance = fresh?.balance_available ?? fresh?.wallet_balance ?? 0;
 
   if (amount > freshBalance) {
     return {
@@ -143,7 +144,7 @@ export async function runWithdrawalSecurityChecks(
 
   // ─── CHECK 7: 24-Hour Rate Limit ($50k/day) ────────────────────
   const oneDayAgo = new Date(Date.now() - 86400000).toISOString();
-  const { data: recentWDs, error: wdErr } = await supabase
+  const { data: recentWDs, error: wdErr } = await db
     .from("withdrawals")
     .select("amount")
     .eq("user_id", userId)
@@ -169,7 +170,7 @@ export async function runWithdrawalSecurityChecks(
   }
 
   // ─── CHECK 8: Max 3 Pending Withdrawals ───────────────────────
-  const { data: pendingWDs, error: pendErr } = await supabase
+  const { data: pendingWDs, error: pendErr } = await db
     .from("withdrawals")
     .select("id")
     .eq("user_id", userId)
@@ -191,7 +192,7 @@ export async function runWithdrawalSecurityChecks(
 
   // ─── CHECK 9: Duplicate Detection ─────────────────────────────
   const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
-  const { data: recentRequests } = await supabase
+  const { data: recentRequests } = await db
     .from("withdrawals")
     .select("id")
     .eq("user_id", userId)
@@ -219,7 +220,8 @@ export async function logWithdrawalEvent(
   metadata: Record<string, any>,
 ): Promise<void> {
   try {
-    await (supabase.from("audit_log") as any).insert({
+    const db = supabase as any;
+    await db.from("audit_log").insert({
       user_id: userId,
       event_type: eventType,
       metadata: JSON.stringify(metadata),
@@ -237,7 +239,9 @@ export async function atomicDeductBalance(
   amount: number,
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const { error } = await (supabase as any).rpc("atomic_deduct_balance", {
+    const db = supabase as any;
+
+    const { error } = await db.rpc("atomic_deduct_balance", {
       p_user_id: userId,
       p_amount: amount,
     });
@@ -247,7 +251,7 @@ export async function atomicDeductBalance(
     }
 
     // Fallback: Manual deduction
-    const { data: user, error: fetchErr } = await supabase
+    const { data: user, error: fetchErr } = await db
       .from("users")
       .select("balance_available, wallet_balance")
       .eq("id", userId)
@@ -257,8 +261,7 @@ export async function atomicDeductBalance(
       return { success: false, error: "Failed to fetch user balance" };
     }
 
-    const currentBal =
-      (user as any)?.balance_available ?? (user as any)?.wallet_balance ?? 0;
+    const currentBal = user?.balance_available ?? user?.wallet_balance ?? 0;
 
     if (amount > currentBal) {
       return { success: false, error: "Insufficient balance for deduction" };
@@ -266,7 +269,7 @@ export async function atomicDeductBalance(
 
     const newBal = Math.max(0, currentBal - amount);
 
-    const { error: updateErr } = await supabase
+    const { error: updateErr } = await db
       .from("users")
       .update({
         balance_available: newBal,
@@ -291,16 +294,17 @@ export async function refundBalance(
   amount: number,
 ): Promise<void> {
   try {
-    const { data: user } = await supabase
+    const db = supabase as any;
+
+    const { data: user } = await db
       .from("users")
       .select("balance_available, wallet_balance")
       .eq("id", userId)
       .single();
 
-    const currentBal =
-      (user as any)?.balance_available ?? (user as any)?.wallet_balance ?? 0;
+    const currentBal = user?.balance_available ?? user?.wallet_balance ?? 0;
 
-    await supabase
+    await db
       .from("users")
       .update({
         balance_available: currentBal + amount,
@@ -320,7 +324,8 @@ export async function recordWithdrawalLedger(
   payoutGateway: string,
 ): Promise<void> {
   try {
-    await (supabase.from("transaction_ledger") as any).insert({
+    const db = supabase as any;
+    await db.from("transaction_ledger").insert({
       user_id: userId,
       type: "withdrawal",
       amount: -amount,
