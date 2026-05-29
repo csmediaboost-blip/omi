@@ -1,17 +1,20 @@
 import { supabase, getSupabaseServiceClient } from "./supabase";
 import { User } from "./validators";
-import bcrypt from "bcryptjs"; // bcryptjs is pure JS — no native build step needed
+import bcrypt from "bcryptjs";
 
 // User creation and management
-export async function createUserProfile(uid: string, userData: Partial<{
-  email: string;
-  name: string;
-  role: string;
-  referred_by: string | null;
-  country_code: string;
-  currency: string;
-  [key: string]: any;
-}>) {
+export async function createUserProfile(
+  uid: string,
+  userData: Partial<{
+    email: string;
+    name: string;
+    role: string;
+    referred_by: string | null;
+    country_code: string;
+    currency: string;
+    [key: string]: any;
+  }>,
+) {
   try {
     const userDocument = {
       id: uid,
@@ -35,9 +38,7 @@ export async function createUserProfile(uid: string, userData: Partial<{
       currency: userData.currency ?? "USD",
     };
 
-    const { error } = await supabase
-      .from("users")
-      .insert([userDocument]);
+    const { error } = await supabase.from("users").insert([userDocument]);
 
     if (error) throw error;
 
@@ -45,16 +46,6 @@ export async function createUserProfile(uid: string, userData: Partial<{
   } catch (error) {
     console.error("Error creating user profile:", error);
     return { success: false, error };
-  }
-}
-
-    const { error } = await supabase.from("users").insert([userDocument]);
-
-    if (error) throw error;
-    return userDocument;
-  } catch (error) {
-    console.error("Error creating user profile:", error);
-    throw error;
   }
 }
 
@@ -102,7 +93,7 @@ export async function getUserByEmail(email: string) {
       .single();
 
     if (error && error.code === "PGRST116") {
-      return null; // No rows found
+      return null;
     }
     if (error) throw error;
 
