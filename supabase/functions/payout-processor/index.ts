@@ -3,7 +3,8 @@
 // Cron: set in supabase/config.toml or dashboard
 // Schedule: Every Friday at 10:00, 14:00, 18:00 UTC
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// @ts-nocheck
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -38,7 +39,6 @@ async function releasePendingBalances() {
   for (const user of users) {
     await supabase.rpc("release_pending_to_available", { p_user_id: user.id });
 
-    // Notify user
     await supabase.rpc("create_notification", {
       p_user_id: user.id,
       p_type: "system",
@@ -133,7 +133,6 @@ async function processBatch(batchId: string) {
   for (const req of requests) {
     const reference = `OT-${req.id}-${Date.now()}`;
 
-    // Determine gateway from stored field
     const gateway = req.gateway || "manual";
     let result: { success: boolean; ref?: string; error?: string } = {
       success: false,
@@ -149,7 +148,6 @@ async function processBatch(batchId: string) {
     } else if (gateway === "stripe" && STRIPE_SECRET) {
       result = await processStripePayout(req.wallet_address, req.amount);
     } else {
-      // Manual / crypto — mark completed and admin processes manually
       result = { success: true, ref: `MANUAL-${reference}` };
     }
 
@@ -163,12 +161,10 @@ async function processBatch(batchId: string) {
         })
         .eq("id", req.id);
 
-      // Release locked balance
       await supabase.rpc("release_pending_to_available", {
         p_user_id: req.user_id,
       });
 
-      // Notify user
       await supabase.rpc("create_notification", {
         p_user_id: req.user_id,
         p_type: "withdrawal_completed",
@@ -182,30 +178,22 @@ async function processBatch(batchId: string) {
         .update({ status: "failed", failure_reason: result.error })
         .eq("id", req.id);
 
-      // Restore balance on failure
-      await supabase
+      const { data: u } = await supabase
         .from("users")
         .select("balance_available, balance_locked, total_withdrawn")
         .eq("id", req.user_id)
-        .single()
-        .then(async ({ data: u }) => {
-          if (u) {
-            await supabase
-              .from("users")
-              .update({
-                balance_available: (u.balance_available || 0) + req.amount,
-                balance_locked: Math.max(
-                  (u.balance_locked || 0) - req.amount,
-                  0,
-                ),
-                total_withdrawn: Math.max(
-                  (u.total_withdrawn || 0) - req.amount,
-                  0,
-                ),
-              })
-              .eq("id", req.user_id);
-          }
-        });
+        .single();
+
+      if (u) {
+        await supabase
+          .from("users")
+          .update({
+            balance_available: (u.balance_available || 0) + req.amount,
+            balance_locked: Math.max((u.balance_locked || 0) - req.amount, 0),
+            total_withdrawn: Math.max((u.total_withdrawn || 0) - req.amount, 0),
+          })
+          .eq("id", req.user_id);
+      }
 
       await supabase.rpc("create_notification", {
         p_user_id: req.user_id,
@@ -224,13 +212,11 @@ Deno.serve(async (req) => {
     const today = new Date();
     const isFriday = today.getUTCDay() === 5;
 
-    // Release pending balances on Friday morning before processing
     const slot = getBatchSlot();
     if (isFriday && slot === "morning") {
       await releasePendingBalances();
     }
 
-    // Process the current batch slot
     if (isFriday) {
       const batchId = getBatchId(slot);
       await processBatch(batchId);
