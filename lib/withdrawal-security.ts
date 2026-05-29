@@ -234,7 +234,7 @@ export async function logWithdrawalEvent(
   metadata: Record<string, any>,
 ): Promise<void> {
   try {
-    await supabase.from("audit_log").insert({
+    await (supabase.from("audit_log") as any).insert({
       user_id: userId,
       event_type: eventType,
       metadata: JSON.stringify(metadata),
