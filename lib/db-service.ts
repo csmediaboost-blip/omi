@@ -3,13 +3,21 @@ import { User } from "./validators";
 import bcrypt from "bcryptjs"; // bcryptjs is pure JS — no native build step needed
 
 // User creation and management
-export async function createUserProfile(uid: string, userData: Partial<User>) {
+export async function createUserProfile(uid: string, userData: Partial<{
+  email: string;
+  name: string;
+  role: string;
+  referred_by: string | null;
+  country_code: string;
+  currency: string;
+  [key: string]: any;
+}>) {
   try {
     const userDocument = {
       id: uid,
-      email: userData.email,
-      name: userData.name || "",
-      role: userData.role || "user",
+      email: userData.email ?? "",
+      name: userData.name ?? "",
+      role: userData.role ?? "user",
       tier: "free",
       balance: 0,
       total_earnings: 0,
@@ -17,15 +25,28 @@ export async function createUserProfile(uid: string, userData: Partial<User>) {
       bio: "",
       kyc_status: "pending",
       referral_code: generateReferralCode(),
-      referred_by: userData.referred_by || null,
+      referred_by: userData.referred_by ?? null,
       tasks_completed: 0,
       rating: 5,
       created_at: new Date().toISOString(),
       last_login: new Date().toISOString(),
       is_active: true,
-      country_code: userData.country_code || "US",
-      currency: userData.currency || "USD",
+      country_code: userData.country_code ?? "US",
+      currency: userData.currency ?? "USD",
     };
+
+    const { error } = await supabase
+      .from("users")
+      .insert([userDocument]);
+
+    if (error) throw error;
+
+    return { success: true, user: userDocument };
+  } catch (error) {
+    console.error("Error creating user profile:", error);
+    return { success: false, error };
+  }
+}
 
     const { error } = await supabase.from("users").insert([userDocument]);
 
