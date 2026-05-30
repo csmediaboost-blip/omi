@@ -1292,31 +1292,25 @@ function CheckoutInner() {
         setUserId(user.id);
       });
 
-    supabase
-      .from("payment_config")
-      .select("key,value")
-      .then(({ data }: any) => {
-        if (cancelled || !data) {
-          setConfigLoaded(true);
-          return;
+    fetch("/api/checkout/payment-config")
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        if (data.crypto_wallet_address) {
+          setCryptoWalletAddress(data.crypto_wallet_address);
         }
-        const get = (k: string) =>
-          data.find((d: any) => d.key === k)?.value || "";
-        const disc = get("crypto_discount_percent");
-        const wallet = get("crypto_wallet_usdt_trc20");
-        const network = get("crypto_network_label");
-        const qr = get("crypto_qr_image_url");
-        if (disc && !isNaN(parseFloat(disc)))
-          setCryptoDiscount(parseFloat(disc));
-        if (wallet && wallet !== "EMPTY") setCryptoWalletAddress(wallet);
-        if (network && network !== "EMPTY") setCryptoNetwork(network);
-        if (qr && qr !== "EMPTY") setCryptoQrImageUrl(qr);
+        if (data.usd_to_ngn_rate && !isNaN(Number(data.usd_to_ngn_rate))) {
+          // Update NGN rate in CURRENCY_RATES dynamically
+          CURRENCY_RATES["NG"] = {
+            currency: "NGN",
+            rate: Number(data.usd_to_ngn_rate),
+          };
+        }
         setConfigLoaded(true);
+      })
+      .catch(() => {
+        if (!cancelled) setConfigLoaded(true);
       });
-
-    return () => {
-      cancelled = true;
-    };
   }, []); // eslint-disable-line
 
   // F1: Check daily bank transfer limit on mount
