@@ -1,6 +1,5 @@
 {
   "installCommand": "npm install",
   "buildCommand": "npm run build",
-  "framework": "nextjs",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . ':(exclude)supabase'"
+  "framework": "nextjs"
 }
