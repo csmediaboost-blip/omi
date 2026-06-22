@@ -1,0 +1,361 @@
+// app/api/korapay/webhook/route.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXES vs original:
+//  FIX-1  metadata is jsonb (already a JS object from Supabase) — never JSON.parse it
+//  FIX-2  operator_licenses insert uses correct columns: activated_at, expires_at, amount_paid
+//  FIX-3  node_allocations insert only uses columns that exist in DB
+//  FIX-4  handles charge.expired so failed payments show as "failed" not "pending" forever
+//  FIX-5  purchaseType detection is robust — checks metadata AND gateway field fallback
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { createClient } from "@supabase/supabase-js";
+import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
+import { processReferralCommission } from "@/lib/referralCommission";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function getSupabaseClient() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+    process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+    { auth: { autoRefreshToken: false, persistSession: false } },
+  );
+}
+
+function verifyKorapaySignature(
+  rawBody: string,
+  signature: string,
+  secret: string,
+): boolean {
+  try {
+    const hash = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest("hex");
+    return hash === signature;
+  } catch {
+    return false;
+  }
+}
+
+// ─── FIX-1: Safe metadata reader — handles both jsonb object AND string ───────
+function parseMetadata(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  // Supabase jsonb columns come back as plain JS objects — never re-parse them
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as Record<string, unknown>;
+  }
+  // Fallback: if somehow stored as a string
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const rawBody = await req.text();
+    const signature = req.headers.get("x-korapay-signature") || "";
+    const webhookSecret = process.env.KORAPAY_WEBHOOK_SECRET || "";
+
+    if (webhookSecret && signature) {
+      if (!verifyKorapaySignature(rawBody, signature, webhookSecret)) {
+        console.error("[webhook] Invalid KoraPay signature — rejecting");
+        return NextResponse.json(
+          { error: "Invalid signature" },
+          { status: 401 },
+        );
+      }
+    } else if (webhookSecret && !signature) {
+      console.error("[webhook] Missing signature header — rejecting");
+      return NextResponse.json({ error: "Missing signature" }, { status: 401 });
+    }
+
+    const body = JSON.parse(rawBody) as {
+      event?: string;
+      data?: { reference?: string; [key: string]: unknown };
+    };
+
+    const { data, event } = body;
+    const reference = data?.reference;
+
+    console.log("[webhook] Event:", event, "Reference:", reference);
+
+    if (!reference) {
+      return NextResponse.json({ error: "Missing reference" }, { status: 400 });
+    }
+
+    const supabase = getSupabaseClient();
+
+    // ── FIX-4: Handle ALL failure/expiry events so admin never sees stuck pending ──
+    if (
+      event === "charge.failed" ||
+      event === "charge.declined" ||
+      event === "charge.expired" ||
+      event === "charge.cancelled"
+    ) {
+      await supabase
+        .from("payment_transactions")
+        .update({
+          status: "failed",
+          failure_reason: `KoraPay event: ${event}`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("gateway_reference", reference)
+        .neq("status", "confirmed"); // never overwrite a confirmed payment
+
+      console.log("[webhook] Marked as failed:", reference, "event:", event);
+      return NextResponse.json({ received: true });
+    }
+
+    if (event !== "charge.success") {
+      // Unknown event — acknowledge and ignore
+      return NextResponse.json({ received: true });
+    }
+
+    // ── charge.success path ───────────────────────────────────────────────────
+    const { data: txData, error: txError } = await supabase
+      .from("payment_transactions")
+      .select("*")
+      .eq("gateway_reference", reference)
+      .maybeSingle();
+
+    if (txError || !txData) {
+      console.error(
+        "[webhook] Transaction not found:",
+        reference,
+        txError?.message,
+      );
+      return NextResponse.json({ received: true });
+    }
+
+    // Idempotency guard — never re-process a confirmed payment
+    if (txData.status === "confirmed" || txData.status === "completed") {
+      console.log("[webhook] Already confirmed, skipping:", reference);
+      return NextResponse.json({ received: true });
+    }
+
+    // ── FIX-1: Parse metadata safely — it's already a JS object from Supabase jsonb ──
+    const metadata = parseMetadata(txData.metadata);
+
+    const now = new Date().toISOString();
+
+    // ── FIX-5: Robust purchaseType detection ──────────────────────────────────
+    const purchaseType =
+      (metadata.purchaseType as string) ||
+      (txData.gateway === "gpu_mining" ? "gpu_mining" : "") ||
+      (txData.node_key ? "gpu_mining" : "");
+
+    console.log("[webhook] Processing payment:", {
+      reference,
+      purchaseType,
+      userId: txData.user_id?.slice(0, 8),
+      amount: txData.amount,
+    });
+
+    // ── 1. Mark transaction confirmed ─────────────────────────────────────────
+    await supabase
+      .from("payment_transactions")
+      .update({
+        status: "confirmed",
+        confirmed_at: now,
+        verified_by_admin: true,
+        updated_at: now,
+      })
+      .eq("gateway_reference", reference);
+
+    // ── 2. Credit referral commissions ────────────────────────────────────────
+    try {
+      await processReferralCommission(txData.user_id, txData.amount, reference);
+    } catch (e: any) {
+      console.error("[webhook] Referral commission error:", e.message);
+    }
+
+    // ── 3. Activate product ───────────────────────────────────────────────────
+
+    if (purchaseType === "license") {
+      // ── FIX-2: Use actual operator_licenses columns ───────────────────────
+      const licenseType =
+        (metadata.licenseType as string) ||
+        txData.node_key ||
+        "operator_license";
+
+      const { data: existingLic } = await supabase
+        .from("operator_licenses")
+        .select("id")
+        .eq("user_id", txData.user_id)
+        .eq("license_type", licenseType)
+        .eq("status", "active")
+        .maybeSingle();
+
+      if (!existingLic) {
+        const expiresAt = new Date();
+        expiresAt.setFullYear(expiresAt.getFullYear() + 1);
+
+        const { error: licErr } = await supabase
+          .from("operator_licenses")
+          .insert({
+            user_id: txData.user_id,
+            license_type: licenseType,
+            status: "active",
+            purchased_at: now, // ✅ correct column name
+            activated_at: now, // ✅ added by SQL migration
+            expires_at: expiresAt.toISOString(), // ✅ added by SQL migration
+            amount_paid: txData.amount, // ✅ added by SQL migration
+            transaction_ref: reference, // ✅ correct column name
+          });
+
+        if (licErr) {
+          console.error("[webhook] License insert failed:", licErr.message);
+        } else {
+          console.log(
+            "[webhook] ✅ License activated for user:",
+            txData.user_id?.slice(0, 8),
+          );
+        }
+      } else {
+        console.log("[webhook] License already active, skipping insert");
+      }
+    } else {
+      // ── GPU mining / node / contract ─────────────────────────────────────
+      const isSplit = metadata.isSplitPayment === true;
+      const splitInstallment = Number(metadata.splitInstallment) || 1;
+      const splitTotal = Number(metadata.splitTotal) || 1;
+      const isFinalInstallment = !isSplit || splitInstallment >= splitTotal;
+
+      if (!isFinalInstallment) {
+        console.log(
+          `[webhook] Split ${splitInstallment}/${splitTotal} — waiting for remaining installments`,
+        );
+        return NextResponse.json({ received: true });
+      }
+
+      const { data: existingAlloc } = await supabase
+        .from("node_allocations")
+        .select("id")
+        .eq("user_id", txData.user_id)
+        .eq("plan_id", txData.node_key)
+        .gte("created_at", new Date(Date.now() - 10 * 60 * 1000).toISOString())
+        .limit(1)
+        .maybeSingle();
+
+      if (!existingAlloc) {
+        const paymentModel =
+          purchaseType === "gpu_contract"
+            ? "contract"
+            : (metadata.paymentModel as string) || "flexible";
+
+        const isContract = paymentModel === "contract";
+        const miningPeriod = (metadata.miningPeriod as string) || "daily";
+        const contractMonths = (metadata.contractMonths as number) ?? null;
+
+        const periodMs: Record<string, number> = {
+          hourly: 3_600_000,
+          daily: 86_400_000,
+          weekly: 7 * 86_400_000,
+          monthly: 30 * 86_400_000,
+        };
+
+        let miningEndsAt: string | null = null;
+        let maturityDate: string | null = null;
+
+        if (isContract && contractMonths) {
+          const end = new Date();
+          end.setMonth(end.getMonth() + contractMonths);
+          miningEndsAt = end.toISOString();
+          maturityDate = end.toISOString();
+        } else {
+          miningEndsAt = new Date(
+            Date.now() + (periodMs[miningPeriod] ?? periodMs.daily),
+          ).toISOString();
+        }
+
+        // ── FIX-3: Only insert columns that actually exist in node_allocations ──
+        const { error: allocErr } = await supabase
+          .from("node_allocations")
+          .insert({
+            user_id: txData.user_id,
+            plan_id: txData.node_key,
+            amount_invested: txData.amount,
+            currency: txData.currency || "USD",
+            status: "active",
+            payment_model: paymentModel,
+            instance_type: (metadata.itype as string) || "on_demand",
+            mining_period: miningPeriod,
+            contract_months: contractMonths,
+            contract_label: (metadata.contractLabel as string) || null,
+            contract_min_pct: (metadata.contractMinPct as number) || null,
+            contract_max_pct: (metadata.contractMaxPct as number) || null,
+            lock_in_months: isContract ? (contractMonths ?? 0) : 0,
+            lock_in_label:
+              (metadata.contractLabel as string) ||
+              (isContract ? `${contractMonths} Months` : "Flexible"),
+            lock_in_multiplier: (metadata.lockInMultiplier as number) || 1.0,
+            maturity_date: maturityDate,
+            mining_ends_at: miningEndsAt,
+            mining_completed: false,
+            total_earned: 0,
+            total_withdrawn: 0,
+            final_profit: 0,
+            capital_returned: false,
+            auto_reinvest: (metadata.autoReinvest as boolean) || false,
+            funded_from: "external",
+            funded_amount: txData.amount,
+            created_at: now,
+            updated_at: now,
+            // tier_index and lock_unlock_at added by SQL migration — safe to include
+            tier_index: (metadata.tierIndex as number) ?? 0,
+            lock_unlock_at: null,
+          });
+
+        if (allocErr) {
+          console.error(
+            "[webhook] ❌ Allocation insert failed:",
+            allocErr.message,
+          );
+        } else {
+          console.log(
+            "[webhook] ✅ Mining started for user:",
+            txData.user_id?.slice(0, 8),
+            "plan:",
+            txData.node_key,
+          );
+        }
+      } else {
+        console.log("[webhook] Allocation already exists, skipping insert");
+      }
+    }
+
+    // ── 4. Send in-app notification ───────────────────────────────────────────
+    try {
+      await supabase.from("user_notifications").insert({
+        user_id: txData.user_id,
+        type:
+          purchaseType === "license" ? "license_activated" : "mining_started",
+        title:
+          purchaseType === "license"
+            ? "🏆 License Activated!"
+            : "⛏️ Mining Session Started!",
+        body:
+          purchaseType === "license"
+            ? "Your operator license is now active."
+            : `Your ${(metadata.miningPeriod as string) || "daily"} GPU mining session is now live.`,
+        created_at: now,
+      });
+    } catch (e: any) {
+      console.error("[webhook] Notification insert error:", e.message);
+    }
+
+    return NextResponse.json({ received: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Internal server error";
+    console.error("[webhook] Unhandled error:", msg);
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}

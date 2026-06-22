@@ -1,0 +1,13 @@
+-- Add indexes for performance
+CREATE INDEX idx_tasks_created_by ON tasks(created_by);
+CREATE INDEX idx_tasks_status ON tasks(status);
+CREATE INDEX idx_tasks_deadline ON tasks(deadline);
+CREATE INDEX idx_task_assignments_user_id ON task_assignments(user_id);
+CREATE INDEX idx_task_assignments_task_id ON task_assignments(task_id);
+CREATE INDEX idx_task_assignments_status ON task_assignments(status);
+CREATE INDEX idx_transactions_user_id ON transactions(user_id);
+CREATE INDEX idx_transactions_created_at ON transactions(created_at);
+CREATE INDEX idx_referrals_referrer_id ON referrals(referrer_id);
+CREATE INDEX idx_referrals_referred_user_id ON referrals(referred_user_id);
+CREATE INDEX idx_notifications_user_id ON notifications(user_id);
+CREATE INDEX idx_notifications_is_read ON notifications(is_read);

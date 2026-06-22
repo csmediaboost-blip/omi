@@ -1,0 +1,187 @@
+"use client";
+
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  ReactNode,
+} from "react";
+import { User as SupabaseUser, Session } from "@supabase/supabase-js";
+// ✅ FIX: import AuthChangeEvent so the onAuthStateChange callback is fully typed
+import type { AuthChangeEvent } from "@supabase/supabase-js";
+import { supabase } from "./supabase";
+import type { User } from "./validators";
+
+interface AuthContextType {
+  currentUser: SupabaseUser | null;
+  userProfile: User | null;
+  loading: boolean;
+  logout: () => Promise<void>;
+  isAuthenticated: boolean;
+  error: string | null;
+  refreshProfile: () => Promise<void>;
+  isReady: boolean;
+  session: Session | null;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
+  const [userProfile, setUserProfile] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isReady, setIsReady] = useState(false);
+  const [session, setSession] = useState<Session | null>(null);
+
+  const fetchUserProfile = async (uid: string) => {
+    try {
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", uid)
+        .maybeSingle();
+
+      if (error) {
+        console.error("[v0] Error fetching user profile:", error);
+        setError(error.message);
+        return;
+      }
+
+      if (!data) {
+        setUserProfile(null);
+        return;
+      }
+
+      setUserProfile(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Unknown profile error";
+      console.error("[v0] Unexpected profile error:", err);
+      setError(msg);
+    }
+  };
+
+  useEffect(() => {
+    let mounted = true;
+
+    const initializeAuth = async () => {
+      try {
+        if (!supabase || !supabase.auth) {
+          console.warn("[v0] Supabase not initialized - env vars missing");
+          setLoading(false);
+          setIsReady(true);
+          return;
+        }
+
+        const {
+          data: { session: currentSession },
+        } = await supabase.auth.getSession();
+
+        if (!mounted) return;
+
+        setSession(currentSession);
+        setCurrentUser(currentSession?.user || null);
+
+        if (currentSession?.user) {
+          await fetchUserProfile(currentSession.user.id);
+        }
+
+        setLoading(false);
+        setIsReady(true);
+      } catch (err: unknown) {
+        const msg =
+          err instanceof Error ? err.message : "Failed to initialise session";
+        console.error("[v0] Failed to get initial session:", err);
+        if (mounted) {
+          setError(msg);
+          setLoading(false);
+          setIsReady(true);
+        }
+      }
+    };
+
+    initializeAuth();
+
+    let subscription: { unsubscribe: () => void } | undefined;
+
+    if (supabase && supabase.auth) {
+      const {
+        data: { subscription: sub },
+      } = supabase.auth.onAuthStateChange(
+        // ✅ FIX: explicitly type both callback parameters
+        async (event: AuthChangeEvent, authSession: Session | null) => {
+          if (!mounted) return;
+          console.log("[v0] Auth state changed:", event);
+          setSession(authSession);
+          setCurrentUser(authSession?.user ?? null);
+          setError(null);
+
+          if (authSession?.user) {
+            await fetchUserProfile(authSession.user.id);
+          } else {
+            setUserProfile(null);
+          }
+
+          setLoading(false);
+          setIsReady(true);
+        },
+      );
+      subscription = sub;
+    }
+
+    return () => {
+      mounted = false;
+      subscription?.unsubscribe();
+    };
+  }, []);
+
+  const logout = async () => {
+    try {
+      setLoading(true);
+      if (supabase && supabase.auth) {
+        const { error: err } = await supabase.auth.signOut();
+        if (err) throw err;
+      }
+      setCurrentUser(null);
+      setUserProfile(null);
+      setSession(null);
+      setError(null);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Logout failed";
+      console.error("[v0] Logout error:", err);
+      setError(msg);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshProfile = async () => {
+    if (currentUser) {
+      await fetchUserProfile(currentUser.id);
+    }
+  };
+
+  const value: AuthContextType = {
+    currentUser,
+    userProfile,
+    loading,
+    logout,
+    isAuthenticated: !!currentUser,
+    error,
+    refreshProfile,
+    isReady,
+    session,
+  };
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
+}

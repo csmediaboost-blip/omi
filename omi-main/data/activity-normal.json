@@ -1,0 +1,402 @@
+[
+  {
+    "user": "contributor****",
+    "country": "Brazil",
+    "event": "completed Data Labeling task"
+  },
+  {
+    "user": "contributor****",
+    "country": "India",
+    "event": "submitted Image Classification dataset"
+  },
+  {
+    "user": "node****",
+    "country": "Germany",
+    "event": "finished AI Response Evaluation task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Nigeria",
+    "event": "completed Text Annotation task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Philippines",
+    "event": "validated NLP training dataset"
+  },
+  {
+    "user": "reviewer****",
+    "country": "UK",
+    "event": "approved AI model evaluation results"
+  },
+  {
+    "user": "contributor****",
+    "country": "South Africa",
+    "event": "completed Sentiment Analysis task"
+  },
+  {
+    "user": "node****",
+    "country": "Canada",
+    "event": "finished AI Data Quality Assessment"
+  },
+  {
+    "user": "contributor****",
+    "country": "Indonesia",
+    "event": "completed AI Text Classification task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Kenya",
+    "event": "validated training data batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "USA",
+    "event": "completed Image Tagging task"
+  },
+  {
+    "user": "node****",
+    "country": "India",
+    "event": "activated Researcher Node"
+  },
+  {
+    "user": "contributor****",
+    "country": "Mexico",
+    "event": "upgraded to Compute Node"
+  },
+  {
+    "user": "user****",
+    "country": "Egypt",
+    "event": "joined Observer Node network"
+  },
+  {
+    "user": "contributor****",
+    "country": "Vietnam",
+    "event": "joined AI Contributor Network"
+  },
+  {
+    "user": "analyst****",
+    "country": "Germany",
+    "event": "finished Sentiment Analysis task"
+  },
+  {
+    "user": "contributor****",
+    "country": "France",
+    "event": "validated AI Moderation dataset"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Japan",
+    "event": "reviewed Natural Language Generation task"
+  },
+  {
+    "user": "node****",
+    "country": "Canada",
+    "event": "evaluated AI Sentiment Accuracy task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Australia",
+    "event": "completed Audio Labeling task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Russia",
+    "event": "validated AI Image Recognition dataset"
+  },
+  {
+    "user": "node****",
+    "country": "UK",
+    "event": "completed 10 microtasks in AI Annotation"
+  },
+  {
+    "user": "contributor****",
+    "country": "South Korea",
+    "event": "finished 5 microtasks in Image Labeling"
+  },
+  {
+    "user": "user****",
+    "country": "Pakistan",
+    "event": "completed 3 NLP microtasks"
+  },
+  {
+    "user": "analyst****",
+    "country": "Brazil",
+    "event": "approved 12 microtasks in data pipeline"
+  },
+  {
+    "user": "contributor****",
+    "country": "Nigeria",
+    "event": "verified device and activated contributor node"
+  },
+  {
+    "user": "user****",
+    "country": "Germany",
+    "event": "activated AI Analyst Node License"
+  },
+  {
+    "user": "contributor****",
+    "country": "Russia",
+    "event": "upgraded to Neural Node"
+  },
+  {
+    "user": "user****",
+    "country": "Indonesia",
+    "event": "completed Contributor Onboarding process"
+  },
+  {
+    "user": "contributor****",
+    "country": "Argentina",
+    "event": "completed Observer Node verification"
+  },
+  {
+    "user": "node****",
+    "country": "USA",
+    "event": "completed Research Task Review batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "Spain",
+    "event": "completed AI Data Annotation task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Nigeria",
+    "event": "reviewed AI Response Evaluation task"
+  },
+  {
+    "user": "analyst****",
+    "country": "India",
+    "event": "validated speech annotation batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "Philippines",
+    "event": "completed Data Categorization task"
+  },
+  {
+    "user": "node****",
+    "country": "Brazil",
+    "event": "processed AI Training Dataset submission"
+  },
+  {
+    "user": "contributor****",
+    "country": "UK",
+    "event": "submitted Sentiment Analysis task"
+  },
+  {
+    "user": "user****",
+    "country": "Brazil",
+    "event": "submitted AI Training Dataset"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Germany",
+    "event": "accepted AI Text Classification task"
+  },
+  {
+    "user": "contributor****",
+    "country": "France",
+    "event": "submitted Data Labeling task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Egypt",
+    "event": "completed Speech Recognition task"
+  },
+  {
+    "user": "node****",
+    "country": "Japan",
+    "event": "finished 8 microtasks in Data Entry"
+  },
+  {
+    "user": "analyst****",
+    "country": "Kenya",
+    "event": "approved AI Data Quality Assessment"
+  },
+  {
+    "user": "contributor****",
+    "country": "Germany",
+    "event": "approved Data Labeling results"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Brazil",
+    "event": "reviewed Text Processing task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Canada",
+    "event": "upgraded to Intelligence Node"
+  },
+  {
+    "user": "user****",
+    "country": "Spain",
+    "event": "approved Training Dataset Quality check"
+  },
+  {
+    "user": "contributor****",
+    "country": "Mexico",
+    "event": "upgraded to Senior Contributor status"
+  },
+  {
+    "user": "node****",
+    "country": "USA",
+    "event": "changed to Data Analyst Node"
+  },
+  {
+    "user": "contributor****",
+    "country": "India",
+    "event": "completed Knowledge Graph Annotation task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Germany",
+    "event": "finished AI Moderation Review task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Nigeria",
+    "event": "completed Dialogue Quality Review task"
+  },
+  {
+    "user": "node****",
+    "country": "Philippines",
+    "event": "processed Content Moderation batch"
+  },
+  {
+    "user": "reviewer****",
+    "country": "UK",
+    "event": "validated AI Reasoning task results"
+  },
+  {
+    "user": "contributor****",
+    "country": "South Africa",
+    "event": "completed Model Bias Detection task"
+  },
+  {
+    "user": "analyst****",
+    "country": "India",
+    "event": "reviewed Cognitive Reasoning task output"
+  },
+  {
+    "user": "node****",
+    "country": "Brazil",
+    "event": "completed AI Alignment Feedback task"
+  },
+  {
+    "user": "contributor****",
+    "country": "USA",
+    "event": "submitted Data Verification task"
+  },
+  {
+    "user": "user****",
+    "country": "Canada",
+    "event": "joined Data Annotation Node"
+  },
+  {
+    "user": "contributor****",
+    "country": "Japan",
+    "event": "completed NLP Entity Recognition task"
+  },
+  {
+    "user": "analyst****",
+    "country": "France",
+    "event": "validated image segmentation dataset"
+  },
+  {
+    "user": "node****",
+    "country": "Indonesia",
+    "event": "processed 20 structured annotation tasks"
+  },
+  {
+    "user": "contributor****",
+    "country": "Mexico",
+    "event": "assisted with AI Text Processing task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Australia",
+    "event": "approved Natural Language Processing batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "Pakistan",
+    "event": "completed Urdu language annotation task"
+  },
+  {
+    "user": "node****",
+    "country": "South Korea",
+    "event": "finished multilingual classification task"
+  },
+  {
+    "user": "contributor****",
+    "country": "Egypt",
+    "event": "completed Arabic NLP annotation task"
+  },
+  {
+    "user": "analyst****",
+    "country": "Nigeria",
+    "event": "validated structured data pipeline batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "Vietnam",
+    "event": "completed Vietnamese text labeling task"
+  },
+  {
+    "user": "user****",
+    "country": "Italy",
+    "event": "activated Neural Node license"
+  },
+  {
+    "user": "contributor****",
+    "country": "Brazil",
+    "event": "completed 15 image annotation microtasks"
+  },
+  {
+    "user": "node****",
+    "country": "Germany",
+    "event": "completed AI model validation review"
+  },
+  {
+    "user": "contributor****",
+    "country": "India",
+    "event": "processed 9 data verification microtasks"
+  },
+  {
+    "user": "analyst****",
+    "country": "UK",
+    "event": "reviewed AI response quality batch"
+  },
+  {
+    "user": "contributor****",
+    "country": "USA",
+    "event": "completed Cognitive AI Training task"
+  },
+  {
+    "user": "reviewer****",
+    "country": "Canada",
+    "event": "approved intelligence node task submission"
+  },
+  {
+    "user": "node****",
+    "country": "Philippines",
+    "event": "joined global AI contributor infrastructure"
+  },
+  {
+    "user": "contributor****",
+    "country": "Kenya",
+    "event": "completed Swahili text annotation task"
+  },
+  {
+    "user": "analyst****",
+    "country": "South Africa",
+    "event": "finished training data quality review"
+  },
+  {
+    "user": "user****",
+    "country": "Argentina",
+    "event": "verified identity and activated node"
+  }
+]

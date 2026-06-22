@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Prevent layout shift and ensure instant rendering */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:root {
+  --background: 3 7 18;
+  --foreground: 226 232 240;
+  --card: 15 23 42;
+  --card-foreground: 226 232 240;
+  --popover: 15 23 42;
+  --popover-foreground: 226 232 240;
+  --primary: 16 185 129;
+  --primary-foreground: 3 7 18;
+  --secondary: 30 41 59;
+  --secondary-foreground: 226 232 240;
+  --muted: 100 116 139;
+  --muted-foreground: 226 232 240;
+  --accent: 16 185 129;
+  --accent-foreground: 3 7 18;
+  --destructive: 239 68 68;
+  --destructive-foreground: 226 232 240;
+  --border: 30 41 59;
+  --input: 15 23 42;
+  --ring: 16 185 129;
+  --radius: 0.5rem;
+}
+
+/* Remove mobile tap highlight (yellow/orange box) */
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-appearance: none;
+}
+
+html,
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Remove focus outline and ring on mobile */
+button:focus,
+a:focus {
+  outline: none;
+}
+
+/* Ensure touch events work properly on mobile */
+button {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
