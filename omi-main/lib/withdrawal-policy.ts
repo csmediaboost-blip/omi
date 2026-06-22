@@ -17,7 +17,7 @@ import {
 
 // ─── WAT WITHDRAWAL WINDOW ────────────────────────────────────────────────────
 export const WITHDRAWAL_WINDOW_START_HOUR = 8;  // 08:00 WAT
-export const WITHDRAWAL_WINDOW_END_HOUR   = 16; // 16:00 WAT
+export const WITHDRAWAL_WINDOW_END_HOUR   = 21; // 21:00 WAT
 export const WITHDRAWAL_DAY_OF_WEEK       = 1;  // Monday (0=Sun…6=Sat)
 
 // ─── WINDOW STATE ─────────────────────────────────────────────────────────────
@@ -90,7 +90,7 @@ export function getWindowClosedReason(window: WithdrawalWindow): string {
       if (h < WITHDRAWAL_WINDOW_START_HOUR) {
         return `Window opens at 08:00 WAT today. Current time: ${h.toString().padStart(2,"0")}:xx WAT.`;
       }
-      return `Today's window closed at 16:00 WAT. Next: ${window.nextWindowLabel}.`;
+      return `Today's window closed at 21:00 WAT. Next: ${window.nextWindowLabel}.`;
     }
   }
 }
