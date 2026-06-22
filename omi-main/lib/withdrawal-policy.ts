@@ -313,8 +313,8 @@ export function checkWithdrawalEligibility(params: {
                                     reasons.push(`Amount exceeds available balance ($${params.availableBalance.toFixed(2)}).`);
   if (params.amount > weeklyRemainingUSD)
                                     reasons.push(`Exceeds weekly limit. Remaining this week: $${weeklyRemainingUSD.toFixed(2)} of $${policy.weeklyMaxUSD}.`);
-  if (params.lockStatuses.some((l) => l.isLocked))
-                                    reasons.push("Principal capital is within a lock period.");
+
+
 
   const fee = params.amount > 0 ? calcWithdrawalFee(params.amount) : null;
 
