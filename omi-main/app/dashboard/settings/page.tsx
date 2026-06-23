@@ -2,13 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { cacheService } from "@/lib/cache-service";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useRouter } from "next/navigation";
 import DashboardNavigation from "@/components/dashboard-navigation";
-import bcrypt from "bcryptjs";
 
 type UserProfile = {
   id: string;
@@ -18,6 +16,8 @@ type UserProfile = {
   tier: string;
   device_verification: boolean;
   created_at: string;
+  pin_set: boolean;
+  pin_hash: string | null;
 };
 
 export default function SettingsPage() {
@@ -31,7 +31,7 @@ export default function SettingsPage() {
   const [newPin, setNewPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [deviceVerification, setDeviceVerification] = useState(false);
-  const [messages, setMessages] = useState<
+  const [messages, setMessages] = useState
     Record<string, { type: "success" | "error"; text: string }>
   >({});
   const [loading, setLoading] = useState(true);
@@ -68,10 +68,10 @@ export default function SettingsPage() {
     try {
       const { error } = await supabase
         .from("users")
-        .update({ 
-          full_name: fullName, 
+        .update({
+          full_name: fullName,
           wallet_address: walletAddress,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq("id", profile.id);
       if (error) throw error;
@@ -115,6 +115,15 @@ export default function SettingsPage() {
     }
   }
 
+  async function hashPin(pin: string, userId: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(pin + userId);
+    const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
   async function updatePin() {
     if (!profile) return;
     if (newPin.length < 4 || newPin.length > 6) {
@@ -130,40 +139,37 @@ export default function SettingsPage() {
       return;
     }
     try {
-      // Hash function matches set-pin-form and verify-pin-form
-      async function hashPin(pin: string, userId: string): Promise<string> {
-        const encoder = new TextEncoder();
-        const data = encoder.encode(pin + userId);
-        const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
-        return Array.from(new Uint8Array(hashBuffer))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join("");
+      // Only verify current PIN if one is already set
+      if (profile.pin_set && profile.pin_hash) {
+        const { data } = await supabase
+          .from("users")
+          .select("pin_hash")
+          .eq("id", profile.id)
+          .single();
+
+        const currentHash = await hashPin(currentPin, profile.id);
+        if (currentHash !== data?.pin_hash) {
+          setMsg("pin", "error", "Current PIN is incorrect.");
+          return;
+        }
       }
 
-      // Verify current PIN
-      const { data } = await supabase
-        .from("users")
-        .select("pin_hash")
-        .eq("id", profile.id)
-        .single();
-      
-      const currentHash = await hashPin(currentPin, profile.id);
-      if (currentHash !== data?.pin_hash) {
-        setMsg("pin", "error", "Current PIN is incorrect.");
-        return;
-      }
-
-      // Hash and save new PIN
       const newHash = await hashPin(newPin, profile.id);
       await supabase
         .from("users")
-        .update({ pin_hash: newHash, pin_attempts: 0, pin_locked: false })
+        .update({
+          pin_hash: newHash,
+          pin_set: true,
+          pin_attempts: 0,
+          pin_locked: false,
+        })
         .eq("id", profile.id);
-      
+
       setMsg("pin", "success", "PIN updated successfully.");
       setCurrentPin("");
       setNewPin("");
       setConfirmPin("");
+      loadProfile();
     } catch (err: any) {
       setMsg("pin", "error", err.message);
     }
@@ -180,7 +186,7 @@ export default function SettingsPage() {
     setMsg(
       "security",
       "success",
-      `Device verification ${newVal ? "enabled" : "disabled"}.`,
+      `Device verification ${newVal ? "enabled" : "disabled"}.`
     );
   }
 
@@ -199,7 +205,11 @@ export default function SettingsPage() {
     if (!m) return null;
     return (
       <div
-        className={`p-2 rounded text-xs ${m.type === "success" ? "bg-emerald-900 text-emerald-300" : "bg-red-900 text-red-300"}`}
+        className={`p-2 rounded text-xs ${
+          m.type === "success"
+            ? "bg-emerald-900 text-emerald-300"
+            : "bg-red-900 text-red-300"
+        }`}
       >
         {m.text}
       </div>
@@ -218,7 +228,6 @@ export default function SettingsPage() {
     <div className="flex min-h-screen bg-slate-950 text-slate-200">
       <DashboardNavigation />
 
-      {/* pb-24 on mobile so content clears the bottom nav */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-4 md:p-6 pb-24 md:pb-6 space-y-6 max-w-2xl mx-auto">
           <h1 className="text-2xl font-bold text-emerald-400">Settings</h1>
@@ -342,26 +351,33 @@ export default function SettingsPage() {
           {/* PIN */}
           <Card className="p-6 bg-slate-900 border-slate-800 space-y-4">
             <h2 className="text-lg font-semibold text-white">
-              Change Security PIN
+              {profile?.pin_set ? "Change Security PIN" : "Set Security PIN"}
             </h2>
             <MsgBox section="pin" />
-            <div>
-              <label className="text-slate-400 text-xs mb-1 block">
-                Current PIN
-              </label>
-              <Input
-                type="password"
-                value={currentPin}
-                onChange={(e) => setCurrentPin(e.target.value)}
-                className="bg-slate-800 text-white border-slate-700"
-              />
-            </div>
+
+            {/* Only show current PIN field if PIN already exists */}
+            {profile?.pin_set && (
+              <div>
+                <label className="text-slate-400 text-xs mb-1 block">
+                  Current PIN
+                </label>
+                <Input
+                  type="password"
+                  inputMode="numeric"
+                  value={currentPin}
+                  onChange={(e) => setCurrentPin(e.target.value)}
+                  className="bg-slate-800 text-white border-slate-700"
+                />
+              </div>
+            )}
+
             <div>
               <label className="text-slate-400 text-xs mb-1 block">
                 New PIN
               </label>
               <Input
                 type="password"
+                inputMode="numeric"
                 value={newPin}
                 onChange={(e) => setNewPin(e.target.value)}
                 className="bg-slate-800 text-white border-slate-700"
@@ -373,6 +389,7 @@ export default function SettingsPage() {
               </label>
               <Input
                 type="password"
+                inputMode="numeric"
                 value={confirmPin}
                 onChange={(e) => setConfirmPin(e.target.value)}
                 className="bg-slate-800 text-white border-slate-700"
@@ -382,7 +399,7 @@ export default function SettingsPage() {
               onClick={updatePin}
               className="bg-emerald-600 hover:bg-emerald-500 text-white"
             >
-              Update PIN
+              {profile?.pin_set ? "Update PIN" : "Set PIN"}
             </Button>
           </Card>
 
@@ -399,10 +416,14 @@ export default function SettingsPage() {
               </div>
               <button
                 onClick={toggleDeviceVerification}
-                className={`w-12 h-6 rounded-full transition-colors ${deviceVerification ? "bg-emerald-500" : "bg-slate-700"}`}
+                className={`w-12 h-6 rounded-full transition-colors ${
+                  deviceVerification ? "bg-emerald-500" : "bg-slate-700"
+                }`}
               >
                 <span
-                  className={`block w-5 h-5 bg-white rounded-full mx-0.5 transition-transform ${deviceVerification ? "translate-x-6" : "translate-x-0"}`}
+                  className={`block w-5 h-5 bg-white rounded-full mx-0.5 transition-transform ${
+                    deviceVerification ? "translate-x-6" : "translate-x-0"
+                  }`}
                 />
               </button>
             </div>
