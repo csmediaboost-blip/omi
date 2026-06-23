@@ -20,21 +20,24 @@ type UserProfile = {
   pin_hash: string | null;
 };
 
+type MessageEntry = {
+  type: "success" | "error";
+  text: string;
+};
+
 export default function SettingsPage() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [fullName, setFullName] = useState("");
-  const [walletAddress, setWalletAddress] = useState("");
-  const [newEmail, setNewEmail] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [currentPin, setCurrentPin] = useState("");
-  const [newPin, setNewPin] = useState("");
-  const [confirmPin, setConfirmPin] = useState("");
-  const [deviceVerification, setDeviceVerification] = useState(false);
-  const [messages, setMessages] = useState
-    Record<string, { type: "success" | "error"; text: string }>
-  >({});
-  const [loading, setLoading] = useState(true);
+  const [fullName, setFullName] = useState<string>("");
+  const [walletAddress, setWalletAddress] = useState<string>("");
+  const [newEmail, setNewEmail] = useState<string>("");
+  const [newPassword, setNewPassword] = useState<string>("");
+  const [confirmPassword, setConfirmPassword] = useState<string>("");
+  const [currentPin, setCurrentPin] = useState<string>("");
+  const [newPin, setNewPin] = useState<string>("");
+  const [confirmPin, setConfirmPin] = useState<string>("");
+  const [deviceVerification, setDeviceVerification] = useState<boolean>(false);
+  const [messages, setMessages] = useState<Record<string, MessageEntry>>({});
+  const [loading, setLoading] = useState<boolean>(true);
   const router = useRouter();
 
   useEffect(() => {
@@ -77,8 +80,8 @@ export default function SettingsPage() {
       if (error) throw error;
       loadProfile();
       setMsg("profile", "success", "Profile updated successfully.");
-    } catch (err: any) {
-      setMsg("profile", "error", err.message);
+    } catch (err: unknown) {
+      setMsg("profile", "error", (err as Error).message);
     }
   }
 
@@ -88,8 +91,8 @@ export default function SettingsPage() {
       const { error } = await supabase.auth.updateUser({ email: newEmail });
       if (error) throw error;
       setMsg("email", "success", "Confirmation sent to new email.");
-    } catch (err: any) {
-      setMsg("email", "error", err.message);
+    } catch (err: unknown) {
+      setMsg("email", "error", (err as Error).message);
     }
   }
 
@@ -110,8 +113,8 @@ export default function SettingsPage() {
       setMsg("password", "success", "Password updated.");
       setNewPassword("");
       setConfirmPassword("");
-    } catch (err: any) {
-      setMsg("password", "error", err.message);
+    } catch (err: unknown) {
+      setMsg("password", "error", (err as Error).message);
     }
   }
 
@@ -139,7 +142,6 @@ export default function SettingsPage() {
       return;
     }
     try {
-      // Only verify current PIN if one is already set
       if (profile.pin_set && profile.pin_hash) {
         const { data } = await supabase
           .from("users")
@@ -170,8 +172,8 @@ export default function SettingsPage() {
       setNewPin("");
       setConfirmPin("");
       loadProfile();
-    } catch (err: any) {
-      setMsg("pin", "error", err.message);
+    } catch (err: unknown) {
+      setMsg("pin", "error", (err as Error).message);
     }
   }
 
@@ -355,7 +357,6 @@ export default function SettingsPage() {
             </h2>
             <MsgBox section="pin" />
 
-            {/* Only show current PIN field if PIN already exists */}
             {profile?.pin_set && (
               <div>
                 <label className="text-slate-400 text-xs mb-1 block">
