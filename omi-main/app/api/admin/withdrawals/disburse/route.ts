@@ -2,7 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +27,8 @@ type Withdrawal = {
 };
 
 // ─── ADMIN AUTH ───────────────────────────────────────────────────────────────
-async function isAdmin(supabase: ReturnType<typeof createServerClient>): Promise<boolean> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function isAdmin(supabase: SupabaseClient<any>): Promise<boolean> {
   const { data: { user }, error } = await supabase.auth.getUser();
   if (error || !user) return false;
   const { data } = await supabase
@@ -40,7 +41,8 @@ async function isAdmin(supabase: ReturnType<typeof createServerClient>): Promise
 
 // ─── PICK ACTIVE KORAPAY KEY ──────────────────────────────────────────────────
 async function pickDisbursementKey(
-  admin: ReturnType<typeof createClient>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  admin: SupabaseClient<any>
 ): Promise<KorapayAccount | null> {
   const { data, error } = await admin
     .from("korapay_accounts")
