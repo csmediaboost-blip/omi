@@ -19,7 +19,7 @@ interface Withdrawal {
   payout_method: string | null;
   payout_account_name: string | null;
   payout_bank_name: string | null;
-  payout_bank_code: string | null;
+  // payout_bank_code removed — column does not exist in DB
   payout_currency: string | null;
   status: string;
   tracking_status: string | null;
@@ -50,14 +50,14 @@ interface BulkResult {
 // ─── STATUS BADGE ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
-    queued: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
-    processing: "bg-blue-500/20 text-blue-300 border-blue-500/30",
-    paid: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
-    failed: "bg-red-500/20 text-red-300 border-red-500/30",
-    rejected: "bg-slate-500/20 text-slate-300 border-slate-500/30",
+    queued: "bg-yellow-100 text-yellow-700 border-yellow-300",
+    processing: "bg-blue-100 text-blue-700 border-blue-300",
+    paid: "bg-emerald-100 text-emerald-700 border-emerald-300",
+    failed: "bg-red-100 text-red-700 border-red-300",
+    rejected: "bg-slate-100 text-slate-600 border-slate-300",
   };
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${map[status] ?? "bg-slate-500/20 text-slate-300"}`}>
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${map[status] ?? "bg-slate-100 text-slate-600"}`}>
       {status}
     </span>
   );
@@ -66,7 +66,7 @@ function StatusBadge({ status }: { status: string }) {
 // ─── SPINNER ──────────────────────────────────────────────────────────────────
 function Spinner({ className = "" }: { className?: string }) {
   return (
-    <div className={`border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin ${className || "w-6 h-6"}`} />
+    <div className={`border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin ${className || "w-6 h-6"}`} />
   );
 }
 
@@ -92,17 +92,17 @@ export default function WithdrawalQueuePage() {
   const [bulkResults, setBulkResults] = useState<BulkResult[] | null>(null);
   const [showBulkResults, setShowBulkResults] = useState(false);
 
-  // ── Fetch — FIX: query users separately to avoid ambiguous relationship ────
+  // ── Fetch ─────────────────────────────────────────────────────────────────
   const fetchItems = useCallback(async () => {
     setLoading(true);
     setSelectedIds(new Set());
     try {
-      // Step 1: fetch withdrawals
+      // Step 1: fetch withdrawals — only columns that exist in DB
       let q = supabase
         .from("withdrawals")
         .select(
           `id, user_id, amount, wallet_address, payout_method,
-           payout_account_name, payout_bank_name, payout_bank_code,
+           payout_account_name, payout_bank_name,
            payout_currency, status, tracking_status,
            gateway_reference, auto_processed, reference,
            created_at, paid_at`
@@ -279,11 +279,11 @@ export default function WithdrawalQueuePage() {
   const isPayable = (s: string) => ["queued", "processing"].includes(s);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-6 space-y-6">
+    <div className="min-h-screen bg-white text-slate-800 p-4 md:p-6 space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-white">Withdrawal Queue</h1>
-        <p className="text-slate-400 text-sm mt-1">
+        <h1 className="text-2xl font-bold text-slate-900">Withdrawal Queue</h1>
+        <p className="text-slate-500 text-sm mt-1">
           Review and pay withdrawal requests via KoraPay
         </p>
       </div>
@@ -294,12 +294,12 @@ export default function WithdrawalQueuePage() {
           placeholder="Search email, name, account, ref…"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          className="max-w-xs bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
+          className="max-w-xs bg-white border-slate-300 text-slate-800 placeholder:text-slate-400"
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 bg-slate-800 border border-slate-700 text-slate-200 rounded-md text-sm"
+          className="px-3 py-2 bg-white border border-slate-300 text-slate-700 rounded-md text-sm"
         >
           <option value="all">All statuses</option>
           <option value="queued">Queued</option>
@@ -311,7 +311,7 @@ export default function WithdrawalQueuePage() {
         <button
           onClick={fetchItems}
           disabled={loading}
-          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 rounded-md text-sm disabled:opacity-50"
+          className="px-4 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-md text-sm disabled:opacity-50"
         >
           Refresh
         </button>
@@ -319,11 +319,11 @@ export default function WithdrawalQueuePage() {
         {payableItems.length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
             {selectedIds.size > 0 && (
-              <span className="text-sm text-slate-400">{selectedIds.size} selected</span>
+              <span className="text-sm text-slate-500">{selectedIds.size} selected</span>
             )}
             <button
               onClick={selectedIds.size > 0 ? clearSelection : selectAll}
-              className="px-3 py-1.5 text-sm bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded-md"
+              className="px-3 py-1.5 text-sm bg-white hover:bg-slate-50 border border-slate-300 text-slate-600 rounded-md"
             >
               {selectedIds.size > 0 ? "Clear" : "Select All Payable"}
             </button>
@@ -341,9 +341,9 @@ export default function WithdrawalQueuePage() {
       </div>
 
       {/* Table card */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-slate-800">
-          <h2 className="font-semibold text-white">
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+        <div className="p-4 border-b border-slate-200 bg-slate-50">
+          <h2 className="font-semibold text-slate-800">
             {statusFilter === "all" ? "All" : statusFilter.charAt(0).toUpperCase() + statusFilter.slice(1)}{" "}
             Withdrawals ({filteredItems.length})
           </h2>
@@ -354,12 +354,12 @@ export default function WithdrawalQueuePage() {
             <Spinner className="w-8 h-8" />
           </div>
         ) : filteredItems.length === 0 ? (
-          <div className="text-center text-slate-500 py-16">No withdrawals found</div>
+          <div className="text-center text-slate-400 py-16">No withdrawals found</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-slate-800 text-slate-400 text-xs uppercase tracking-wide">
+                <tr className="border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wide bg-slate-50">
                   <th className="px-4 py-3 text-left w-8"></th>
                   <th className="px-4 py-3 text-left">Date</th>
                   <th className="px-4 py-3 text-left">User</th>
@@ -377,13 +377,13 @@ export default function WithdrawalQueuePage() {
                   return (
                     <tr
                       key={item.id}
-                      className={`border-b border-slate-800/50 transition-colors ${
+                      className={`border-b border-slate-100 transition-colors ${
                         isChecked
-                          ? "bg-emerald-900/20"
+                          ? "bg-emerald-50"
                           : idx % 2 === 0
-                          ? "bg-slate-900"
-                          : "bg-slate-900/50"
-                      } hover:bg-slate-800/50`}
+                          ? "bg-white"
+                          : "bg-slate-50/50"
+                      } hover:bg-slate-50`}
                     >
                       {/* Checkbox */}
                       <td className="px-4 py-3">
@@ -398,7 +398,7 @@ export default function WithdrawalQueuePage() {
                       </td>
 
                       {/* Date */}
-                      <td className="px-4 py-3 text-xs text-slate-400 whitespace-nowrap">
+                      <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
                         {new Date(item.created_at).toLocaleDateString("en-NG", {
                           day: "numeric", month: "short", year: "numeric",
                         })}
@@ -410,13 +410,13 @@ export default function WithdrawalQueuePage() {
 
                       {/* User */}
                       <td className="px-4 py-3">
-                        <div className="font-medium text-white text-sm">{item.user_full_name}</div>
+                        <div className="font-medium text-slate-800 text-sm">{item.user_full_name}</div>
                         <div className="text-xs text-slate-400">{item.user_email}</div>
                       </td>
 
                       {/* Amount */}
                       <td className="px-4 py-3">
-                        <div className="font-semibold text-white">${(item.amount ?? 0).toFixed(2)}</div>
+                        <div className="font-semibold text-slate-800">${(item.amount ?? 0).toFixed(2)}</div>
                         <div className="text-xs text-slate-400">
                           ≈ ₦{((item.amount ?? 0) * 1600).toLocaleString("en-NG")}
                         </div>
@@ -425,18 +425,18 @@ export default function WithdrawalQueuePage() {
                       {/* Account details */}
                       <td className="px-4 py-3 max-w-[180px]">
                         {item.payout_account_name && (
-                          <div className="font-medium text-white text-xs">{item.payout_account_name}</div>
+                          <div className="font-medium text-slate-800 text-xs">{item.payout_account_name}</div>
                         )}
                         {item.payout_bank_name && (
-                          <div className="text-xs text-slate-400">{item.payout_bank_name}</div>
+                          <div className="text-xs text-slate-500">{item.payout_bank_name}</div>
                         )}
                         {item.wallet_address && (
-                          <div className="text-xs font-mono text-slate-500">{item.wallet_address}</div>
+                          <div className="text-xs font-mono text-slate-400">{item.wallet_address}</div>
                         )}
                       </td>
 
                       {/* Method */}
-                      <td className="px-4 py-3 text-xs text-slate-400">
+                      <td className="px-4 py-3 text-xs text-slate-500">
                         {item.payout_method ?? "—"}
                       </td>
 
@@ -444,7 +444,7 @@ export default function WithdrawalQueuePage() {
                       <td className="px-4 py-3">
                         <StatusBadge status={item.status} />
                         {item.auto_processed && (
-                          <div className="text-xs text-slate-500 mt-0.5">auto</div>
+                          <div className="text-xs text-slate-400 mt-0.5">auto</div>
                         )}
                       </td>
 
@@ -461,7 +461,7 @@ export default function WithdrawalQueuePage() {
                               </button>
                               <button
                                 onClick={() => { setSelected(item); setActionType("reject"); setRejectReason(""); }}
-                                className="px-2 py-1 text-xs bg-red-700 hover:bg-red-600 text-white rounded font-medium"
+                                className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium"
                               >
                                 Reject
                               </button>
@@ -469,7 +469,7 @@ export default function WithdrawalQueuePage() {
                           )}
                           <button
                             onClick={() => { setSelected(item); setActionType("view"); }}
-                            className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-200 rounded font-medium"
+                            className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium"
                           >
                             View
                           </button>
@@ -486,9 +486,9 @@ export default function WithdrawalQueuePage() {
 
       {/* ── Single action dialog ─────────────────────────────────────────── */}
       <Dialog open={!!selected} onOpenChange={(open) => { if (!open) closeDialog(); }}>
-        <DialogContent className="max-w-lg bg-slate-900 border-slate-700 text-slate-200">
+        <DialogContent className="max-w-lg bg-white border-slate-200 text-slate-800">
           <DialogHeader>
-            <DialogTitle className="text-white">
+            <DialogTitle className="text-slate-900">
               {actionType === "pay" ? "💸 Pay via KoraPay"
                 : actionType === "reject" ? "🚫 Reject Withdrawal"
                 : "📄 Withdrawal Detail"}
@@ -498,23 +498,22 @@ export default function WithdrawalQueuePage() {
           {selected && (
             <div className="space-y-4 text-sm">
               {/* Detail grid */}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 bg-slate-800 rounded-lg p-3 text-xs">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 bg-slate-50 rounded-lg p-3 text-xs border border-slate-200">
                 {[
                   ["Reference", <span className="font-mono">{selected.reference}</span>],
                   ["User", <span>{selected.user_full_name}<br /><span className="text-slate-400">{selected.user_email}</span></span>],
-                  ["Amount", <span className="font-semibold text-white">${selected.amount.toFixed(2)} <span className="text-slate-400">(≈ ₦{(selected.amount * 1600).toLocaleString("en-NG")})</span></span>],
+                  ["Amount", <span className="font-semibold text-slate-900">${selected.amount.toFixed(2)} <span className="text-slate-400">(≈ ₦{(selected.amount * 1600).toLocaleString("en-NG")})</span></span>],
                   ["Account Name", selected.payout_account_name || "—"],
                   ["Bank", selected.payout_bank_name || "—"],
                   ["Account No.", <span className="font-mono">{selected.wallet_address || "—"}</span>],
-                  ["Bank Code", <span className="font-mono">{selected.payout_bank_code || "—"}</span>],
                   ["Status", <StatusBadge status={selected.status} />],
                   ...(selected.gateway_reference
                     ? [["KoraPay Ref", <span className="font-mono">{selected.gateway_reference}</span>]]
                     : []),
                 ].map(([label, value], i) => (
                   <>
-                    <div key={`l-${i}`} className="text-slate-400">{label}</div>
-                    <div key={`v-${i}`} className="text-slate-200">{value as any}</div>
+                    <div key={`l-${i}`} className="text-slate-500">{label}</div>
+                    <div key={`v-${i}`} className="text-slate-800">{value as any}</div>
                   </>
                 ))}
               </div>
@@ -522,14 +521,14 @@ export default function WithdrawalQueuePage() {
               {/* Pay */}
               {actionType === "pay" && (
                 <div className="space-y-3">
-                  <div className="bg-emerald-900/30 border border-emerald-700/40 rounded-lg p-3 text-xs text-emerald-300">
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800">
                     <p className="font-semibold mb-1">⚠️ Confirm payment</p>
                     <p>
                       Disburse <strong>₦{(selected.amount * 1600).toLocaleString("en-NG")}</strong> to{" "}
                       <strong>{selected.payout_account_name}</strong> at{" "}
                       <strong>{selected.payout_bank_name}</strong> via KoraPay.
                     </p>
-                    <p className="mt-1 text-emerald-400">This action cannot be undone.</p>
+                    <p className="mt-1 text-emerald-600">This action cannot be undone.</p>
                   </div>
                   <div className="flex gap-2">
                     <button
@@ -542,7 +541,7 @@ export default function WithdrawalQueuePage() {
                     <button
                       onClick={closeDialog}
                       disabled={acting}
-                      className="px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg"
+                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
                     >
                       Cancel
                     </button>
@@ -554,16 +553,16 @@ export default function WithdrawalQueuePage() {
               {actionType === "reject" && (
                 <div className="space-y-3">
                   <div>
-                    <label className="text-sm font-medium text-red-400">
+                    <label className="text-sm font-medium text-red-600">
                       Rejection reason <span className="text-red-500">*</span>
                     </label>
                     <Input
-                      className="mt-1 bg-slate-800 border-red-700/50 text-white placeholder:text-slate-500"
+                      className="mt-1 bg-white border-red-300 text-slate-800 placeholder:text-slate-400"
                       placeholder="e.g. KYC name mismatch, suspicious activity…"
                       value={rejectReason}
                       onChange={(e) => setRejectReason(e.target.value)}
                     />
-                    <p className="text-xs text-slate-500 mt-1">
+                    <p className="text-xs text-slate-400 mt-1">
                       The user's balance will be refunded automatically.
                     </p>
                   </div>
@@ -571,14 +570,14 @@ export default function WithdrawalQueuePage() {
                     <button
                       onClick={handleReject}
                       disabled={acting || !rejectReason.trim()}
-                      className="flex-1 py-2.5 bg-red-700 hover:bg-red-600 text-white font-semibold rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
+                      className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white font-semibold rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
                     >
                       {acting ? <><Spinner className="w-4 h-4" /> Rejecting…</> : "✗ Reject & Refund"}
                     </button>
                     <button
                       onClick={closeDialog}
                       disabled={acting}
-                      className="px-4 py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg"
+                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
                     >
                       Cancel
                     </button>
@@ -592,27 +591,27 @@ export default function WithdrawalQueuePage() {
 
       {/* ── Bulk results dialog ──────────────────────────────────────────── */}
       <Dialog open={showBulkResults} onOpenChange={setShowBulkResults}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-slate-900 border-slate-700 text-slate-200">
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-white border-slate-200 text-slate-800">
           <DialogHeader>
-            <DialogTitle className="text-white">Bulk Payment Results</DialogTitle>
+            <DialogTitle className="text-slate-900">Bulk Payment Results</DialogTitle>
           </DialogHeader>
           {bulkResults && (
             <div className="space-y-3">
               <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="bg-emerald-900/30 border border-emerald-700/40 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-emerald-400">
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  <div className="text-2xl font-bold text-emerald-600">
                     {bulkResults.filter((r) => r.success).length}
                   </div>
                   <div className="text-xs text-emerald-500">Paid</div>
                 </div>
-                <div className="bg-red-900/30 border border-red-700/40 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-red-400">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                  <div className="text-2xl font-bold text-red-600">
                     {bulkResults.filter((r) => !r.success && !r.skipped).length}
                   </div>
                   <div className="text-xs text-red-500">Failed</div>
                 </div>
-                <div className="bg-yellow-900/30 border border-yellow-700/40 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-yellow-400">
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
+                  <div className="text-2xl font-bold text-yellow-600">
                     {bulkResults.filter((r) => r.skipped).length}
                   </div>
                   <div className="text-xs text-yellow-500">Skipped</div>
@@ -625,28 +624,28 @@ export default function WithdrawalQueuePage() {
                     key={r.withdrawal_id}
                     className={`rounded-lg p-3 text-xs border ${
                       r.success
-                        ? "bg-emerald-900/20 border-emerald-700/30"
+                        ? "bg-emerald-50 border-emerald-200"
                         : r.skipped
-                        ? "bg-yellow-900/20 border-yellow-700/30"
-                        : "bg-red-900/20 border-red-700/30"
+                        ? "bg-yellow-50 border-yellow-200"
+                        : "bg-red-50 border-red-200"
                     }`}
                   >
                     <div className="flex justify-between items-start">
                       <div>
-                        <span className="font-semibold text-white">{r.account_name}</span>
-                        <span className="text-slate-400 ml-2">{r.bank_name}</span>
+                        <span className="font-semibold text-slate-800">{r.account_name}</span>
+                        <span className="text-slate-500 ml-2">{r.bank_name}</span>
                       </div>
-                      <span className="font-semibold text-white">${r.amount.toFixed(2)}</span>
+                      <span className="font-semibold text-slate-800">${r.amount.toFixed(2)}</span>
                     </div>
-                    <div className="mt-1 text-slate-500 font-mono">{r.reference}</div>
+                    <div className="mt-1 text-slate-400 font-mono">{r.reference}</div>
                     {r.success && (
-                      <div className="mt-1 text-emerald-400">✓ Paid · KoraPay ref: {r.korapay_reference}</div>
+                      <div className="mt-1 text-emerald-600">✓ Paid · KoraPay ref: {r.korapay_reference}</div>
                     )}
                     {r.skipped && (
-                      <div className="mt-1 text-yellow-400">⚠ Skipped: {r.skip_reason}</div>
+                      <div className="mt-1 text-yellow-600">⚠ Skipped: {r.skip_reason}</div>
                     )}
                     {!r.success && !r.skipped && (
-                      <div className="mt-1 text-red-400">✗ Failed: {r.error}</div>
+                      <div className="mt-1 text-red-600">✗ Failed: {r.error}</div>
                     )}
                   </div>
                 ))}
@@ -654,7 +653,7 @@ export default function WithdrawalQueuePage() {
 
               <button
                 onClick={() => setShowBulkResults(false)}
-                className="w-full py-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm"
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm"
               >
                 Close
               </button>
