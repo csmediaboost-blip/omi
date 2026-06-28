@@ -1,14 +1,8 @@
 "use client";
-// app/dashboard/financials/page.tsx — v6
-// Changes from v5:
-//  1. Removed Capital Lock Periods card entirely — users are no longer "locked".
-//     The old LockStatusCard and lockStatuses render have been deleted.
-//  2. Added FirstDepositBonusCard — shows the first-deposit bonus % and
-//     extra amount earned, with a brief explanation. Only renders when the
-//     user has a first-deposit node allocation.
-//  3. Re-mines and 2nd+ deposits are excluded from the bonus card entirely
-//     (gated on is_first_deposit === true from the DB).
-//  4. Overview withdrawal policy grid: removed "Capital Lock" row.
+// app/dashboard/financials/page.tsx — v7
+// Changes from v6:
+//  1. Removed "Minimum withdrawal" display from WithdrawModal and Overview policy grid.
+//  2. Withdrawal window time confirmed as 08:00 – 16:00 WAT throughout.
 
 import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
@@ -120,7 +114,6 @@ type NodeAllocation = {
   created_at: string;
   tier_index: number | null;
   lock_unlock_at: string | null;
-  // first-deposit flag set server-side at payment confirmation
   is_first_deposit: boolean | null;
 };
 
@@ -213,7 +206,6 @@ type PolicySnapshot = {
     quickAmounts: number[];
     minWithdrawal: number;
   };
-  // lockStatuses removed — no longer used
   feeSchedule: Array<{ maxAmount: number | null; pct: number }>;
   eligibility: {
     kycVerified: boolean;
@@ -253,9 +245,6 @@ const LICENSE_LABELS: Record<string, string> = {
 };
 
 // ─── FIRST DEPOSIT BONUS CARD ─────────────────────────────────────────────────
-// Shows users the extra % bonus they earned on their very first mining deposit.
-// Only renders when is_first_deposit === true on at least one allocation.
-// Re-mines and all subsequent deposits are excluded — they earn standard ROI only.
 function FirstDepositBonusCard({
   allocations,
   gpuPlans,
@@ -265,7 +254,6 @@ function FirstDepositBonusCard({
 }) {
   const [open, setOpen] = useState(false);
 
-  // Only the allocation flagged as the user's very first deposit
   const firstDeposit = allocations.find((a) => a.is_first_deposit === true);
   if (!firstDeposit) return null;
 
@@ -327,7 +315,6 @@ function FirstDepositBonusCard({
       {/* Expanded breakdown */}
       {open && (
         <div className="px-4 pb-4 pt-3 space-y-3">
-          {/* Summary grid */}
           <div className="grid grid-cols-3 gap-2">
             {[
               {
@@ -362,7 +349,6 @@ function FirstDepositBonusCard({
             ))}
           </div>
 
-          {/* Info rows */}
           <div
             className="rounded-xl p-3 space-y-2"
             style={{
@@ -391,7 +377,6 @@ function FirstDepositBonusCard({
             ))}
           </div>
 
-          {/* Note: only first deposit gets this */}
           <div
             className="rounded-xl px-3 py-2 flex items-start gap-2"
             style={{
@@ -706,7 +691,7 @@ function WithdrawModal({
             </div>
           </div>
 
-          {/* Available balance */}
+          {/* Available balance — minimum line removed */}
           <div
             className="rounded-xl p-4"
             style={{
@@ -720,12 +705,9 @@ function WithdrawModal({
             <p className="text-emerald-400 font-black text-2xl">
               ${available.toFixed(2)}
             </p>
-            <p className="text-slate-600 text-xs mt-0.5">
-              Minimum: ${policy.minWithdrawal}
-            </p>
           </div>
 
-          {/* All 13 presets — always visible, always clickable */}
+          {/* All 13 presets */}
           <div>
             <div className="flex items-center justify-between mb-3">
               <p className="text-slate-300 text-sm font-bold">
@@ -981,7 +963,6 @@ export default function FinancialsPage() {
         .eq("user_id", user.id)
         .order("created_at", { ascending: false })
         .limit(100),
-      // Added is_first_deposit to the select
       supabase
         .from("node_allocations")
         .select(
@@ -1185,8 +1166,6 @@ export default function FinancialsPage() {
     ? (policySnapshot.policy as unknown as TierWithdrawalPolicy)
     : getUserWithdrawalPolicy(nodeAllocations.map((n) => n.tier_index ?? 0));
 
-  // lockStatuses removed — no longer used for display
-
   const canWithdraw =
     !isFrozen &&
     !!profile?.payout_registered &&
@@ -1336,7 +1315,7 @@ export default function FinancialsPage() {
             </div>
           </div>
 
-          {/* ── FIRST DEPOSIT BONUS — replaces the old Capital Lock card ── */}
+          {/* First Deposit Bonus */}
           <FirstDepositBonusCard
             allocations={nodeAllocations}
             gpuPlans={gpuPlans}
@@ -1485,7 +1464,7 @@ export default function FinancialsPage() {
                 </div>
               </div>
 
-              {/* Withdrawal policy — Capital Lock row removed */}
+              {/* Withdrawal policy — Min Withdrawal row removed */}
               <div className="bg-slate-900/60 border border-slate-800 rounded-2xl p-5 space-y-3">
                 <p className="text-white font-bold text-sm flex items-center gap-2">
                   <BadgeDollarSign size={14} className="text-emerald-400" /> Withdrawal Policy
@@ -1495,8 +1474,7 @@ export default function FinancialsPage() {
                     { label: "Your Tier", value: policy.tierName, color: "text-white" },
                     { label: "Weekly Max", value: `$${policy.weeklyMaxUSD}`, color: "text-emerald-400" },
                     { label: "Weekly Remaining", value: `$${(policySnapshot?.policy.weeklyRemainingUSD ?? 0).toFixed(2)}`, color: "text-blue-400" },
-                    { label: "Min Withdrawal", value: `$${policy.minWithdrawal}`, color: "text-slate-300" },
-                    { label: "Window", value: "Monday 08:00–16:00 WAT", color: "text-amber-400" },
+                    { label: "Window", value: "Monday 08:00 – 16:00 WAT", color: "text-amber-400" },
                   ].map(({ label, value, color }) => (
                     <div key={label} className="bg-slate-800/40 rounded-xl p-3">
                       <p className="text-slate-500 text-[10px] uppercase tracking-wide">{label}</p>
@@ -1533,7 +1511,7 @@ export default function FinancialsPage() {
                   <p className="text-white font-black text-base">Ready to Withdraw?</p>
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-emerald-400 font-bold">${effectiveAvail.toFixed(2)}</span> available.{" "}
-                    Processed every Monday 08:00–16:00 WAT.
+                    Processed every Monday 08:00 – 16:00 WAT.
                   </p>
                 </div>
                 <button
@@ -1642,7 +1620,6 @@ export default function FinancialsPage() {
                     const isComplete = node.mining_completed || node.status === "matured";
                     const endsAt = node.mining_ends_at ? new Date(node.mining_ends_at) : null;
                     const isOpen2 = expanded === `node-${node.id}`;
-                    // First deposit badge — only for is_first_deposit allocations
                     const isFirstDep = node.is_first_deposit === true;
                     const bonusPct = isFirstDep
                       ? Math.round(getCapitalReturnTier(node.amount_invested).returnPct * 100)
@@ -1662,7 +1639,6 @@ export default function FinancialsPage() {
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <p className="text-white font-black text-sm">{planName}</p>
                                   <StatusBadge status={isComplete ? "matured" : node.status} />
-                                  {/* First-deposit bonus badge */}
                                   {isFirstDep && (
                                     <span className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-amber-900/30 border-amber-700/40 text-amber-400 flex items-center gap-1">
                                       <Gift size={9} /> +{bonusPct}% bonus
