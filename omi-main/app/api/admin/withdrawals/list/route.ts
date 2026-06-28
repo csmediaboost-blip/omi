@@ -1,7 +1,8 @@
+// app/api/admin/withdrawals/list/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseAdmin = createClient(
+const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
@@ -11,7 +12,7 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const status = searchParams.get("status");
 
-    let query = supabaseAdmin
+    let query = supabase
       .from("withdrawals")
       .select(
         `id, user_id, amount, amount_gross, amount_fee, amount_net,
@@ -35,7 +36,7 @@ export async function GET(req: NextRequest) {
     }
 
     const userIds = [...new Set(wds.map((w: any) => w.user_id))];
-    const { data: users } = await supabaseAdmin
+    const { data: users } = await supabase
       .from("users")
       .select("id, email, full_name")
       .in("id", userIds);

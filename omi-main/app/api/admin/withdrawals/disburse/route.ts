@@ -21,13 +21,11 @@ type Withdrawal = {
   reference: string;
   payout_account_name: string | null;
   payout_bank_name: string | null;
-  payout_bank_code: string | null;
   wallet_address: string | null;
   payout_currency: string | null;
 };
 
 // ─── ADMIN AUTH ───────────────────────────────────────────────────────────────
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function isAdmin(supabase: SupabaseClient<any>): Promise<boolean> {
   const { data: { user }, error } = await supabase.auth.getUser();
   if (error || !user) return false;
@@ -41,7 +39,6 @@ async function isAdmin(supabase: SupabaseClient<any>): Promise<boolean> {
 
 // ─── PICK ACTIVE KORAPAY KEY ──────────────────────────────────────────────────
 async function pickDisbursementKey(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   admin: SupabaseClient<any>
 ): Promise<KorapayAccount | null> {
   const { data, error } = await admin
@@ -156,7 +153,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const { data: wd, error: fetchErr } = await admin
       .from("withdrawals")
       .select(
-        "id, status, amount, user_id, reference, payout_account_name, payout_bank_name, payout_bank_code, wallet_address, payout_currency"
+        "id, status, amount, user_id, reference, payout_account_name, payout_bank_name, wallet_address, payout_currency"
       )
       .eq("id", withdrawal_id)
       .single();
@@ -180,9 +177,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // 5. Validate bank details
-    if (!withdrawal.payout_bank_code || !withdrawal.wallet_address) {
+    if (!withdrawal.payout_bank_name || !withdrawal.wallet_address) {
       return NextResponse.json(
-        { error: "Withdrawal is missing bank code or account number. Cannot disburse." },
+        { error: "Withdrawal is missing bank name or account number. Cannot disburse." },
         { status: 400 }
       );
     }
@@ -226,7 +223,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       secretKey: account.secret_key,
       reference: disburseRef,
       amount: amountNGN,
-      bankCode: withdrawal.payout_bank_code,
+      bankCode: withdrawal.payout_bank_name,
       accountNumber: withdrawal.wallet_address,
       accountName: withdrawal.payout_account_name || "",
       narration: `OmniTaskPro withdrawal ${withdrawal.reference}`,
@@ -234,6 +231,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     });
 
     if (!result.success) {
+      // Roll back to queued so admin can retry
       await admin
         .from("withdrawals")
         .update({ status: "queued", updated_at: new Date().toISOString() })
@@ -262,13 +260,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       })
       .eq("id", withdrawal_id);
 
-    // 11. Audit ledger
-    await admin.from("transaction_ledger").insert({
+    // 11. Notify user
+    await admin.from("user_notifications").insert({
       user_id: withdrawal.user_id,
       type: "withdrawal_paid",
-      amount: withdrawal.amount,
-      description: `Withdrawal ${withdrawal.reference} disbursed via KoraPay slot ${account.slot}. KoraPay ref: ${result.reference}`,
-      reference_id: withdrawal.reference,
+      title: "Withdrawal Processed",
+      message: `Your withdrawal of $${withdrawal.amount.toFixed(2)} has been sent to your account via KoraPay.`,
+      is_read: false,
       created_at: new Date().toISOString(),
     });
 
