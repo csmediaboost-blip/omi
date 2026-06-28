@@ -28,12 +28,30 @@ export async function POST(req: NextRequest) {
     // Refund user balance
     const refundAmount = wd.amount_gross ?? wd.amount;
     const { error: refundErr } = await supabase.rpc("adjust_user_balance", {
-      p_user_id: wd.user_id,
-      p_amount: refundAmount,
-      p_type: "withdrawal_refund",
-      p_description: `Withdrawal rejected: ${reason}`,
-      p_reference: wd.reference ?? withdrawal_id,
-    });
+  p_user_id: wd.user_id,
+  p_amount: refundAmount,
+  p_type: "withdrawal_refund",
+  p_description: `Withdrawal rejected: ${reason}`,
+  p_reference: wd.reference ?? withdrawal_id,
+});
+
+if (refundErr) {
+  // Fallback: direct balance update
+  const { data: bal } = await supabase
+    .from("user_balances")
+    .select("balance")
+    .eq("user_id", wd.user_id)
+    .single();
+
+  const { error: balErr } = await supabase
+    .from("user_balances")
+    .update({ balance: (bal?.balance ?? 0) + refundAmount })
+    .eq("user_id", wd.user_id);
+
+  if (balErr) {
+    return NextResponse.json({ error: `Refund failed: ${balErr.message}` }, { status: 500 });
+  }
+}
 
     if (refundErr) {
       console.error("[reject] refund failed:", refundErr.message);
