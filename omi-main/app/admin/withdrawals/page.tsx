@@ -2,7 +2,6 @@
 // app/admin/withdrawals/page.tsx
 
 import { useEffect, useState, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -15,19 +14,23 @@ interface Withdrawal {
   id: string;
   user_id: string;
   amount: number;
+  amount_gross?: number;
+  amount_fee?: number;
+  amount_net?: number;
   wallet_address: string | null;
   payout_method: string | null;
   payout_account_name: string | null;
   payout_bank_name: string | null;
-  // payout_bank_code removed — column does not exist in DB
   payout_currency: string | null;
   status: string;
   tracking_status: string | null;
   gateway_reference: string | null;
   auto_processed: boolean;
-  reference: string;
+  reference: string | null;
   created_at: string;
   paid_at: string | null;
+  flagged?: boolean;
+  fraud_flag?: string | null;
   user_email?: string;
   user_full_name?: string;
 }
@@ -36,7 +39,7 @@ type ActionType = "pay" | "reject" | "view" | null;
 
 interface BulkResult {
   withdrawal_id: string;
-  reference: string;
+  reference: string | null;
   amount: number;
   account_name: string;
   bank_name: string;
@@ -55,6 +58,7 @@ function StatusBadge({ status }: { status: string }) {
     paid: "bg-emerald-100 text-emerald-700 border-emerald-300",
     failed: "bg-red-100 text-red-700 border-red-300",
     rejected: "bg-slate-100 text-slate-600 border-slate-300",
+    flagged: "bg-orange-100 text-orange-700 border-orange-300",
   };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${map[status] ?? "bg-slate-100 text-slate-600"}`}>
@@ -72,11 +76,6 @@ function Spinner({ className = "" }: { className?: string }) {
 
 // ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function WithdrawalQueuePage() {
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
-
   const [items, setItems] = useState<Withdrawal[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
@@ -92,62 +91,30 @@ export default function WithdrawalQueuePage() {
   const [bulkResults, setBulkResults] = useState<BulkResult[] | null>(null);
   const [showBulkResults, setShowBulkResults] = useState(false);
 
-  // ── Fetch ─────────────────────────────────────────────────────────────────
+  // ── Fetch via service-role API route (bypasses RLS) ───────────────────────
   const fetchItems = useCallback(async () => {
     setLoading(true);
     setSelectedIds(new Set());
     try {
-      // Step 1: fetch withdrawals — only columns that exist in DB
-      let q = supabase
-        .from("withdrawals")
-        .select(
-          `id, user_id, amount, wallet_address, payout_method,
-           payout_account_name, payout_bank_name,
-           payout_currency, status, tracking_status,
-           gateway_reference, auto_processed, reference,
-           created_at, paid_at`
-        )
-        .order("created_at", { ascending: false })
-        .limit(300);
+      const params = new URLSearchParams();
+      if (statusFilter !== "all") params.set("status", statusFilter);
 
-      if (statusFilter !== "all") q = q.eq("status", statusFilter);
+      const res = await fetch(`/api/admin/withdrawals/list?${params.toString()}`);
+      const json = await res.json();
 
-      const { data: wds, error } = await q;
-
-      if (error) {
-        console.error("[admin/withdrawals] fetch:", error.message);
-        toast.error(`Failed to load: ${error.message}`);
+      if (!res.ok) {
+        toast.error(json.error ?? "Failed to load withdrawals");
         return;
       }
 
-      if (!wds?.length) {
-        setItems([]);
-        return;
-      }
-
-      // Step 2: fetch user details separately — avoids ambiguous FK error
-      const userIds = [...new Set(wds.map((w) => w.user_id))];
-      const { data: users } = await supabase
-        .from("users")
-        .select("id, email, full_name")
-        .in("id", userIds);
-
-      const userMap: Record<string, { email: string; full_name: string }> = {};
-      (users ?? []).forEach((u: any) => {
-        userMap[u.id] = { email: u.email, full_name: u.full_name };
-      });
-
-      setItems(
-        wds.map((w: any) => ({
-          ...w,
-          user_email: userMap[w.user_id]?.email ?? "—",
-          user_full_name: userMap[w.user_id]?.full_name ?? "—",
-        }))
-      );
+      setItems(json.withdrawals ?? []);
+    } catch (err) {
+      toast.error("Network error loading withdrawals");
+      console.error(err);
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]); // eslint-disable-line
+  }, [statusFilter]);
 
   useEffect(() => { fetchItems(); }, [fetchItems]);
 
@@ -250,7 +217,7 @@ export default function WithdrawalQueuePage() {
         clearSelection();
         fetchItems();
         if (summary.failed === 0 && summary.skipped === 0) {
-          toast.success(`All ${summary.succeeded} payments sent. Total: $${summary.total_paid_usd} (₦${summary.total_paid_ngn})`);
+          toast.success(`All ${summary.succeeded} payments sent.`);
         } else {
           toast.warning(`${summary.succeeded} paid, ${summary.failed} failed, ${summary.skipped} skipped.`);
         }
@@ -269,7 +236,7 @@ export default function WithdrawalQueuePage() {
       (item.wallet_address ?? "").toLowerCase().includes(q) ||
       (item.user_email ?? "").toLowerCase().includes(q) ||
       (item.user_full_name ?? "").toLowerCase().includes(q) ||
-      item.reference.toLowerCase().includes(q) ||
+      (item.reference ?? "").toLowerCase().includes(q) ||
       (item.payout_account_name ?? "").toLowerCase().includes(q) ||
       (item.payout_bank_name ?? "").toLowerCase().includes(q)
     );
@@ -277,6 +244,9 @@ export default function WithdrawalQueuePage() {
 
   const closeDialog = () => { setSelected(null); setActionType(null); setRejectReason(""); };
   const isPayable = (s: string) => ["queued", "processing"].includes(s);
+
+  // ── Exchange rate for display ─────────────────────────────────────────────
+  const toNgn = (usd: number) => (usd * 1600).toLocaleString("en-NG");
 
   return (
     <div className="min-h-screen bg-white text-slate-800 p-4 md:p-6 space-y-6">
@@ -307,6 +277,7 @@ export default function WithdrawalQueuePage() {
           <option value="paid">Paid</option>
           <option value="failed">Failed</option>
           <option value="rejected">Rejected</option>
+          <option value="flagged">Flagged</option>
         </select>
         <button
           onClick={fetchItems}
@@ -378,7 +349,9 @@ export default function WithdrawalQueuePage() {
                     <tr
                       key={item.id}
                       className={`border-b border-slate-100 transition-colors ${
-                        isChecked
+                        item.flagged
+                          ? "bg-orange-50"
+                          : isChecked
                           ? "bg-emerald-50"
                           : idx % 2 === 0
                           ? "bg-white"
@@ -387,7 +360,7 @@ export default function WithdrawalQueuePage() {
                     >
                       {/* Checkbox */}
                       <td className="px-4 py-3">
-                        {payable && (
+                        {payable && !item.flagged && (
                           <input
                             type="checkbox"
                             checked={isChecked}
@@ -416,10 +389,13 @@ export default function WithdrawalQueuePage() {
 
                       {/* Amount */}
                       <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-800">${(item.amount ?? 0).toFixed(2)}</div>
+                        <div className="font-semibold text-slate-800">${(item.amount_net ?? item.amount ?? 0).toFixed(2)}</div>
                         <div className="text-xs text-slate-400">
-                          ≈ ₦{((item.amount ?? 0) * 1600).toLocaleString("en-NG")}
+                          ≈ ₦{toNgn(item.amount_net ?? item.amount ?? 0)}
                         </div>
+                        {item.amount_fee ? (
+                          <div className="text-xs text-slate-300">fee: ${item.amount_fee.toFixed(2)}</div>
+                        ) : null}
                       </td>
 
                       {/* Account details */}
@@ -446,12 +422,15 @@ export default function WithdrawalQueuePage() {
                         {item.auto_processed && (
                           <div className="text-xs text-slate-400 mt-0.5">auto</div>
                         )}
+                        {item.flagged && (
+                          <div className="text-xs text-orange-500 mt-0.5">⚠ flagged</div>
+                        )}
                       </td>
 
                       {/* Actions */}
                       <td className="px-4 py-3">
                         <div className="flex flex-col gap-1">
-                          {payable && (
+                          {payable && !item.flagged && (
                             <>
                               <button
                                 onClick={() => { setSelected(item); setActionType("pay"); }}
@@ -499,21 +478,27 @@ export default function WithdrawalQueuePage() {
             <div className="space-y-4 text-sm">
               {/* Detail grid */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 bg-slate-50 rounded-lg p-3 text-xs border border-slate-200">
-                {[
-                  ["Reference", <span className="font-mono">{selected.reference}</span>],
+                {([
+                  ["Reference", <span className="font-mono">{selected.reference ?? "—"}</span>],
                   ["User", <span>{selected.user_full_name}<br /><span className="text-slate-400">{selected.user_email}</span></span>],
-                  ["Amount", <span className="font-semibold text-slate-900">${selected.amount.toFixed(2)} <span className="text-slate-400">(≈ ₦{(selected.amount * 1600).toLocaleString("en-NG")})</span></span>],
+                  ["Gross Amount", <span>${(selected.amount_gross ?? selected.amount ?? 0).toFixed(2)}</span>],
+                  ["Fee", <span>${(selected.amount_fee ?? 0).toFixed(2)}</span>],
+                  ["Net (to pay)", <span className="font-semibold text-slate-900">${(selected.amount_net ?? selected.amount ?? 0).toFixed(2)} <span className="text-slate-400">(≈ ₦{toNgn(selected.amount_net ?? selected.amount ?? 0)})</span></span>],
                   ["Account Name", selected.payout_account_name || "—"],
                   ["Bank", selected.payout_bank_name || "—"],
                   ["Account No.", <span className="font-mono">{selected.wallet_address || "—"}</span>],
+                  ["Method", selected.payout_method || "—"],
                   ["Status", <StatusBadge status={selected.status} />],
                   ...(selected.gateway_reference
                     ? [["KoraPay Ref", <span className="font-mono">{selected.gateway_reference}</span>]]
                     : []),
-                ].map(([label, value], i) => (
+                  ...(selected.fraud_flag
+                    ? [["Fraud Flag", <span className="text-orange-600">{selected.fraud_flag}</span>]]
+                    : []),
+                ] as [string, React.ReactNode][]).map(([label, value], i) => (
                   <>
                     <div key={`l-${i}`} className="text-slate-500">{label}</div>
-                    <div key={`v-${i}`} className="text-slate-800">{value as any}</div>
+                    <div key={`v-${i}`} className="text-slate-800">{value}</div>
                   </>
                 ))}
               </div>
@@ -524,7 +509,7 @@ export default function WithdrawalQueuePage() {
                   <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800">
                     <p className="font-semibold mb-1">⚠️ Confirm payment</p>
                     <p>
-                      Disburse <strong>₦{(selected.amount * 1600).toLocaleString("en-NG")}</strong> to{" "}
+                      Disburse <strong>₦{toNgn(selected.amount_net ?? selected.amount ?? 0)}</strong> to{" "}
                       <strong>{selected.payout_account_name}</strong> at{" "}
                       <strong>{selected.payout_bank_name}</strong> via KoraPay.
                     </p>
@@ -637,7 +622,7 @@ export default function WithdrawalQueuePage() {
                       </div>
                       <span className="font-semibold text-slate-800">${r.amount.toFixed(2)}</span>
                     </div>
-                    <div className="mt-1 text-slate-400 font-mono">{r.reference}</div>
+                    <div className="mt-1 text-slate-400 font-mono">{r.reference ?? "—"}</div>
                     {r.success && (
                       <div className="mt-1 text-emerald-600">✓ Paid · KoraPay ref: {r.korapay_reference}</div>
                     )}
