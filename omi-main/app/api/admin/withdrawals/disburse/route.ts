@@ -196,22 +196,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 7. Mark as processing — prevents double-pay
     await admin
       .from("withdrawals")
-      .update({ status: "processing", updated_at: new Date().toISOString() })
+      .update({ status: "processing" })
       .eq("id", withdrawal_id)
-      .eq("status", "queued");
-
-    const { data: locked } = await admin
-      .from("withdrawals")
-      .select("status")
-      .eq("id", withdrawal_id)
-      .single();
-
-    if (locked?.status !== "processing") {
-      return NextResponse.json(
-        { error: "Withdrawal was already being processed by another request." },
-        { status: 409 }
-      );
-    }
+      .in("status", ["queued", "processing"]);
 
     // 8. Convert amount to NGN
     const EXCHANGE_RATE_NGN = 1600;
@@ -226,7 +213,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       bankCode: withdrawal.payout_bank_name,
       accountNumber: withdrawal.wallet_address,
       accountName: withdrawal.payout_account_name || "",
-      narration: `OmniTaskPro withdrawal ${withdrawal.reference}`,
+      narration: `OmniTaskPro withdrawal ${withdrawal.reference ?? withdrawal_id}`,
       currency: withdrawal.payout_currency || "NGN",
     });
 
@@ -234,7 +221,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // Roll back to queued so admin can retry
       await admin
         .from("withdrawals")
-        .update({ status: "queued", updated_at: new Date().toISOString() })
+        .update({ status: "queued" })
         .eq("id", withdrawal_id);
 
       console.error(
@@ -255,7 +242,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         tracking_status: "paid",
         gateway_reference: result.reference,
         paid_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
         processing_notes: `Disbursed via KoraPay slot ${account.slot} (${account.label})`,
       })
       .eq("id", withdrawal_id);
