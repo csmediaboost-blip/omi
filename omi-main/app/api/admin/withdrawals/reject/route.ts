@@ -67,37 +67,44 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 5. Refund amount (use gross so fee is also returned)
     const refundAmount = Number(wd.amount_gross ?? wd.amount ?? 0);
 
-    // 6. Get current balance
-    const { data: balData, error: balFetchErr } = await admin
+    // 6. Get current balance safely (avoid .single() crash)
+    const { data: balRows } = await admin
       .from("user_balances")
       .select("balance")
       .eq("user_id", wd.user_id)
-      .single();
+      .limit(1);
 
-    if (balFetchErr) {
-      return NextResponse.json(
-        { error: `Could not fetch user balance: ${balFetchErr.message}` },
-        { status: 500 }
-      );
-    }
-
-    const currentBalance = Number(balData?.balance ?? 0);
+    const currentBalance = Number(balRows?.[0]?.balance ?? 0);
     const newBalance = currentBalance + refundAmount;
 
-    // 7. Update balance
-    const { error: balUpdateErr } = await admin
-      .from("user_balances")
-      .update({ balance: newBalance })
-      .eq("user_id", wd.user_id);
+    if (balRows && balRows.length > 0) {
+      // Update existing balance row
+      const { error: balUpdateErr } = await admin
+        .from("user_balances")
+        .update({ balance: newBalance })
+        .eq("user_id", wd.user_id);
 
-    if (balUpdateErr) {
-      return NextResponse.json(
-        { error: `Refund failed: ${balUpdateErr.message}` },
-        { status: 500 }
-      );
+      if (balUpdateErr) {
+        return NextResponse.json(
+          { error: `Refund failed: ${balUpdateErr.message}` },
+          { status: 500 }
+        );
+      }
+    } else {
+      // No balance row exists — create one
+      const { error: insertErr } = await admin
+        .from("user_balances")
+        .insert({ user_id: wd.user_id, balance: refundAmount });
+
+      if (insertErr) {
+        return NextResponse.json(
+          { error: `Refund failed: ${insertErr.message}` },
+          { status: 500 }
+        );
+      }
     }
 
-    // 8. Mark withdrawal as rejected
+    // 7. Mark withdrawal as rejected
     await admin
       .from("withdrawals")
       .update({
@@ -107,7 +114,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       })
       .eq("id", withdrawal_id);
 
-    // 9. Notify user with reason
+    // 8. Notify user with reason
     await admin.from("user_notifications").insert({
       user_id: wd.user_id,
       type: "withdrawal_rejected",
