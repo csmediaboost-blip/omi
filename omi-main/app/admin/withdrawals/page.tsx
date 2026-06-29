@@ -2,14 +2,12 @@
 // app/admin/withdrawals/page.tsx
 
 import { useEffect, useState, useCallback } from "react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 
-// ─── TYPES ────────────────────────────────────────────────────────────────────
 interface Withdrawal {
   id: string;
   user_id: string;
@@ -35,22 +33,8 @@ interface Withdrawal {
   user_full_name?: string;
 }
 
-type ActionType = "pay" | "reject" | "view" | null;
+type ActionType = "mark-paid" | "reject" | "view" | null;
 
-interface BulkResult {
-  withdrawal_id: string;
-  reference: string | null;
-  amount: number;
-  account_name: string;
-  bank_name: string;
-  success: boolean;
-  korapay_reference?: string;
-  error?: string;
-  skipped?: boolean;
-  skip_reason?: string;
-}
-
-// ─── STATUS BADGE ─────────────────────────────────────────────────────────────
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, string> = {
     queued: "bg-yellow-100 text-yellow-700 border-yellow-300",
@@ -67,14 +51,12 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-// ─── SPINNER ──────────────────────────────────────────────────────────────────
 function Spinner({ className = "" }: { className?: string }) {
   return (
     <div className={`border-2 border-emerald-200 border-t-emerald-600 rounded-full animate-spin ${className || "w-6 h-6"}`} />
   );
 }
 
-// ─── MAIN PAGE ────────────────────────────────────────────────────────────────
 export default function WithdrawalQueuePage() {
   const [items, setItems] = useState<Withdrawal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -84,33 +66,20 @@ export default function WithdrawalQueuePage() {
   const [selected, setSelected] = useState<Withdrawal | null>(null);
   const [actionType, setActionType] = useState<ActionType>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [korapayRef, setKorapayRef] = useState("");
   const [acting, setActing] = useState(false);
 
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [bulkActing, setBulkActing] = useState(false);
-  const [bulkResults, setBulkResults] = useState<BulkResult[] | null>(null);
-  const [showBulkResults, setShowBulkResults] = useState(false);
-
-  // ── Fetch via service-role API route (bypasses RLS) ───────────────────────
   const fetchItems = useCallback(async () => {
     setLoading(true);
-    setSelectedIds(new Set());
     try {
       const params = new URLSearchParams();
       if (statusFilter !== "all") params.set("status", statusFilter);
-
       const res = await fetch(`/api/admin/withdrawals/list?${params.toString()}`);
       const json = await res.json();
-
-      if (!res.ok) {
-        toast.error(json.error ?? "Failed to load withdrawals");
-        return;
-      }
-
+      if (!res.ok) { toast.error(json.error ?? "Failed to load"); return; }
       setItems(json.withdrawals ?? []);
-    } catch (err) {
-      toast.error("Network error loading withdrawals");
-      console.error(err);
+    } catch {
+      toast.error("Network error");
     } finally {
       setLoading(false);
     }
@@ -118,11 +87,7 @@ export default function WithdrawalQueuePage() {
 
   useEffect(() => { fetchItems(); }, [fetchItems]);
 
-  // ── API helper ────────────────────────────────────────────────────────────
-  const callApi = async (
-    path: string,
-    body: Record<string, unknown>
-  ): Promise<{ ok: boolean; data?: any; message?: string }> => {
+  const callApi = async (path: string, body: Record<string, unknown>) => {
     const res = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -133,27 +98,26 @@ export default function WithdrawalQueuePage() {
     return { ok: true, data: json, message: json.message };
   };
 
-  // ── Single pay ────────────────────────────────────────────────────────────
-  const handleSinglePay = async () => {
+  const handleMarkPaid = async () => {
     if (!selected) return;
     setActing(true);
     try {
-      const result = await callApi("/api/admin/withdrawals/disburse", {
+      const result = await callApi("/api/admin/withdrawals/mark-paid", {
         withdrawal_id: selected.id,
+        korapay_reference: korapayRef.trim() || undefined,
       });
       if (result.ok) {
-        toast.success(result.message ?? "Payment sent.");
+        toast.success(result.message ?? "Marked as paid.");
         closeDialog();
         fetchItems();
       } else {
-        toast.error(result.message ?? "Payment failed.");
+        toast.error(result.message ?? "Failed.");
       }
     } finally {
       setActing(false);
     }
   };
 
-  // ── Reject ────────────────────────────────────────────────────────────────
   const handleReject = async () => {
     if (!selected || !rejectReason.trim()) {
       toast.error("Rejection reason is required.");
@@ -177,59 +141,6 @@ export default function WithdrawalQueuePage() {
     }
   };
 
-  // ── Bulk helpers ──────────────────────────────────────────────────────────
-  const payableItems = items.filter((i) => ["queued", "processing"].includes(i.status));
-
-  const toggleSelect = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-
-  const selectAll = () => {
-    const payableFiltered = filteredItems.filter((i) =>
-      ["queued", "processing"].includes(i.status)
-    );
-    setSelectedIds(new Set(payableFiltered.map((i) => i.id)));
-  };
-
-  const clearSelection = () => setSelectedIds(new Set());
-
-  // ── Bulk pay ──────────────────────────────────────────────────────────────
-  const handleBulkPay = async () => {
-    if (selectedIds.size === 0) { toast.error("No withdrawals selected."); return; }
-    const confirmed = window.confirm(
-      `Pay ${selectedIds.size} withdrawal(s) via KoraPay?\n\nThis will send real money. Cannot be undone.`
-    );
-    if (!confirmed) return;
-
-    setBulkActing(true);
-    try {
-      const result = await callApi("/api/admin/withdrawals/bulk-disburse", {
-        withdrawal_ids: Array.from(selectedIds),
-      });
-      if (result.ok) {
-        const { summary, results } = result.data;
-        setBulkResults(results);
-        setShowBulkResults(true);
-        clearSelection();
-        fetchItems();
-        if (summary.failed === 0 && summary.skipped === 0) {
-          toast.success(`All ${summary.succeeded} payments sent.`);
-        } else {
-          toast.warning(`${summary.succeeded} paid, ${summary.failed} failed, ${summary.skipped} skipped.`);
-        }
-      } else {
-        toast.error(result.message ?? "Bulk pay failed.");
-      }
-    } finally {
-      setBulkActing(false);
-    }
-  };
-
-  // ── Filter ────────────────────────────────────────────────────────────────
   const filteredItems = items.filter((item) => {
     const q = searchTerm.toLowerCase();
     return (
@@ -242,23 +153,25 @@ export default function WithdrawalQueuePage() {
     );
   });
 
-  const closeDialog = () => { setSelected(null); setActionType(null); setRejectReason(""); };
-  const isPayable = (s: string) => ["queued", "processing"].includes(s);
+  const closeDialog = () => {
+    setSelected(null);
+    setActionType(null);
+    setRejectReason("");
+    setKorapayRef("");
+  };
 
-  // ── Exchange rate for display ─────────────────────────────────────────────
+  const isPayable = (s: string) => ["queued", "processing"].includes(s);
   const toNgn = (usd: number) => (usd * 1600).toLocaleString("en-NG");
 
   return (
     <div className="min-h-screen bg-white text-slate-800 p-4 md:p-6 space-y-6">
-      {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Withdrawal Queue</h1>
         <p className="text-slate-500 text-sm mt-1">
-          Review and pay withdrawal requests via KoraPay
+          Review withdrawal requests — pay manually via KoraPay then mark as paid here
         </p>
       </div>
 
-      {/* Filters + bulk actions */}
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center flex-wrap">
         <Input
           placeholder="Search email, name, account, ref…"
@@ -286,32 +199,8 @@ export default function WithdrawalQueuePage() {
         >
           Refresh
         </button>
-
-        {payableItems.length > 0 && (
-          <div className="flex items-center gap-2 ml-auto">
-            {selectedIds.size > 0 && (
-              <span className="text-sm text-slate-500">{selectedIds.size} selected</span>
-            )}
-            <button
-              onClick={selectedIds.size > 0 ? clearSelection : selectAll}
-              className="px-3 py-1.5 text-sm bg-white hover:bg-slate-50 border border-slate-300 text-slate-600 rounded-md"
-            >
-              {selectedIds.size > 0 ? "Clear" : "Select All Payable"}
-            </button>
-            {selectedIds.size > 0 && (
-              <button
-                onClick={handleBulkPay}
-                disabled={bulkActing}
-                className="px-4 py-1.5 text-sm bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-md disabled:opacity-50 flex items-center gap-2"
-              >
-                {bulkActing ? <><Spinner className="w-4 h-4" /> Processing…</> : `💸 Pay ${selectedIds.size} Selected`}
-              </button>
-            )}
-          </div>
-        )}
       </div>
 
-      {/* Table card */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
         <div className="p-4 border-b border-slate-200 bg-slate-50">
           <h2 className="font-semibold text-slate-800">
@@ -321,9 +210,7 @@ export default function WithdrawalQueuePage() {
         </div>
 
         {loading ? (
-          <div className="flex justify-center py-16">
-            <Spinner className="w-8 h-8" />
-          </div>
+          <div className="flex justify-center py-16"><Spinner className="w-8 h-8" /></div>
         ) : filteredItems.length === 0 ? (
           <div className="text-center text-slate-400 py-16">No withdrawals found</div>
         ) : (
@@ -331,7 +218,6 @@ export default function WithdrawalQueuePage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wide bg-slate-50">
-                  <th className="px-4 py-3 text-left w-8"></th>
                   <th className="px-4 py-3 text-left">Date</th>
                   <th className="px-4 py-3 text-left">User</th>
                   <th className="px-4 py-3 text-left">Amount</th>
@@ -342,133 +228,77 @@ export default function WithdrawalQueuePage() {
                 </tr>
               </thead>
               <tbody>
-                {filteredItems.map((item, idx) => {
-                  const payable = isPayable(item.status);
-                  const isChecked = selectedIds.has(item.id);
-                  return (
-                    <tr
-                      key={item.id}
-                      className={`border-b border-slate-100 transition-colors ${
-                        item.flagged
-                          ? "bg-orange-50"
-                          : isChecked
-                          ? "bg-emerald-50"
-                          : idx % 2 === 0
-                          ? "bg-white"
-                          : "bg-slate-50/50"
-                      } hover:bg-slate-50`}
-                    >
-                      {/* Checkbox */}
-                      <td className="px-4 py-3">
-                        {payable && !item.flagged && (
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => toggleSelect(item.id)}
-                            className="w-4 h-4 accent-emerald-500 cursor-pointer"
-                          />
+                {filteredItems.map((item, idx) => (
+                  <tr
+                    key={item.id}
+                    className={`border-b border-slate-100 transition-colors ${
+                      item.flagged ? "bg-orange-50" : idx % 2 === 0 ? "bg-white" : "bg-slate-50/50"
+                    } hover:bg-slate-50`}
+                  >
+                    <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
+                      {new Date(item.created_at).toLocaleDateString("en-NG", { day: "numeric", month: "short", year: "numeric" })}
+                      <br />
+                      {new Date(item.created_at).toLocaleTimeString("en-NG", { hour: "2-digit", minute: "2-digit" })}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-slate-800 text-sm">{item.user_full_name}</div>
+                      <div className="text-xs text-slate-400">{item.user_email}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-slate-800">${(item.amount_net ?? item.amount ?? 0).toFixed(2)}</div>
+                      <div className="text-xs text-slate-400">≈ ₦{toNgn(item.amount_net ?? item.amount ?? 0)}</div>
+                      {item.amount_fee ? <div className="text-xs text-slate-300">fee: ${item.amount_fee.toFixed(2)}</div> : null}
+                    </td>
+                    <td className="px-4 py-3 max-w-[180px]">
+                      {item.payout_account_name && <div className="font-medium text-slate-800 text-xs">{item.payout_account_name}</div>}
+                      {item.payout_bank_name && <div className="text-xs text-slate-500">{item.payout_bank_name}</div>}
+                      {item.wallet_address && <div className="text-xs font-mono text-slate-400">{item.wallet_address}</div>}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{item.payout_method ?? "—"}</td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={item.status} />
+                      {item.flagged && <div className="text-xs text-orange-500 mt-0.5">⚠ flagged</div>}
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1">
+                        {isPayable(item.status) && (
+                          <>
+                            <button
+                              onClick={() => { setSelected(item); setActionType("mark-paid"); setKorapayRef(""); }}
+                              className="px-2 py-1 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium"
+                            >
+                              ✓ Mark Paid
+                            </button>
+                            <button
+                              onClick={() => { setSelected(item); setActionType("reject"); setRejectReason(""); }}
+                              className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium"
+                            >
+                              Reject
+                            </button>
+                          </>
                         )}
-                      </td>
-
-                      {/* Date */}
-                      <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
-                        {new Date(item.created_at).toLocaleDateString("en-NG", {
-                          day: "numeric", month: "short", year: "numeric",
-                        })}
-                        <br />
-                        {new Date(item.created_at).toLocaleTimeString("en-NG", {
-                          hour: "2-digit", minute: "2-digit",
-                        })}
-                      </td>
-
-                      {/* User */}
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-slate-800 text-sm">{item.user_full_name}</div>
-                        <div className="text-xs text-slate-400">{item.user_email}</div>
-                      </td>
-
-                      {/* Amount */}
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-slate-800">${(item.amount_net ?? item.amount ?? 0).toFixed(2)}</div>
-                        <div className="text-xs text-slate-400">
-                          ≈ ₦{toNgn(item.amount_net ?? item.amount ?? 0)}
-                        </div>
-                        {item.amount_fee ? (
-                          <div className="text-xs text-slate-300">fee: ${item.amount_fee.toFixed(2)}</div>
-                        ) : null}
-                      </td>
-
-                      {/* Account details */}
-                      <td className="px-4 py-3 max-w-[180px]">
-                        {item.payout_account_name && (
-                          <div className="font-medium text-slate-800 text-xs">{item.payout_account_name}</div>
-                        )}
-                        {item.payout_bank_name && (
-                          <div className="text-xs text-slate-500">{item.payout_bank_name}</div>
-                        )}
-                        {item.wallet_address && (
-                          <div className="text-xs font-mono text-slate-400">{item.wallet_address}</div>
-                        )}
-                      </td>
-
-                      {/* Method */}
-                      <td className="px-4 py-3 text-xs text-slate-500">
-                        {item.payout_method ?? "—"}
-                      </td>
-
-                      {/* Status */}
-                      <td className="px-4 py-3">
-                        <StatusBadge status={item.status} />
-                        {item.auto_processed && (
-                          <div className="text-xs text-slate-400 mt-0.5">auto</div>
-                        )}
-                        {item.flagged && (
-                          <div className="text-xs text-orange-500 mt-0.5">⚠ flagged</div>
-                        )}
-                      </td>
-
-                      {/* Actions */}
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col gap-1">
-                          {payable && !item.flagged && (
-                            <>
-                              <button
-                                onClick={() => { setSelected(item); setActionType("pay"); }}
-                                className="px-2 py-1 text-xs bg-emerald-600 hover:bg-emerald-500 text-white rounded font-medium"
-                              >
-                                Pay Now
-                              </button>
-                              <button
-                                onClick={() => { setSelected(item); setActionType("reject"); setRejectReason(""); }}
-                                className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium"
-                              >
-                                Reject
-                              </button>
-                            </>
-                          )}
-                          <button
-                            onClick={() => { setSelected(item); setActionType("view"); }}
-                            className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium"
-                          >
-                            View
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
+                        <button
+                          onClick={() => { setSelected(item); setActionType("view"); }}
+                          className="px-2 py-1 text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-medium"
+                        >
+                          View
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {/* ── Single action dialog ─────────────────────────────────────────── */}
+      {/* Dialog */}
       <Dialog open={!!selected} onOpenChange={(open) => { if (!open) closeDialog(); }}>
         <DialogContent className="max-w-lg bg-white border-slate-200 text-slate-800">
           <DialogHeader>
             <DialogTitle className="text-slate-900">
-              {actionType === "pay" ? "💸 Pay via KoraPay"
+              {actionType === "mark-paid" ? "✓ Mark as Paid"
                 : actionType === "reject" ? "🚫 Reject Withdrawal"
                 : "📄 Withdrawal Detail"}
             </DialogTitle>
@@ -479,22 +309,14 @@ export default function WithdrawalQueuePage() {
               {/* Detail grid */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 bg-slate-50 rounded-lg p-3 text-xs border border-slate-200">
                 {([
-                  ["Reference", <span className="font-mono">{selected.reference ?? "—"}</span>],
                   ["User", <span>{selected.user_full_name}<br /><span className="text-slate-400">{selected.user_email}</span></span>],
-                  ["Gross Amount", <span>${(selected.amount_gross ?? selected.amount ?? 0).toFixed(2)}</span>],
+                  ["Gross", <span>${(selected.amount_gross ?? selected.amount ?? 0).toFixed(2)}</span>],
                   ["Fee", <span>${(selected.amount_fee ?? 0).toFixed(2)}</span>],
                   ["Net (to pay)", <span className="font-semibold text-slate-900">${(selected.amount_net ?? selected.amount ?? 0).toFixed(2)} <span className="text-slate-400">(≈ ₦{toNgn(selected.amount_net ?? selected.amount ?? 0)})</span></span>],
                   ["Account Name", selected.payout_account_name || "—"],
                   ["Bank", selected.payout_bank_name || "—"],
                   ["Account No.", <span className="font-mono">{selected.wallet_address || "—"}</span>],
-                  ["Method", selected.payout_method || "—"],
                   ["Status", <StatusBadge status={selected.status} />],
-                  ...(selected.gateway_reference
-                    ? [["KoraPay Ref", <span className="font-mono">{selected.gateway_reference}</span>]]
-                    : []),
-                  ...(selected.fraud_flag
-                    ? [["Fraud Flag", <span className="text-orange-600">{selected.fraud_flag}</span>]]
-                    : []),
                 ] as [string, React.ReactNode][]).map(([label, value], i) => (
                   <>
                     <div key={`l-${i}`} className="text-slate-500">{label}</div>
@@ -503,31 +325,31 @@ export default function WithdrawalQueuePage() {
                 ))}
               </div>
 
-              {/* Pay */}
-              {actionType === "pay" && (
+              {/* Mark Paid */}
+              {actionType === "mark-paid" && (
                 <div className="space-y-3">
                   <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-xs text-emerald-800">
-                    <p className="font-semibold mb-1">⚠️ Confirm payment</p>
-                    <p>
-                      Disburse <strong>₦{toNgn(selected.amount_net ?? selected.amount ?? 0)}</strong> to{" "}
-                      <strong>{selected.payout_account_name}</strong> at{" "}
-                      <strong>{selected.payout_bank_name}</strong> via KoraPay.
-                    </p>
-                    <p className="mt-1 text-emerald-600">This action cannot be undone.</p>
+                    <p className="font-semibold mb-1">Manual Payment Confirmation</p>
+                    <p>Pay <strong>₦{toNgn(selected.amount_net ?? selected.amount ?? 0)}</strong> to <strong>{selected.payout_account_name}</strong> at <strong>{selected.payout_bank_name}</strong> manually via KoraPay dashboard, then enter the reference below and confirm.</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600">KoraPay Reference <span className="text-slate-400">(optional)</span></label>
+                    <Input
+                      className="mt-1 bg-white border-slate-300 text-slate-800 placeholder:text-slate-400"
+                      placeholder="e.g. KPY-123456789"
+                      value={korapayRef}
+                      onChange={(e) => setKorapayRef(e.target.value)}
+                    />
                   </div>
                   <div className="flex gap-2">
                     <button
-                      onClick={handleSinglePay}
+                      onClick={handleMarkPaid}
                       disabled={acting}
                       className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
                     >
-                      {acting ? <><Spinner className="w-4 h-4" /> Sending…</> : "✓ Confirm & Pay"}
+                      {acting ? <><Spinner className="w-4 h-4" /> Saving…</> : "✓ Confirm Paid"}
                     </button>
-                    <button
-                      onClick={closeDialog}
-                      disabled={acting}
-                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
-                    >
+                    <button onClick={closeDialog} disabled={acting} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">
                       Cancel
                     </button>
                   </div>
@@ -538,18 +360,14 @@ export default function WithdrawalQueuePage() {
               {actionType === "reject" && (
                 <div className="space-y-3">
                   <div>
-                    <label className="text-sm font-medium text-red-600">
-                      Rejection reason <span className="text-red-500">*</span>
-                    </label>
+                    <label className="text-sm font-medium text-red-600">Rejection reason <span className="text-red-500">*</span></label>
                     <Input
                       className="mt-1 bg-white border-red-300 text-slate-800 placeholder:text-slate-400"
                       placeholder="e.g. KYC name mismatch, suspicious activity…"
                       value={rejectReason}
                       onChange={(e) => setRejectReason(e.target.value)}
                     />
-                    <p className="text-xs text-slate-400 mt-1">
-                      The user's balance will be refunded automatically.
-                    </p>
+                    <p className="text-xs text-slate-400 mt-1">The user's balance will be refunded automatically.</p>
                   </div>
                   <div className="flex gap-2">
                     <button
@@ -559,89 +377,12 @@ export default function WithdrawalQueuePage() {
                     >
                       {acting ? <><Spinner className="w-4 h-4" /> Rejecting…</> : "✗ Reject & Refund"}
                     </button>
-                    <button
-                      onClick={closeDialog}
-                      disabled={acting}
-                      className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
-                    >
+                    <button onClick={closeDialog} disabled={acting} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">
                       Cancel
                     </button>
                   </div>
                 </div>
               )}
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Bulk results dialog ──────────────────────────────────────────── */}
-      <Dialog open={showBulkResults} onOpenChange={setShowBulkResults}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto bg-white border-slate-200 text-slate-800">
-          <DialogHeader>
-            <DialogTitle className="text-slate-900">Bulk Payment Results</DialogTitle>
-          </DialogHeader>
-          {bulkResults && (
-            <div className="space-y-3">
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-emerald-600">
-                    {bulkResults.filter((r) => r.success).length}
-                  </div>
-                  <div className="text-xs text-emerald-500">Paid</div>
-                </div>
-                <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-red-600">
-                    {bulkResults.filter((r) => !r.success && !r.skipped).length}
-                  </div>
-                  <div className="text-xs text-red-500">Failed</div>
-                </div>
-                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-yellow-600">
-                    {bulkResults.filter((r) => r.skipped).length}
-                  </div>
-                  <div className="text-xs text-yellow-500">Skipped</div>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                {bulkResults.map((r) => (
-                  <div
-                    key={r.withdrawal_id}
-                    className={`rounded-lg p-3 text-xs border ${
-                      r.success
-                        ? "bg-emerald-50 border-emerald-200"
-                        : r.skipped
-                        ? "bg-yellow-50 border-yellow-200"
-                        : "bg-red-50 border-red-200"
-                    }`}
-                  >
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <span className="font-semibold text-slate-800">{r.account_name}</span>
-                        <span className="text-slate-500 ml-2">{r.bank_name}</span>
-                      </div>
-                      <span className="font-semibold text-slate-800">${r.amount.toFixed(2)}</span>
-                    </div>
-                    <div className="mt-1 text-slate-400 font-mono">{r.reference ?? "—"}</div>
-                    {r.success && (
-                      <div className="mt-1 text-emerald-600">✓ Paid · KoraPay ref: {r.korapay_reference}</div>
-                    )}
-                    {r.skipped && (
-                      <div className="mt-1 text-yellow-600">⚠ Skipped: {r.skip_reason}</div>
-                    )}
-                    {!r.success && !r.skipped && (
-                      <div className="mt-1 text-red-600">✗ Failed: {r.error}</div>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={() => setShowBulkResults(false)}
-                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm"
-              >
-                Close
-              </button>
             </div>
           )}
         </DialogContent>
