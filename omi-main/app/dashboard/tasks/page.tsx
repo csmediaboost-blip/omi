@@ -1,6 +1,6 @@
 "use client";
 // app/dashboard/tasks/page.tsx
-// FIXES APPLIED (v3):
+// FINAL MERGED v5 — all features from v3 + v4 + ThermalSection.tsx
 //  [FIX-1] GPU Allocation license fee $10; $5 capital credited on license activation
 //  [FIX-2] "Add Funds" button routes to deposit/checkout
 //  [FIX-3] Thermal double-credit fixed: cooldown read fresh from DB on every load + upsert guard
@@ -13,8 +13,10 @@
 //  [BUG-D] RLHF stats.remaining fixed — was double-subtracting 1 from already-filtered array
 //  [BUG-E] RLHF non-duplicate insert error now restores question to UI and clears submittedRef
 //  [BUG-F] GPU tick: adjustBalance failure on gain now flashes error to user
-//  [BUG-G] DEFAULT_THERMAL_TASKS marked with a flag; completeTask blocks on placeholder IDs
-//           to prevent infinite free completions when no real DB tasks exist
+//  [BUG-G] Thermal: fallback tasks use real IDs that write to thermal_completions; no blocking
+//  [v4]    Thermal: animated GPU fan SVG, cooldown progress bar, live countdown, 2-col layout
+//  [v5]    Merged: best fan geometry (arcR-6, 0.42 cy, dual rx for wider blades, 0.9s spin),
+//           10s cooldown tick, ThermalPreview shown in locked state, LicenseExplainer on all tabs
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
@@ -43,6 +45,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 
+// ─── TYPES ────────────────────────────────────────────────────────────────────
 type LicenseType =
   | "thermal_optimization"
   | "rlhf_validation"
@@ -95,9 +98,9 @@ type ThermalTask = {
   reward: number;
   cooldown_minutes: number;
   is_active: boolean;
-  isPlaceholder?: boolean; // [BUG-G] flag for default tasks that have no real DB IDs
 };
 
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
 const BG = "#06080f";
 const TICK_INTERVAL_MS = 30000;
 const LOSS_PROBABILITY = 0.3;
@@ -106,6 +109,28 @@ const GPU_LICENSE_PRICE = 10;
 const GPU_LICENSE_CAPITAL_BONUS = 5;
 const THERMAL_LICENSE_PRICE = 100;
 const RLHF_LICENSE_PRICE = 100;
+
+// Fallback tasks — write real rows to thermal_completions (no isPlaceholder blocking)
+const FALLBACK_THERMAL_TASKS: ThermalTask[] = [
+  {
+    id: "thermal-task-slot-1",
+    name: "Thermal Cooling Calibration",
+    description:
+      "Perform daily thermal management on your GPU node. Adjusts cooling profiles and clears heat drift to sustain peak efficiency.",
+    reward: 2.0,
+    cooldown_minutes: 1440,
+    is_active: true,
+  },
+  {
+    id: "thermal-task-slot-2",
+    name: "Neural Weight Re-alignment",
+    description:
+      "Re-align your node's neural inference weights to reduce latency drift and restore optimal throughput for AI workloads.",
+    reward: 2.0,
+    cooldown_minutes: 1440,
+    is_active: true,
+  },
+];
 
 const PROVISIONING_PHRASES = [
   "Synchronising node fabric…",
@@ -118,30 +143,7 @@ const PROVISIONING_PHRASES = [
   "Anchoring workload to fabric…",
 ];
 
-// [BUG-G] Marked as placeholders — completions are blocked for these until real DB rows exist
-const DEFAULT_THERMAL_TASKS: ThermalTask[] = [
-  {
-    id: "thermal-default-1",
-    name: "Thermal Cooling Calibration",
-    description:
-      "Perform daily thermal management on your GPU node to sustain peak efficiency.",
-    reward: 2.0,
-    cooldown_minutes: 1440,
-    is_active: true,
-    isPlaceholder: true,
-  },
-  {
-    id: "thermal-default-2",
-    name: "Neural Weight Re-alignment",
-    description:
-      "Re-align your node's neural inference weights to reduce latency drift.",
-    reward: 2.0,
-    cooldown_minutes: 1440,
-    is_active: true,
-    isPlaceholder: true,
-  },
-];
-
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function generateContractRef(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   const seg = (len: number) =>
@@ -192,6 +194,124 @@ async function adjustBalance(
   }
 }
 
+// ─── GPU FAN SVG ──────────────────────────────────────────────────────────────
+// [v5] Best geometry: arcR = r-6, blade cy at 0.42, dual rx (wide outer, narrow inner),
+//      0.9s spin speed, 0.14 hub radius — matches ThermalSection.tsx reference
+function GPUFan({
+  spinning,
+  cooldownPct,
+  size = 96,
+  color = "#f59e0b",
+}: {
+  spinning: boolean;
+  cooldownPct: number; // 0 = ready, 1 = just completed (full cooldown)
+  size?: number;
+  color?: string;
+}) {
+  const r = size / 2;
+  const bladeCount = 7;
+  const arcR = r - 6;
+  const arcCirc = 2 * Math.PI * arcR;
+  const arcDash = arcCirc * (1 - cooldownPct);
+  const ready = cooldownPct === 0;
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      style={{ display: "block" }}
+    >
+      {/* track ring */}
+      <circle
+        cx={r}
+        cy={r}
+        r={arcR}
+        fill="none"
+        stroke="rgba(255,255,255,0.06)"
+        strokeWidth={5}
+      />
+      {/* cooldown / ready arc */}
+      <circle
+        cx={r}
+        cy={r}
+        r={arcR}
+        fill="none"
+        stroke={ready ? color : "#334155"}
+        strokeWidth={5}
+        strokeDasharray={`${arcDash} ${arcCirc}`}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${r} ${r})`}
+        style={{ transition: "stroke-dasharray 0.5s ease, stroke 0.4s" }}
+      />
+      {/* fan blades group */}
+      <g
+        style={{
+          transformOrigin: `${r}px ${r}px`,
+          animation: spinning ? "gpuFanSpin 0.9s linear infinite" : "none",
+          opacity: ready ? 1 : 0.35,
+          transition: "opacity 0.4s",
+        }}
+      >
+        {Array.from({ length: bladeCount }).map((_, i) => (
+          <g
+            key={i}
+            style={{
+              transformOrigin: `${r}px ${r}px`,
+              transform: `rotate(${(360 / bladeCount) * i}deg)`,
+            }}
+          >
+            <ellipse
+              cx={r}
+              cy={r - arcR * 0.42}
+              rx={arcR * 0.18}
+              ry={arcR * 0.34}
+              fill={color}
+              opacity={0.75 - i * 0.02}
+              style={{ filter: `drop-shadow(0 0 4px ${color}66)` }}
+            />
+          </g>
+        ))}
+        {/* hub outer */}
+        <circle cx={r} cy={r} r={arcR * 0.14} fill={color} opacity={0.9} />
+        {/* hub inner dot */}
+        <circle cx={r} cy={r} r={arcR * 0.07} fill="#06080f" />
+      </g>
+      <style>{`
+        @keyframes gpuFanSpin {
+          from { transform: rotate(0deg); }
+          to   { transform: rotate(360deg); }
+        }
+      `}</style>
+    </svg>
+  );
+}
+
+// ─── COOLDOWN HOOK ────────────────────────────────────────────────────────────
+// [v5] 10s tick interval (from ThermalSection.tsx — more responsive than 15s)
+function useCooldown(lastCompleted: Date | null, cooldownMinutes: number) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 10000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!lastCompleted) return { onCooldown: false, remaining: "", pct: 0 };
+  const nextAt = lastCompleted.getTime() + cooldownMinutes * 60_000;
+  if (now >= nextAt) return { onCooldown: false, remaining: "", pct: 0 };
+
+  const totalMs = cooldownMinutes * 60_000;
+  const remainMs = nextAt - now;
+  const pct = remainMs / totalMs; // 1 = just completed, 0 = ready
+  const h = Math.floor(remainMs / 3_600_000);
+  const m = Math.floor((remainMs % 3_600_000) / 60_000);
+  return {
+    onCooldown: true,
+    remaining: h > 0 ? `${h}h ${m}m` : `${m}m`,
+    pct,
+  };
+}
+
 // ─── LICENSE EXPLAINER ────────────────────────────────────────────────────────
 function LicenseExplainer({ type }: { type: LicenseType }) {
   const [open, setOpen] = useState(false);
@@ -204,7 +324,7 @@ function LicenseExplainer({ type }: { type: LicenseType }) {
     },
     thermal_optimization: {
       title: "What is Thermal Calibration?",
-      body: "GPU nodes generate significant heat during AI compute workloads. To keep performance at peak, nodes need daily calibration — adjusting cooling profiles, re-aligning neural weight buffers, and clearing drift. You trigger this process by clicking 'Start Task'. The node runs the calibration cycle and rewards you for initiating it. No technical skill needed.",
+      body: "GPU nodes generate significant heat during AI compute workloads. To keep performance at peak, nodes need daily calibration — adjusting cooling profiles, re-aligning neural weight buffers, and clearing drift. You trigger this process by clicking 'Start Calibration'. The node runs the calibration cycle and rewards you for initiating it. No technical skill needed.",
       earning: "$2.00 per daily cycle",
       color: "#f59e0b",
     },
@@ -349,6 +469,7 @@ function RLHFPreview() {
 }
 
 // ─── THERMAL PREVIEW ──────────────────────────────────────────────────────────
+// [v5] Shows animated GPU fans in preview cards (from ThermalSection.tsx)
 function ThermalPreview() {
   const [open, setOpen] = useState(false);
   return (
@@ -366,11 +487,12 @@ function ThermalPreview() {
             Task Preview
           </p>
           <span className="ml-auto text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/25 text-amber-400">
-            $2.00 / day
+            $2.00 / day each
           </span>
         </div>
         <p className="text-slate-400 text-xs mb-3">
-          Two daily one-click tasks. Keeps your GPU node running at peak output.
+          Two daily one-click tasks. GPU fan spins on calibration, rests for 24
+          hours. $4.00 max daily.
         </p>
         <button
           onClick={() => setOpen((v) => !v)}
@@ -381,36 +503,38 @@ function ThermalPreview() {
         </button>
         {open && (
           <div className="mt-3 space-y-2 opacity-75">
-            {DEFAULT_THERMAL_TASKS.map((task) => (
+            {FALLBACK_THERMAL_TASKS.map((task) => (
               <div
                 key={task.id}
-                className="rounded-xl p-3"
+                className="rounded-xl p-3 flex items-center gap-4"
                 style={{
                   background: "rgba(15,23,42,0.8)",
                   border: "1px solid rgba(245,158,11,0.1)",
                 }}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-white text-xs font-bold">{task.name}</p>
-                    <p className="text-slate-500 text-[11px] mt-0.5">
-                      {task.description}
-                    </p>
+                <div className="shrink-0">
+                  <GPUFan spinning={false} cooldownPct={0} size={56} />
+                </div>
+                <div className="flex-1">
+                  <p className="text-white text-xs font-bold">{task.name}</p>
+                  <p className="text-slate-500 text-[11px] mt-0.5">
+                    {task.description}
+                  </p>
+                  <div
+                    className="mt-2 flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-lg w-fit"
+                    style={{
+                      background: "rgba(245,158,11,0.1)",
+                      color: "#f59e0b",
+                      border: "1px solid rgba(245,158,11,0.2)",
+                    }}
+                  >
+                    <CheckCircle size={9} /> Start Calibration (unlocks with
+                    license)
                   </div>
-                  <span className="text-amber-400 font-black text-sm shrink-0">
-                    +${task.reward.toFixed(2)}
-                  </span>
                 </div>
-                <div
-                  className="mt-2 flex items-center gap-1.5 text-[10px] font-bold px-2.5 py-1 rounded-lg w-fit"
-                  style={{
-                    background: "rgba(245,158,11,0.1)",
-                    color: "#f59e0b",
-                    border: "1px solid rgba(245,158,11,0.2)",
-                  }}
-                >
-                  <CheckCircle size={9} /> Start Task (unlocks with license)
-                </div>
+                <span className="text-amber-400 font-black text-sm shrink-0">
+                  +${task.reward.toFixed(2)}
+                </span>
               </div>
             ))}
           </div>
@@ -782,18 +906,15 @@ function RLHFSection({
       // [BUG-E] If insert failed for a non-duplicate reason, restore the question
       if (ansErr) {
         if (!ansErr.message.includes("duplicate")) {
-          // Real error — put question back and clear submitted flag
           submittedRef.current.delete(questionId);
-          await load(); // Reload to restore the question
+          await load();
           flash("Failed to record answer: " + ansErr.message);
           return;
         }
-        // Duplicate = already answered, don't credit again
         flash("Answer already recorded for this question.");
         return;
       }
 
-      // Insert succeeded — credit wallet
       const result = await adjustBalance(userId, reward, reward);
       if (!result.success) throw new Error(result.error);
       onBalanceChange(result.newBalance);
@@ -824,7 +945,6 @@ function RLHFSection({
           .select("*", { count: "exact", head: true })
           .eq("user_id", userId),
       ]);
-      // [BUG-D] remaining comes from the already-filtered questions state, not questions.length - 1
       setStats((prev) => ({
         ...prev,
         today: todayCount || 0,
@@ -833,7 +953,6 @@ function RLHFSection({
       }));
     } catch (e: any) {
       flash("Error: " + e.message);
-      // Restore question on unexpected error
       submittedRef.current.delete(questionId);
       load();
     } finally {
@@ -927,8 +1046,8 @@ function RLHFSection({
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-slate-400 text-sm">
-                  {questions.length} question{questions.length !== 1 ? "s" : ""}{" "}
-                  for today
+                  {questions.length} question
+                  {questions.length !== 1 ? "s" : ""} for today
                 </p>
                 <button
                   onClick={load}
@@ -1223,7 +1342,7 @@ function GPUAllocationSection({
       const result = await adjustBalance(userId, amount, amount);
       if (result.success) {
         onBalanceChange(result.newBalance);
-        onEarned(amount); // [BUG-H] session earnings now reflect full amount
+        onEarned(amount);
       } else {
         // [BUG-F] Surface credit failure so user knows to contact support
         flash(
@@ -1319,7 +1438,6 @@ function GPUAllocationSection({
         .single();
 
       if (error) {
-        // Rollback debit since contract creation failed
         const rollback = await adjustBalance(userId, amt, 0);
         if (rollback.success) {
           onBalanceChange(rollback.newBalance);
@@ -1359,7 +1477,6 @@ function GPUAllocationSection({
         load();
       }
     } catch (e: any) {
-      // Unexpected error — attempt rollback if debit already went through
       if (debited) {
         const rollback = await adjustBalance(userId, amt, 0);
         if (rollback.success) onBalanceChange(rollback.newBalance);
@@ -1380,19 +1497,16 @@ function GPUAllocationSection({
     )
       return;
 
-    // Mark closed immediately to stop ticks
     closedContracts.current.add(id);
     if (tickTimers.current[id]) {
       clearInterval(tickTimers.current[id]);
       delete tickTimers.current[id];
     }
 
-    // Optimistically update UI
     setContracts((prev) =>
       prev.map((c) => (c.id === id ? { ...c, status: "closed" } : c)),
     );
 
-    // [BUG-B/I] Fetch the freshest value from DB — don't trust local state
     const { data: freshContract, error: fetchErr } = await supabase
       .from("gpu_allocation_contracts")
       .select("current_value, contract_ref")
@@ -1400,8 +1514,10 @@ function GPUAllocationSection({
       .single();
 
     if (fetchErr || !freshContract) {
-      flash("Failed to fetch contract for settlement — please try again.", "loss");
-      // Undo the optimistic close so user can retry
+      flash(
+        "Failed to fetch contract for settlement — please try again.",
+        "loss",
+      );
       closedContracts.current.delete(id);
       setContracts((prev) =>
         prev.map((c) => (c.id === id ? { ...c, status: "active" } : c)),
@@ -1463,7 +1579,13 @@ function GPUAllocationSection({
     <div className="space-y-4">
       {toast && (
         <div
-          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${toast.type === "gain" ? "bg-emerald-500 text-slate-950" : toast.type === "loss" ? "bg-red-500 text-white" : "bg-blue-600 text-white"}`}
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${
+            toast.type === "gain"
+              ? "bg-emerald-500 text-slate-950"
+              : toast.type === "loss"
+                ? "bg-red-500 text-white"
+                : "bg-blue-600 text-white"
+          }`}
         >
           {toast.type === "gain" ? (
             <TrendingUp size={14} />
@@ -1604,7 +1726,10 @@ function GPUAllocationSection({
 
                 {signBlockReason && allocAmount && !creating && (
                   <div className="flex items-center gap-1.5 mt-1.5">
-                    <AlertTriangle size={11} className="text-red-400 shrink-0" />
+                    <AlertTriangle
+                      size={11}
+                      className="text-red-400 shrink-0"
+                    />
                     <p className="text-red-400 text-xs">{signBlockReason}</p>
                   </div>
                 )}
@@ -1629,9 +1754,13 @@ function GPUAllocationSection({
                   title={signBlockReason ?? undefined}
                   className="px-5 py-3 rounded-xl font-black text-sm flex items-center gap-2 justify-center min-w-[140px] transition-all"
                   style={{
-                    background: canSign ? "#10b981" : "rgba(16,185,129,0.15)",
+                    background: canSign
+                      ? "#10b981"
+                      : "rgba(16,185,129,0.15)",
                     color: canSign ? "#0a0f1a" : "rgba(16,185,129,0.4)",
-                    border: canSign ? "none" : "1px solid rgba(16,185,129,0.2)",
+                    border: canSign
+                      ? "none"
+                      : "1px solid rgba(16,185,129,0.2)",
                     cursor: canSign ? "pointer" : "not-allowed",
                   }}
                 >
@@ -1684,7 +1813,8 @@ function GPUAllocationSection({
           ) : (
             <div className="space-y-3">
               <p className="text-slate-500 text-xs uppercase tracking-wider font-bold">
-                {contracts.length} contract{contracts.length !== 1 ? "s" : ""}
+                {contracts.length} contract
+                {contracts.length !== 1 ? "s" : ""}
               </p>
               {contracts.map((c) => {
                 const pnl = c.total_pnl || 0;
@@ -1882,6 +2012,134 @@ function GPUAllocationSection({
   );
 }
 
+// ─── THERMAL TASK CARD ────────────────────────────────────────────────────────
+function ThermalTaskCard({
+  task,
+  lastCompleted,
+  completing,
+  onStart,
+}: {
+  task: ThermalTask;
+  lastCompleted: Date | null;
+  completing: boolean;
+  onStart: () => void;
+}) {
+  const { onCooldown, remaining, pct } = useCooldown(
+    lastCompleted,
+    task.cooldown_minutes,
+  );
+  // Fan spins when ready (idle) OR actively completing; stops during cooldown
+  const fanSpinning = !onCooldown || completing;
+
+  return (
+    <div
+      className="rounded-2xl p-5 flex flex-col gap-4"
+      style={{
+        background: "rgba(15,23,42,0.85)",
+        border: `1px solid ${onCooldown ? "rgba(245,158,11,0.1)" : "rgba(245,158,11,0.3)"}`,
+        transition: "border-color 0.3s",
+      }}
+    >
+      {/* top row: fan + info */}
+      <div className="flex items-start gap-4">
+        <div className="shrink-0">
+          <GPUFan
+            spinning={fanSpinning}
+            cooldownPct={onCooldown ? pct : 0}
+            size={84}
+          />
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <p className="text-white font-black text-sm">{task.name}</p>
+            <span className="text-amber-400 font-black text-base shrink-0">
+              +${task.reward.toFixed(2)}
+            </span>
+          </div>
+          <p className="text-slate-500 text-xs mt-1 leading-relaxed">
+            {task.description}
+          </p>
+
+          {/* status badge */}
+          <div className="mt-2">
+            {onCooldown ? (
+              <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500">
+                <Clock size={11} />
+                <span>Cooling down · Ready in</span>
+                <span className="text-amber-500 font-black">{remaining}</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 text-[11px] font-bold text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Fan ready · Click to calibrate
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 24-hour cooldown progress bar */}
+      {onCooldown && (
+        <div>
+          <div
+            className="h-1.5 rounded-full overflow-hidden"
+            style={{ background: "rgba(255,255,255,0.06)" }}
+          >
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${(1 - pct) * 100}%`,
+                background: "linear-gradient(90deg, #f59e0b, #fbbf24)",
+              }}
+            />
+          </div>
+          <p className="text-[10px] text-slate-600 mt-1">
+            {Math.round((1 - pct) * 100)}% cooldown elapsed · resets every 24h
+          </p>
+        </div>
+      )}
+
+      {/* CTA button */}
+      <button
+        onClick={onStart}
+        disabled={onCooldown || completing}
+        className="w-full py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all"
+        style={{
+          background: onCooldown
+            ? "rgba(255,255,255,0.04)"
+            : completing
+              ? "rgba(245,158,11,0.2)"
+              : "linear-gradient(135deg, #f59e0b, #d97706)",
+          color: onCooldown ? "#475569" : completing ? "#fbbf24" : "#0a0f1a",
+          border: onCooldown ? "1px solid rgba(255,255,255,0.06)" : "none",
+          cursor: onCooldown ? "not-allowed" : "pointer",
+          boxShadow:
+            !onCooldown && !completing
+              ? "0 4px 20px rgba(245,158,11,0.3)"
+              : "none",
+        }}
+      >
+        {completing ? (
+          <>
+            <RefreshCw size={14} className="animate-spin" /> Calibrating
+            node…
+          </>
+        ) : onCooldown ? (
+          <>
+            <Clock size={14} /> On cooldown — {remaining} left
+          </>
+        ) : (
+          <>
+            <Thermometer size={14} /> Start Calibration — +$
+            {task.reward.toFixed(2)}
+          </>
+        )}
+      </button>
+    </div>
+  );
+}
+
 // ─── THERMAL SECTION ──────────────────────────────────────────────────────────
 function ThermalSection({
   userId,
@@ -1897,12 +2155,12 @@ function ThermalSection({
   const [tasks, setTasks] = useState<ThermalTask[]>([]);
   const [cooldowns, setCooldowns] = useState<Record<string, Date>>({});
   const [completing, setCompleting] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [loading, setLoading] = useState(true);
 
-  function flash(msg: string) {
-    setToast(msg);
-    setTimeout(() => setToast(null), 3000);
+  function flash(msg: string, ok = true) {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 3500);
   }
 
   const load = useCallback(async () => {
@@ -1914,23 +2172,26 @@ function ThermalSection({
         .eq("is_active", true)
         .order("created_at");
 
+      const activeTasks: ThermalTask[] =
+        dbTasks && dbTasks.length > 0
+          ? (dbTasks as ThermalTask[])
+          : FALLBACK_THERMAL_TASKS;
+      setTasks(activeTasks);
+
+      // Fetch cooldowns scoped to the actual task IDs in use
+      const ids = activeTasks.map((t) => t.id);
       const { data: completions } = await supabase
         .from("thermal_completions")
         .select("task_id, created_at")
         .eq("user_id", userId)
+        .in("task_id", ids)
         .order("created_at", { ascending: false });
 
       const cdMap: Record<string, Date> = {};
       (completions || []).forEach((c: any) => {
-        if (!cdMap[c.task_id]) {
-          cdMap[c.task_id] = new Date(c.created_at);
-        }
+        if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
       });
       setCooldowns(cdMap);
-
-      // [BUG-G] Only use DEFAULT_THERMAL_TASKS as unlicensed preview — never for live completions.
-      // If DB returns no tasks, show the defaults as placeholders (isPlaceholder=true).
-      setTasks(dbTasks && dbTasks.length > 0 ? dbTasks : DEFAULT_THERMAL_TASKS);
     } finally {
       setLoading(false);
     }
@@ -1940,37 +2201,21 @@ function ThermalSection({
     load();
   }, [load]);
 
-  function isOnCooldown(
-    taskId: string,
-    cooldownMinutes: number,
-  ): { on: boolean; remaining: string } {
-    const last = cooldowns[taskId];
-    if (!last) return { on: false, remaining: "" };
-    const next = new Date(last.getTime() + cooldownMinutes * 60000);
-    if (new Date() >= next) return { on: false, remaining: "" };
-    const diffMs = next.getTime() - Date.now();
-    const h = Math.floor(diffMs / 3600000);
-    const m = Math.floor((diffMs % 3600000) / 60000);
-    return { on: true, remaining: h > 0 ? `${h}h ${m}m` : `${m}m` };
-  }
+  async function startTask(task: ThermalTask) {
+    if (completing) return;
 
-  async function completeTask(task: ThermalTask) {
-    // [BUG-G] Block completions on placeholder tasks that have no real DB row
-    if (task.isPlaceholder) {
-      flash("Tasks are not yet configured. Please contact support.");
+    // Client-side cooldown guard
+    const last = cooldowns[task.id];
+    if (last && Date.now() < last.getTime() + task.cooldown_minutes * 60_000)
       return;
-    }
-
-    const cd = isOnCooldown(task.id, task.cooldown_minutes);
-    if (cd.on || completing) return;
 
     setCompleting(task.id);
     try {
-      // Re-check DB cooldown to prevent double-credit via page refresh
+      // Server-side cooldown guard — prevents double-credit on refresh
       const windowStart = new Date(
-        Date.now() - task.cooldown_minutes * 60000,
+        Date.now() - task.cooldown_minutes * 60_000,
       ).toISOString();
-      const { data: recentCompletions, error: checkErr } = await supabase
+      const { data: recent, error: chkErr } = await supabase
         .from("thermal_completions")
         .select("id, created_at")
         .eq("user_id", userId)
@@ -1978,22 +2223,22 @@ function ThermalSection({
         .gte("created_at", windowStart)
         .limit(1);
 
-      if (checkErr) throw new Error(checkErr.message);
-
-      if (recentCompletions && recentCompletions.length > 0) {
-        const lastAt = new Date(recentCompletions[0].created_at);
-        setCooldowns((prev) => ({ ...prev, [task.id]: lastAt }));
-        flash("Task already completed — come back after the cooldown.");
+      if (chkErr) throw new Error(chkErr.message);
+      if (recent && recent.length > 0) {
+        const lastAt = new Date(recent[0].created_at);
+        setCooldowns((p) => ({ ...p, [task.id]: lastAt }));
+        flash("Already completed — come back after the cooldown.", false);
         return;
       }
 
+      const now = new Date();
       const { error: compErr } = await supabase
         .from("thermal_completions")
         .insert({
           task_id: task.id,
           user_id: userId,
           reward: task.reward,
-          created_at: new Date().toISOString(),
+          created_at: now.toISOString(),
         });
       if (compErr) throw new Error(compErr.message);
 
@@ -2006,16 +2251,16 @@ function ThermalSection({
           user_id: userId,
           type: "task_reward",
           amount: task.reward,
-          description: `Thermal task: ${task.name}`,
-          created_at: new Date().toISOString(),
+          description: `Thermal calibration: ${task.name}`,
+          created_at: now.toISOString(),
         }),
       );
 
-      flash(`+$${task.reward.toFixed(2)} credited to your balance!`);
+      setCooldowns((p) => ({ ...p, [task.id]: now }));
       onEarned(task.reward);
-      setCooldowns((prev) => ({ ...prev, [task.id]: new Date() }));
+      flash(`+$${task.reward.toFixed(2)} credited — GPU node calibrated!`);
     } catch (e: any) {
-      flash("Error: " + e.message);
+      flash("Error: " + e.message, false);
     } finally {
       setCompleting(null);
     }
@@ -2023,137 +2268,132 @@ function ThermalSection({
 
   const hasLicense = !!license && license.status === "active";
 
-  return (
-    <div className="space-y-4">
-      {toast && (
-        <div className="fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold bg-emerald-500 text-slate-950 flex items-center gap-2 shadow-2xl">
-          <CheckCircle size={14} /> {toast}
-        </div>
-      )}
-
-      {!hasLicense ? (
-        <div className="space-y-4">
-          <div
-            className="rounded-2xl p-6 text-center"
-            style={{
-              background: "rgba(245,158,11,0.06)",
-              border: "1px solid rgba(245,158,11,0.2)",
-            }}
-          >
-            <Lock size={28} className="text-amber-400 mx-auto mb-3" />
-            <p className="text-white font-black text-base">
-              Thermal Calibration License Required
-            </p>
-            <p className="text-slate-400 text-sm mt-2">
-              Earn $2.00 per daily cycle. Two tasks available every 24 hours.
-            </p>
-          </div>
-          <ThermalPreview />
-        </div>
-      ) : loading ? (
-        <div className="text-center py-8">
-          <div className="w-7 h-7 border-2 border-t-amber-400 rounded-full animate-spin mx-auto" />
-        </div>
-      ) : (
+  // [v5] Locked state shows animated fan + full ThermalPreview with explainer
+  if (!hasLicense) {
+    return (
+      <div className="space-y-4">
         <div
-          className="rounded-2xl p-5 space-y-4"
+          className="rounded-2xl p-8 text-center"
           style={{
             background: "rgba(245,158,11,0.06)",
             border: "1px solid rgba(245,158,11,0.2)",
           }}
         >
-          <div className="flex items-center justify-between">
-            <p className="text-amber-300 font-black text-sm flex items-center gap-2">
-              <Thermometer size={14} /> Thermal Calibration Tasks
-            </p>
-            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/25 text-amber-400">
-              $2.00 each
-            </span>
+          <div className="flex justify-center mb-4 opacity-40">
+            <GPUFan spinning={false} cooldownPct={0} size={80} />
           </div>
-          <p className="text-slate-400 text-xs">
-            Complete hardware optimization tasks on your GPU node. Tasks refresh
-            every 24 hours.
+          <Lock size={24} className="text-amber-400 mx-auto mb-3" />
+          <p className="text-white font-black text-base">
+            Thermal Calibration License Required
           </p>
+          <p className="text-slate-400 text-sm mt-2">
+            Earn $2.00 per task · 2 tasks every 24 hours · $4.00 max daily
+          </p>
+        </div>
+        <ThermalPreview />
+      </div>
+    );
+  }
 
-          {/* [BUG-G] If only placeholder tasks loaded, show a setup notice instead of fake buttons */}
-          {tasks.every((t) => t.isPlaceholder) ? (
-            <div
-              className="rounded-xl p-4 text-center"
-              style={{
-                background: "rgba(245,158,11,0.06)",
-                border: "1px solid rgba(245,158,11,0.15)",
-              }}
-            >
-              <AlertTriangle
-                size={18}
-                className="text-amber-400 mx-auto mb-2"
-              />
-              <p className="text-amber-300 text-sm font-bold">
-                Tasks loading…
-              </p>
-              <p className="text-slate-500 text-xs mt-1">
-                No tasks are configured yet. Please check back shortly or
-                contact support.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {tasks.map((task) => {
-                const cd = isOnCooldown(task.id, task.cooldown_minutes);
-                return (
-                  <div
-                    key={task.id}
-                    className="rounded-xl p-4"
-                    style={{
-                      background: "rgba(15,23,42,0.8)",
-                      border: "1px solid rgba(245,158,11,0.1)",
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-white font-bold text-sm">
-                          {task.name}
-                        </p>
-                        <p className="text-slate-500 text-xs mt-1">
-                          {task.description}
-                        </p>
-                      </div>
-                      <span className="text-amber-400 font-black text-sm shrink-0">
-                        +${task.reward.toFixed(2)}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => completeTask(task)}
-                      disabled={!!cd.on || completing === task.id}
-                      className="mt-3 flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-lg border transition-all disabled:opacity-50"
-                      style={{
-                        borderColor: !cd.on ? "#f59e0b40" : "#334155",
-                        color: !cd.on ? "#f59e0b" : "#475569",
-                      }}
-                    >
-                      {completing === task.id ? (
-                        <>
-                          <RefreshCw size={10} className="animate-spin" />{" "}
-                          Completing…
-                        </>
-                      ) : cd.on ? (
-                        <>
-                          <Clock size={10} /> Ready in {cd.remaining}
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle size={10} /> Start Task — +$
-                          {task.reward.toFixed(2)}
-                        </>
-                      )}
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+  if (loading) {
+    return (
+      <div className="text-center py-10">
+        <div className="w-7 h-7 border-2 border-t-amber-400 rounded-full animate-spin mx-auto" />
+      </div>
+    );
+  }
+
+  const totalEarnable = tasks.reduce((s, t) => s + t.reward, 0);
+  const completedCount = tasks.filter((t) => {
+    const last = cooldowns[t.id];
+    return last && Date.now() < last.getTime() + t.cooldown_minutes * 60_000;
+  }).length;
+
+  return (
+    <div className="space-y-4">
+      {/* toast */}
+      {toast && (
+        <div
+          className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl text-sm font-bold flex items-center gap-2 shadow-2xl ${
+            toast.ok
+              ? "bg-emerald-500 text-slate-950"
+              : "bg-red-500/90 text-white"
+          }`}
+        >
+          <CheckCircle size={14} /> {toast.msg}
         </div>
       )}
+
+      {/* header strip */}
+      <div
+        className="rounded-2xl px-5 py-4 flex items-center justify-between gap-4 flex-wrap"
+        style={{
+          background: "rgba(245,158,11,0.07)",
+          border: "1px solid rgba(245,158,11,0.22)",
+        }}
+      >
+        <div>
+          <p className="text-amber-300 font-black text-sm flex items-center gap-2">
+            <Thermometer size={14} /> Thermal Calibration Tasks
+          </p>
+          <p className="text-slate-500 text-xs mt-0.5">
+            {completedCount}/{tasks.length} completed today · resets every 24
+            hours
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-amber-400 font-black text-2xl">
+            ${totalEarnable.toFixed(2)}
+          </p>
+          <p className="text-slate-600 text-[10px]">max daily earnings</p>
+        </div>
+      </div>
+
+      {/* two task cards — side by side on desktop */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {tasks.map((task) => (
+          <ThermalTaskCard
+            key={task.id}
+            task={task}
+            lastCompleted={cooldowns[task.id] ?? null}
+            completing={completing === task.id}
+            onStart={() => startTask(task)}
+          />
+        ))}
+      </div>
+
+      {/* daily dot indicator */}
+      <div
+        className="rounded-xl px-4 py-3 flex items-center gap-3"
+        style={{
+          background: "rgba(15,23,42,0.6)",
+          border: "1px solid rgba(255,255,255,0.05)",
+        }}
+      >
+        <div className="flex gap-2">
+          {tasks.map((t) => {
+            const done =
+              cooldowns[t.id] &&
+              Date.now() <
+                cooldowns[t.id].getTime() + t.cooldown_minutes * 60_000;
+            return (
+              <div
+                key={t.id}
+                className="w-3 h-3 rounded-full transition-all"
+                style={{
+                  background: done ? "#f59e0b" : "rgba(255,255,255,0.08)",
+                  boxShadow: done ? "0 0 6px #f59e0b88" : "none",
+                }}
+              />
+            );
+          })}
+        </div>
+        <p className="text-slate-500 text-xs">
+          {completedCount === tasks.length
+            ? "All tasks complete. GPU fans rest until tomorrow."
+            : `${tasks.length - completedCount} fan${tasks.length - completedCount !== 1 ? "s" : ""} ready to spin — click to calibrate`}
+        </p>
+      </div>
     </div>
   );
 }
@@ -2300,7 +2540,7 @@ export default function TasksPage() {
       color: "#f59e0b",
       hasLic: !!thermalLic,
       licType: "thermal_optimization" as LicenseType,
-      earning: "$2.00 / day",
+      earning: "$2.00 / task · 2 daily",
       licPrice: THERMAL_LICENSE_PRICE,
     },
   ];
