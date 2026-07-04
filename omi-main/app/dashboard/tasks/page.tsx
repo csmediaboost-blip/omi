@@ -869,31 +869,36 @@ function RLHFSection({
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: dailyQs, error } = await supabase.rpc(
-        "get_daily_questions",
-        { p_user_id: userId, p_count: 4 },
-      );
-      if (error) throw new Error(error.message);
-      setQuestions((dailyQs || []) as RLHFQuestion[]);
+      const { data: dbTasks } = await supabase
+        .from("thermal_tasks")
+        .select("*")
+        .eq("is_active", true)
+        .order("created_at");
 
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const [{ count: todayCount }, { count: totalCount }] = await Promise.all([
-        supabase
-          .from("rlhf_answers")
-          .select("*", { count: "exact", head: true })
-          .eq("user_id", userId)
-          .gte("created_at", today.toISOString()),
-        supabase
-          .from("rlhf_answers")
-          .select("*", { count: "exact", head: true })
-          .eq("user_id", userId),
-      ]);
-      setStats({
-        today: todayCount || 0,
-        total: totalCount || 0,
-        remaining: (dailyQs || []).length,
+      const usingRealTasks = !!(dbTasks && dbTasks.length > 0);
+      const activeTasks: ThermalTask[] = usingRealTasks
+        ? (dbTasks as ThermalTask[])
+        : FALLBACK_THERMAL_TASKS;
+      setTasks(activeTasks);
+
+      const cdMap: Record<string, Date> = {};
+
+      // [v6-FIX-UUID] NEVER filter by task_id when IDs may be text strings (not UUID).
+      // Fetch all user completions and match client-side to avoid uuid=text cast error.
+      const { data: completions } = await supabase
+        .from("thermal_completions")
+        .select("task_id, slot_key, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      (completions || []).forEach((c: any) => {
+        // Use slot_key for fallback tasks, task_id (UUID string) for real DB tasks
+        const key: string | null = c.slot_key ?? c.task_id;
+        if (key && !cdMap[key]) cdMap[key] = new Date(c.created_at);
       });
+
+      setCooldowns(cdMap);
     } finally {
       setLoading(false);
     }
@@ -2202,35 +2207,20 @@ function ThermalSection({
 
       const cdMap: Record<string, Date> = {};
 
-      if (usingRealTasks) {
-        // [v6-FIX-UUID] Real UUIDs from DB — safe to use .in() filter
-        const ids = activeTasks.map((t) => t.id);
-        const { data: completions } = await supabase
-          .from("thermal_completions")
-          .select("task_id, created_at")
-          .eq("user_id", userId)
-          .in("task_id", ids)
-          .order("created_at", { ascending: false });
+      // [v6-FIX-UUID] Never filter by task_id with text values (uuid=text error).
+      // Fetch all user completions and resolve cooldown keys client-side.
+      const { data: completions } = await supabase
+        .from("thermal_completions")
+        .select("task_id, slot_key, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(50);
 
-        (completions || []).forEach((c: any) => {
-          if (!cdMap[c.task_id]) cdMap[c.task_id] = new Date(c.created_at);
-        });
-      } else {
-        // [v6-FIX-UUID] Fallback slots — task_id is NULL in DB.
-        // Fetch the last N completions where task_id IS NULL, ordered by slot_index.
-        const { data: completions } = await supabase
-          .from("thermal_completions")
-          .select("slot_key, created_at")
-          .eq("user_id", userId)
-          .is("task_id", null)
-          .order("created_at", { ascending: false })
-          .limit(20);
-
-        (completions || []).forEach((c: any) => {
-          const key = c.slot_key as string;
-          if (key && !cdMap[key]) cdMap[key] = new Date(c.created_at);
-        });
-      }
+      (completions || []).forEach((c: any) => {
+        // slot_key set for fallback tasks; task_id (UUID) for real DB tasks
+        const key: string | null = c.slot_key ?? c.task_id;
+        if (key && !cdMap[key]) cdMap[key] = new Date(c.created_at);
+      });
 
       setCooldowns(cdMap);
     } finally {
