@@ -908,6 +908,8 @@ function RLHFSection({
     chosen: "A" | "B",
     reward: number,
   ) {
+    // [v6-ANTI-FRAUD] Sanity check reward — must be positive and ≤ $10 (server anomaly guard)
+    if (!reward || reward <= 0 || reward > 10) return;
     if (submittedRef.current.has(questionId)) return;
     if (answering === questionId) return;
     submittedRef.current.add(questionId);
@@ -1364,18 +1366,21 @@ function GPUAllocationSection({
       if (result.success) {
         onBalanceChange(result.newBalance);
         onEarned(amount);
+        // [v6-AUDIT] Gain flash ONLY on successful credit — not speculatively
+        flash(
+          `+$${amount.toFixed(2)} gain on ${contract.contract_ref} (+${pct.toFixed(1)}%)`,
+          "gain",
+        );
       } else {
-        // [BUG-F] Surface credit failure so user knows to contact support
+        // [BUG-F] Surface credit failure — gain recorded in DB but wallet not credited
         flash(
           `Gain of $${amount.toFixed(2)} recorded but wallet credit failed — please contact support.`,
           "loss",
         );
       }
-      flash(
-        `+$${amount.toFixed(2)} gain on ${contract.contract_ref} (+${pct.toFixed(1)}%)`,
-        "gain",
-      );
     } else {
+      // [v6-AUDIT] Loss: deduct balance. fireAndForget tick insert means tick may fail
+      // silently, but loss is real. This is acceptable — user cannot gain from this.
       const result = await adjustBalance(userId, -amount, 0);
       if (result.success) onBalanceChange(result.newBalance);
       flash(
@@ -1417,6 +1422,17 @@ function GPUAllocationSection({
         `Insufficient balance. You have $${freshBalance.toFixed(2)}. Add funds to continue.`,
         "loss",
       );
+      return;
+    }
+
+    // [v6-ANTI-FRAUD] Cap active contracts at 10 to prevent abuse/runaway losses
+    const { count: activeCount } = await supabase
+      .from("gpu_allocation_contracts")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", userId)
+      .eq("status", "active");
+    if ((activeCount ?? 0) >= 10) {
+      flash("Maximum 10 active contracts allowed. Close one before creating another.", "loss");
       return;
     }
 
@@ -2520,7 +2536,9 @@ export default function TasksPage() {
       router.push("/auth/signin");
       return;
     }
-    setUserId(session.user.id);
+    const sessionUserId = session.user.id;
+    if (!sessionUserId) { router.push("/auth/signin"); return; }
+    setUserId(sessionUserId);
     const [{ data: lics }, { data: u }] = await Promise.all([
       supabase
         .from("operator_licenses")
@@ -2804,5 +2822,4 @@ export default function TasksPage() {
       </main>
     </div>
   );
-}/ /   v 6   u u i d   f i x   d e p l o y e d   0 7 / 0 5 / 2 0 2 6   0 2 : 0 8 : 0 6  
- 
+}
