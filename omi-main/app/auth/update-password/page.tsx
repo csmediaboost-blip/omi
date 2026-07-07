@@ -52,13 +52,14 @@ type PageState = "loading" | "ready" | "error" | "done";
 
 // Wrap any promise with a timeout so a stalled network request always
 // resolves into a catchable error instead of hanging the UI forever.
+// NOTE: the timeout branch is typed as Promise<T> (not Promise<never>) —
+// it never actually resolves with a value, but keeping the type as T
+// avoids TS widening Promise.race's result to `unknown`.
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(message)), ms),
-    ),
-  ]);
+  const timeoutPromise = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(message)), ms),
+  );
+  return Promise.race([promise, timeoutPromise]);
 }
 
 export default function UpdatePasswordPage() {
