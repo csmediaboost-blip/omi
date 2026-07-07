@@ -1,6 +1,8 @@
 "use client";
 // components/auth/reset-password-form.tsx — FIXED
-// Consistent dark theme, maintains existing logic
+// - Wrapped in a real <form> (Enter-to-submit works, no dead-click surface)
+// - Requires <Toaster /> in root layout (see note at bottom)
+// - Adds defensive logging so failures are visible instead of silently hanging
 
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -24,17 +26,25 @@ export function ResetPasswordForm() {
   });
 
   const onSubmit = async (data: PasswordResetData) => {
+    setLoading(true);
     try {
-      setLoading(true);
-      const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
-        redirectTo: `${window.location.origin}/auth/update-password`,
-      });
-      if (error) throw error;
+      const { error } = await supabase.auth.resetPasswordForEmail(
+        data.email,
+        {
+          redirectTo: `${window.location.origin}/auth/update-password`,
+        }
+      );
+
+      if (error) {
+        console.error("Supabase resetPasswordForEmail error:", error);
+        throw new Error(error.message || "Failed to send reset email");
+      }
+
       setSubmitted(true);
       toast.success("Password reset email sent! Check your inbox.");
     } catch (error: any) {
       console.error("Password reset error:", error);
-      toast.error(error.message || "Failed to send reset email");
+      toast.error(error?.message || "Failed to send reset email");
     } finally {
       setLoading(false);
     }
@@ -88,8 +98,8 @@ export function ResetPasswordForm() {
               }}
             >
               <p className="text-emerald-300 text-sm leading-relaxed">
-                Follow the link in your email to reset your password. Check your
-                spam folder if you don't see it.
+                Follow the link in your email to reset your password. Check
+                your spam folder if you don't see it.
               </p>
             </div>
             <Link
@@ -100,8 +110,9 @@ export function ResetPasswordForm() {
             </Link>
           </div>
         ) : (
-          /* Form */
-          <div
+          /* Form — now an actual <form> element */
+          <form
+            onSubmit={handleSubmit(onSubmit)}
             className="rounded-2xl p-6 space-y-4"
             style={{
               background: "rgba(15,23,42,0.8)",
@@ -131,8 +142,7 @@ export function ResetPasswordForm() {
             </div>
 
             <button
-              type="button"
-              onClick={handleSubmit(onSubmit)}
+              type="submit"
               disabled={loading}
               className="w-full py-4 rounded-xl font-black text-white text-base flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
@@ -146,7 +156,7 @@ export function ResetPasswordForm() {
                 "Send Reset Link"
               )}
             </button>
-          </div>
+          </form>
         )}
 
         <p className="text-center text-slate-500 text-sm">
@@ -163,3 +173,18 @@ export function ResetPasswordForm() {
 }
 
 export default ResetPasswordForm;
+
+/*
+  IMPORTANT — if success/error toasts never appear even after this fix,
+  it's because <Toaster /> from "sonner" is not mounted. Add this to
+  app/layout.tsx:
+
+    import { Toaster } from "sonner";
+    ...
+    <body>
+      {children}
+      <Toaster richColors position="top-center" />
+    </body>
+
+  Without it, toast.success()/toast.error() are silent no-ops.
+*/

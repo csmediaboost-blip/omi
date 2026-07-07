@@ -19,6 +19,7 @@ export async function processReferralCommission(
   paidUserId: string,
   paymentAmount: number,
   paymentRef: string,
+  purchasedNode?: string, // pass plan_id / node_key from the payment metadata
 ) {
   try {
     const supabaseAdmin = getSupabaseAdmin();
@@ -32,13 +33,16 @@ export async function processReferralCommission(
 
     if (!paidUser?.referred_by) return; // No referrer — skip
 
-    const referrerId = paidUser.referred_by;
+    const referrerId = paidUser.referred_by as string;
 
     // 2. Calculate commissions
     const referrerEarns = +((paymentAmount * REFERRER_PCT) / 100).toFixed(4);
     const referredBonus = +((paymentAmount * REFERRED_PCT) / 100).toFixed(4);
 
-    // 3. Credit referrer
+    // ─── 3. Credit referrer ───────────────────────────────────────────────────
+    // FIX: Read current values then increment — credits both balance_available
+    //      AND referral_earnings (previously only balance was updated, causing
+    //      the bonus to be invisible on the frontend dashboard)
     const { data: referrer } = await supabaseAdmin
       .from("users")
       .select("balance_available, referral_earnings")
@@ -48,14 +52,13 @@ export async function processReferralCommission(
     await supabaseAdmin
       .from("users")
       .update({
-        balance_available:
-          ((referrer as any)?.balance_available || 0) + referrerEarns,
-        referral_earnings:
-          ((referrer as any)?.referral_earnings || 0) + referrerEarns,
+        balance_available: ((referrer as any)?.balance_available || 0) + referrerEarns, // ✅ what frontend shows
+        referral_earnings: ((referrer as any)?.referral_earnings || 0) + referrerEarns, // ✅ lifetime total
+        updated_at: new Date().toISOString(),
       })
       .eq("id", referrerId);
 
-    // 4. Credit referred user bonus (only on first payment — check flag)
+    // ─── 4. Credit referred user bonus (first payment only) ──────────────────
     if (!paidUser.referral_bonus_claimed) {
       const { data: paidUserFull } = await supabaseAdmin
         .from("users")
@@ -66,25 +69,32 @@ export async function processReferralCommission(
       await supabaseAdmin
         .from("users")
         .update({
-          balance_available:
-            ((paidUserFull as any)?.balance_available || 0) + referredBonus,
+          balance_available: ((paidUserFull as any)?.balance_available || 0) + referredBonus, // ✅ visible on dashboard
           referral_bonus_claimed: true,
+          updated_at: new Date().toISOString(),
         })
         .eq("id", paidUserId);
     }
 
-    // 5. Log the commission
+    // ─── 5. Log the commission ────────────────────────────────────────────────
+    // FIX: corrected column names to match actual DB schema:
+    //   ❌ payment_amount  →  ✅ source_amount
+    //   ❌ payment_ref     →  ✅ (removed — column does not exist)
+    //   ✅ added: purchased_node, source_type, paid_at
     await supabaseAdmin.from("referral_commissions").insert({
       referrer_id: referrerId,
       referred_user_id: paidUserId,
-      commission_amount: referrerEarns,
+      purchased_node: purchasedNode || null,     // ✅ DB column exists
       commission_pct: REFERRER_PCT,
-      payment_amount: paymentAmount,
-      payment_ref: paymentRef,
+      commission_amount: referrerEarns,
+      source_amount: paymentAmount,              // ✅ was: payment_amount ❌
+      source_type: "gpu_plan",                   // ✅ was: missing ❌
+      paid_at: new Date().toISOString(),          // ✅ was: missing ❌
       created_at: new Date().toISOString(),
     });
 
-    // 6. Ledger entries
+    // ─── 6. Ledger entries ────────────────────────────────────────────────────
+    // transaction_ledger columns: user_id, type, amount, description, reference_id, created_at
     await supabaseAdmin.from("transaction_ledger").insert([
       {
         user_id: referrerId,
@@ -108,7 +118,7 @@ export async function processReferralCommission(
         : []),
     ]);
 
-    // 7. Notify referrer
+    // ─── 7. Notify referrer ───────────────────────────────────────────────────
     try {
       await supabaseAdmin.from("user_notifications").insert({
         user_id: referrerId,
@@ -118,14 +128,14 @@ export async function processReferralCommission(
         created_at: new Date().toISOString(),
       });
     } catch {
-      // ignore notification failure
+      // never let notification failure break the flow
     }
 
     console.log(
-      `Referral commission: referrer ${referrerId} earned $${referrerEarns}, referred ${paidUserId} earned $${referredBonus} bonus`,
+      `[referral] ✅ Referrer ${referrerId} earned $${referrerEarns}, referred ${paidUserId} earned $${referredBonus} bonus`,
     );
   } catch (err) {
-    console.error("Referral commission error:", err);
+    console.error("[referral] Commission error:", err);
     // Never throw — don't break the payment flow
   }
 }

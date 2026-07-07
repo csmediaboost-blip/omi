@@ -1,11 +1,13 @@
 // app/api/korapay/webhook/route.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// FIXES vs original:
+// FIXES vs previous version:
 //  FIX-1  metadata is jsonb (already a JS object from Supabase) — never JSON.parse it
 //  FIX-2  operator_licenses insert uses correct columns: activated_at, expires_at, amount_paid
 //  FIX-3  node_allocations insert only uses columns that exist in DB
 //  FIX-4  handles charge.expired so failed payments show as "failed" not "pending" forever
 //  FIX-5  purchaseType detection is robust — checks metadata AND gateway field fallback
+//  FIX-6  processReferralCommission now receives txData.node_key as 4th arg
+//         so purchased_node is correctly recorded in referral_commissions table
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -43,11 +45,9 @@ function verifyKorapaySignature(
 // ─── FIX-1: Safe metadata reader — handles both jsonb object AND string ───────
 function parseMetadata(raw: unknown): Record<string, unknown> {
   if (!raw) return {};
-  // Supabase jsonb columns come back as plain JS objects — never re-parse them
   if (typeof raw === "object" && !Array.isArray(raw)) {
     return raw as Record<string, unknown>;
   }
-  // Fallback: if somehow stored as a string
   if (typeof raw === "string") {
     try {
       return JSON.parse(raw);
@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseClient();
 
-    // ── FIX-4: Handle ALL failure/expiry events so admin never sees stuck pending ──
+    // ── FIX-4: Handle ALL failure/expiry events ───────────────────────────────
     if (
       event === "charge.failed" ||
       event === "charge.declined" ||
@@ -115,7 +115,6 @@ export async function POST(req: NextRequest) {
     }
 
     if (event !== "charge.success") {
-      // Unknown event — acknowledge and ignore
       return NextResponse.json({ received: true });
     }
 
@@ -141,7 +140,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ received: true });
     }
 
-    // ── FIX-1: Parse metadata safely — it's already a JS object from Supabase jsonb ──
+    // ── FIX-1: Parse metadata safely ─────────────────────────────────────────
     const metadata = parseMetadata(txData.metadata);
 
     const now = new Date().toISOString();
@@ -157,6 +156,7 @@ export async function POST(req: NextRequest) {
       purchaseType,
       userId: txData.user_id?.slice(0, 8),
       amount: txData.amount,
+      node_key: txData.node_key,
     });
 
     // ── 1. Mark transaction confirmed ─────────────────────────────────────────
@@ -171,14 +171,21 @@ export async function POST(req: NextRequest) {
       .eq("gateway_reference", reference);
 
     // ── 2. Credit referral commissions ────────────────────────────────────────
+    // FIX-6: pass txData.node_key as 4th arg so purchased_node is recorded
+    // correctly in referral_commissions — previously this arg was missing,
+    // causing purchased_node to always be null in the DB
     try {
-      await processReferralCommission(txData.user_id, txData.amount, reference);
+      await processReferralCommission(
+        txData.user_id,
+        txData.amount,
+        reference,
+        txData.node_key ?? undefined, // ✅ FIX-6: was missing in old version
+      );
     } catch (e: any) {
       console.error("[webhook] Referral commission error:", e.message);
     }
 
     // ── 3. Activate product ───────────────────────────────────────────────────
-
     if (purchaseType === "license") {
       // ── FIX-2: Use actual operator_licenses columns ───────────────────────
       const licenseType =
@@ -204,11 +211,11 @@ export async function POST(req: NextRequest) {
             user_id: txData.user_id,
             license_type: licenseType,
             status: "active",
-            purchased_at: now, // ✅ correct column name
-            activated_at: now, // ✅ added by SQL migration
-            expires_at: expiresAt.toISOString(), // ✅ added by SQL migration
-            amount_paid: txData.amount, // ✅ added by SQL migration
-            transaction_ref: reference, // ✅ correct column name
+            purchased_at: now,
+            activated_at: now,
+            expires_at: expiresAt.toISOString(),
+            amount_paid: txData.amount,
+            transaction_ref: reference,
           });
 
         if (licErr) {
@@ -223,7 +230,7 @@ export async function POST(req: NextRequest) {
         console.log("[webhook] License already active, skipping insert");
       }
     } else {
-      // ── GPU mining / node / contract ─────────────────────────────────────
+      // ── GPU mining / node / contract ──────────────────────────────────────
       const isSplit = metadata.isSplitPayment === true;
       const splitInstallment = Number(metadata.splitInstallment) || 1;
       const splitTotal = Number(metadata.splitTotal) || 1;
@@ -309,7 +316,6 @@ export async function POST(req: NextRequest) {
             funded_amount: txData.amount,
             created_at: now,
             updated_at: now,
-            // tier_index and lock_unlock_at added by SQL migration — safe to include
             tier_index: (metadata.tierIndex as number) ?? 0,
             lock_unlock_at: null,
           });
