@@ -158,11 +158,7 @@ export default function UpdatePasswordPage() {
       // The actual fix: this call can no longer hang forever. If Supabase
       // doesn't respond within 15s, this rejects with a real error that
       // the catch block below will surface via toast.
-      const { error } = await withTimeout(
-        supabase.auth.updateUser({ password: data.password }),
-        15_000,
-        "Request timed out. Check your connection and try again.",
-      );
+      
       console.log("[update-password] updateUser error:", error);
 
       if (error) throw error;
