@@ -59,7 +59,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   const timeoutPromise = new Promise<T>((_, reject) =>
     setTimeout(() => reject(new Error(message)), ms),
   );
-  return Promise.race([promise, timeoutPromise]);
+  // Explicit <T> here — without it, some tsconfig lib/target combos widen
+  // Promise.race's inferred return type to `unknown`, which is what was
+  // causing "Property 'error' does not exist on type 'unknown'".
+  return Promise.race<T>([promise, timeoutPromise]);
 }
 
 export default function UpdatePasswordPage() {
