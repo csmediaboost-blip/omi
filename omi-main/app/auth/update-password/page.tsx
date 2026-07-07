@@ -1,5 +1,16 @@
 "use client";
-// app/auth/update-password/page.tsx
+// app/auth/update-password/page.tsx — FIXED
+//
+// ROOT CAUSE: supabase.auth.updateUser() had no timeout (the global fetch
+// timeout was intentionally removed to stop breaking file uploads — see
+// lib/supabase.ts). If that specific network call stalls, there was
+// nothing to catch it, so the button spun on "Updating…" forever with no
+// error ever surfacing.
+//
+// FIX: race updateUser() against a local 15s timeout, scoped to just this
+// one call — does not touch the global client config, so uploads are
+// unaffected. Also guards against submitting with an already-expired
+// recovery session.
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -38,6 +49,17 @@ const UpdatePasswordSchema = z
 
 type UpdatePasswordData = z.infer<typeof UpdatePasswordSchema>;
 type PageState = "loading" | "ready" | "error" | "done";
+
+// Wrap any promise with a timeout so a stalled network request always
+// resolves into a catchable error instead of hanging the UI forever.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(message)), ms),
+    ),
+  ]);
+}
 
 export default function UpdatePasswordPage() {
   const router = useRouter();
@@ -115,18 +137,28 @@ export default function UpdatePasswordPage() {
   }, []);
 
   const onSubmit = async (data: UpdatePasswordData) => {
+    setSubmitting(true);
     try {
-      setSubmitting(true);
-
       const { data: sessionData } = await supabase.auth.getSession();
       console.log(
         "[update-password] session before update:",
         sessionData.session?.user?.email,
       );
 
-      const { error } = await supabase.auth.updateUser({
-        password: data.password,
-      });
+      if (!sessionData.session) {
+        throw new Error(
+          "Your session expired. Please request a new reset link.",
+        );
+      }
+
+      // The actual fix: this call can no longer hang forever. If Supabase
+      // doesn't respond within 15s, this rejects with a real error that
+      // the catch block below will surface via toast.
+      const { error } = await withTimeout(
+        supabase.auth.updateUser({ password: data.password }),
+        15_000,
+        "Request timed out. Check your connection and try again.",
+      );
       console.log("[update-password] updateUser error:", error);
 
       if (error) throw error;
@@ -134,7 +166,16 @@ export default function UpdatePasswordPage() {
       setPageState("done");
       toast.success("Password updated! Redirecting to sign in…");
 
-      await supabase.auth.signOut();
+      await withTimeout(
+        supabase.auth.signOut(),
+        5_000,
+        "Sign out timed out",
+      ).catch((err) => {
+        // Non-fatal — the password is already updated at this point.
+        // Don't block the redirect on a slow/stuck signOut call.
+        console.warn("[update-password] signOut warning:", err);
+      });
+
       setTimeout(() => router.push("/auth/signin"), 2500);
     } catch (error: unknown) {
       const msg =
@@ -142,6 +183,8 @@ export default function UpdatePasswordPage() {
       console.error("[update-password] submit error:", error);
       toast.error(msg);
     } finally {
+      // Always runs, even on timeout — this is what stops the button
+      // from spinning forever.
       setSubmitting(false);
     }
   };
