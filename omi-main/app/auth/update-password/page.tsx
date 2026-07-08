@@ -158,7 +158,20 @@ export default function UpdatePasswordPage() {
       // The actual fix: this call can no longer hang forever. If Supabase
       // doesn't respond within 15s, this rejects with a real error that
       // the catch block below will surface via toast.
-      
+      //
+      // Explicit type argument here on purpose: `supabase` is typed `any`
+      // (lib/supabase.ts casts the stub client `as any`), and TypeScript
+      // infers generic type params as `unknown` — not `any` — when the
+      // argument itself is `any`. Without this explicit annotation, T
+      // silently resolves to `unknown` and `error` becomes inaccessible.
+      const { error } = await withTimeout<{
+        data: { user: unknown } | null;
+        error: AuthError | null;
+      }>(
+        supabase.auth.updateUser({ password: data.password }),
+        15_000,
+        "Request timed out. Check your connection and try again.",
+      );
       console.log("[update-password] updateUser error:", error);
 
       if (error) throw error;
