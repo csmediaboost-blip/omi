@@ -169,8 +169,8 @@ export default function UpdatePasswordPage() {
         error: AuthError | null;
       }>(
         supabase.auth.updateUser({ password: data.password }),
-        15_000,
-        "Request timed out. Check your connection and try again.",
+        45_000,
+        "This is taking longer than expected on your connection. Your password may already be updated — try signing in with your new password, or wait and check your email for a confirmation.",
       );
       console.log("[update-password] updateUser error:", error);
 
