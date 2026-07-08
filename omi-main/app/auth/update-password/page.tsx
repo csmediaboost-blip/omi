@@ -143,34 +143,19 @@ export default function UpdatePasswordPage() {
   const onSubmit = async (data: UpdatePasswordData) => {
     setSubmitting(true);
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      console.log(
-        "[update-password] session before update:",
-        sessionData.session?.user?.email,
-      );
+      // NOTE: removed the getSession() call that used to run here — by the
+      // time the form is on screen (pageState === "ready"), the earlier
+      // useEffect already confirmed a valid recovery session exists. Calling
+      // getSession() again added a redundant round trip before the actual
+      // update request even started.
 
-      if (!sessionData.session) {
-        throw new Error(
-          "Your session expired. Please request a new reset link.",
-        );
-      }
-
-      // The actual fix: this call can no longer hang forever. If Supabase
-      // doesn't respond within 15s, this rejects with a real error that
-      // the catch block below will surface via toast.
-      //
-      // Explicit type argument here on purpose: `supabase` is typed `any`
-      // (lib/supabase.ts casts the stub client `as any`), and TypeScript
-      // infers generic type params as `unknown` — not `any` — when the
-      // argument itself is `any`. Without this explicit annotation, T
-      // silently resolves to `unknown` and `error` becomes inaccessible.
       const { error } = await withTimeout<{
         data: { user: unknown } | null;
         error: AuthError | null;
       }>(
         supabase.auth.updateUser({ password: data.password }),
-        45_000,
-        "This is taking longer than expected on your connection. Your password may already be updated — try signing in with your new password, or wait and check your email for a confirmation.",
+        10_000,
+        "This is taking unusually long. If you don't see a confirmation shortly, check your email — the password may have already changed. If it's consistently slow, there's likely a slow email hook attached to password updates on the backend.",
       );
       console.log("[update-password] updateUser error:", error);
 
