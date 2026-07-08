@@ -308,7 +308,13 @@ function LiveTicker() {
   );
 }
 
-/* ─── Share Modal ─── */
+/* ─── Share Modal ───
+   FIXED FOR MOBILE:
+   - copy-link row: added min-w-0 on the flex row and the link box so the
+     truncating text actually has room to compute against, instead of the
+     row silently overflowing.
+   - social icon grid: added min-w-0 to each button and truncate to its
+     label, so tighter screens don't force the row to overflow. */
 function ShareModal({ code, onClose }: { code: string; onClose: () => void }) {
   const [copied, setCopied] = useState(false);
   const origin = typeof window !== "undefined" ? window.location.origin : "";
@@ -343,7 +349,7 @@ function ShareModal({ code, onClose }: { code: string; onClose: () => void }) {
             background: "rgba(59,130,246,0.05)",
           }}
         >
-          <div>
+          <div className="min-w-0">
             <p className="text-white font-black text-sm">
               Share Your Referral Link
             </p>
@@ -354,7 +360,7 @@ function ShareModal({ code, onClose }: { code: string; onClose: () => void }) {
           </div>
           <button
             onClick={onClose}
-            className="text-blue-400/40 hover:text-white p-1 transition-colors"
+            className="text-blue-400/40 hover:text-white p-1 transition-colors shrink-0"
           >
             <X size={16} />
           </button>
@@ -369,22 +375,22 @@ function ShareModal({ code, onClose }: { code: string; onClose: () => void }) {
               <button
                 key={id}
                 onClick={() => share(id)}
-                className="flex flex-col items-center gap-2 p-3 rounded-xl transition-all"
+                className="flex flex-col items-center gap-2 p-3 rounded-xl transition-all min-w-0"
                 style={{
                   background: "rgba(255,255,255,0.04)",
                   border: "1px solid rgba(59,130,246,0.15)",
                 }}
               >
                 <Icon />
-                <span className="text-[10px] font-bold text-blue-300/60">
+                <span className="text-[10px] font-bold text-blue-300/60 truncate w-full text-center">
                   {label}
                 </span>
               </button>
             ))}
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 min-w-0">
             <div
-              className="flex-1 rounded-xl px-3 py-2.5 text-blue-300/50 text-xs font-mono truncate"
+              className="flex-1 min-w-0 rounded-xl px-3 py-2.5 text-blue-300/50 text-xs font-mono truncate"
               style={{
                 background: "rgba(255,255,255,0.04)",
                 border: "1px solid rgba(59,130,246,0.12)",
@@ -1268,7 +1274,11 @@ export default function NetworkPage() {
           ))}
         </div>
 
-        {/* ── YOUR LINK ── */}
+        {/* ── YOUR LINK ──
+             FIXED: added min-w-0 to the flex row and the link box so the
+             truncate class actually has a computed width to truncate
+             against on narrow phone screens instead of overflowing and
+             pushing the Copy button partially off-screen. */}
         <div className="rounded-2xl p-4 space-y-3" style={card}>
           <div className="flex items-center justify-between">
             <p className="text-white font-bold text-sm">Your Referral Link</p>
@@ -1283,9 +1293,9 @@ export default function NetworkPage() {
               {referralCode}
             </span>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 min-w-0">
             <div
-              className="flex-1 rounded-xl px-3 py-2.5 text-xs font-mono truncate"
+              className="flex-1 min-w-0 rounded-xl px-3 py-2.5 text-xs font-mono truncate"
               style={{
                 background: "rgba(255,255,255,0.03)",
                 border: cardBorder,
@@ -1342,13 +1352,15 @@ export default function NetworkPage() {
           </div>
           <button
             onClick={() => setShowShare(true)}
-            className="w-full py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all text-white"
+            className="w-full py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all text-white min-w-0"
             style={{
               background: "linear-gradient(135deg,#059669,#10b981)",
               boxShadow: "0 4px 15px rgba(16,185,129,0.2)",
             }}
           >
-            <Share2 size={14} /> Share Now <ChevronRight size={13} />
+            <Share2 size={14} className="shrink-0" />
+            <span className="truncate">Share Now</span>
+            <ChevronRight size={13} className="shrink-0" />
           </button>
         </div>
 
@@ -1543,7 +1555,10 @@ export default function NetworkPage() {
         </div>
       </div>
 
-      {/* ── CHANGE 2: STICKY BOTTOM CTA (fixed mobile cutoff) ── */}
+      {/* ── CHANGE 2: STICKY BOTTOM CTA (fixed mobile cutoff)
+           FIXED: added min-w-0 to the button and the text span, truncate
+           on the span, and tightened gap/padding so the trailing
+           ChevronRight icon can't get pushed off narrow screens. */}
       <div
         className="fixed bottom-0 left-0 right-0 px-4 pb-4 pt-6"
         style={{
@@ -1553,14 +1568,14 @@ export default function NetworkPage() {
         <div className="max-w-lg mx-auto">
           <button
             onClick={() => setShowShare(true)}
-            className="w-full py-4 px-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2 text-white transition-all"
+            className="w-full py-4 px-3 rounded-2xl font-black text-sm flex items-center justify-center gap-1.5 text-white transition-all min-w-0"
             style={{
               background: "linear-gradient(135deg,#059669,#10b981)",
               boxShadow: "0 8px 25px rgba(16,185,129,0.3)",
             }}
           >
             <Share2 size={15} className="shrink-0" />
-            <span className="text-center leading-tight">
+            <span className="text-center leading-tight truncate min-w-0">
               Share Link — Earn {REFERRER_PCT}% of Their Payments
             </span>
             <ChevronRight size={13} className="shrink-0" />

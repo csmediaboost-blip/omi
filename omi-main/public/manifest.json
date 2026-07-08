@@ -1,7 +1,7 @@
 {
-  "name": "OmniTask Pro — GPU Computing Investment Platform",
+  "name": "OmniTask Pro — GPU Computing Mining Platform",
   "short_name": "OmniTask Pro",
-  "description": "Earn daily returns from enterprise AI GPU workloads. Distributed GPU computing investment platform.",
+  "description": "Earn daily returns from enterprise AI GPU workloads. Distributed GPU computing Mining platform.",
   "start_url": "/dashboard",
   "scope": "/",
   "display": "standalone",

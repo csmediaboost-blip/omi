@@ -129,8 +129,8 @@ const FAQS = [
     a: "Create your account, complete KYC identity verification, select a GPU node plan from the Mining section of your dashboard, and start mining via bank transfer, card, or cryptocurrency (USDT TRC-20/ERC-20). Your mining session activates immediately and begins earning within minutes. Complete KYC before withdrawing your profits.",
   },
   {
-    q: "What is the minimum investment and how are earnings calculated?",
-    a: "The minimum investment is $5 for the Foundation Node tier. Each mining session generates earnings between $0.29-$0.40 per day based on real enterprise GPU demand. Hourly earnings are reduced by 20%, weekly earnings receive a 10% bonus, and monthly earnings receive a 25% bonus. Your actual earnings depend on real computational demand at the time of mining.",
+    q: "What is the minimum mining and how are earnings calculated?",
+    a: "The minimum mining is $5 for the Foundation Node tier. Each mining session generates earnings between $0.29-$0.40 per day based on real enterprise GPU demand. Hourly earnings are reduced by 20%, weekly earnings receive a 10% bonus, and monthly earnings receive a 25% bonus. Your actual earnings depend on real computational demand at the time of mining.",
   },
   {
     q: "Is KYC verification required before I can withdraw?",
@@ -170,11 +170,11 @@ const FEATURES = [
   {
     icon: Clock,
     title: "Flexible or Fixed Terms",
-    desc: "Rolling flexible plans or 6, 12, and 24-month locked terms for higher projected returns. All plans start from $5 minimum investment.",
+    desc: "Rolling flexible plans or 6, 12, and 24-month locked terms for higher projected returns. All plans start from $5 minimum mining.",
   },
   {
     icon: CheckCircle,
-    title: "Contract & Flexible Investment Plans",
+    title: "Contract & Flexible Mining Plans",
     desc: "Choose flexible rolling plans or commit to 6, 12, or 24-month contract terms for enhanced projected returns. All plans start from $5. Earnings accrual begins the moment your node activates.",
   },
   {
@@ -236,7 +236,7 @@ export default function HomePage() {
         OmniTask Pro is an institutional-grade distributed GPU computing
         platform for enterprise AI workloads. Earn daily returns by providing
         GPU infrastructure to Fortune 500 companies and AI research
-        institutions. GPU infrastructure investment platform. AI compute
+        institutions. GPU infrastructure investmen platform. AI compute
         infrastructure. Enterprise-backed returns from real GPU workloads.
         NVIDIA H100, A100, RTX 4090 GPU infrastructure. Daily earnings from AI
         training and inference. 12,400+ active GPU nodes globally. 180+
@@ -978,7 +978,7 @@ export default function HomePage() {
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-500 leading-relaxed mb-4 sm:mb-5 max-w-xs">
-                Distributed GPU computing investment platform. Earn daily
+                Distributed GPU computing mining platform. Earn daily
                 returns from enterprise AI workloads processed across our global
                 data centre network.
               </p>

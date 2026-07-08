@@ -10,6 +10,9 @@
 //     Realtime channels cleaned up properly on unmount.
 //  8. Operator license status reads operator_licenses table directly.
 //     Device verification reads device_verification column correctly.
+//  9. ADDED: small always-visible "Refer" button in the top header bar, linking
+//     to /dashboard/network — the referral page was previously only reachable
+//     via the sidebar (labeled "Network"), which many users weren't finding.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback } from "react";
@@ -44,6 +47,7 @@ import {
   LayoutGrid,
   MemoryStick,
   Pickaxe,
+  Gift,
 } from "lucide-react";
 import {
   AreaChart,
@@ -1140,11 +1144,11 @@ const userChannel = supabase
           className="sticky top-0 z-40 backdrop-blur-md"
           style={{ background: `${BG}f2`, borderBottom: `1px solid ${BORDER}` }}
         >
-          <div className="px-5 py-3.5 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2.5">
+          <div className="px-5 py-3.5 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-4 min-w-0">
+              <div className="flex items-center gap-2.5 min-w-0">
                 <div
-                  className="w-7 h-7 rounded-lg flex items-center justify-center"
+                  className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0"
                   style={{
                     background: `${C_ACCENT}18`,
                     border: `1px solid ${C_ACCENT}30`,
@@ -1152,7 +1156,7 @@ const userChannel = supabase
                 >
                   <Server size={12} color={C_ACCENT} />
                 </div>
-                <div>
+                <div className="min-w-0">
                   <p
                     className="text-[8px] font-mono tracking-[0.2em] uppercase"
                     style={{ color: "#1e3a5f" }}
@@ -1160,7 +1164,7 @@ const userChannel = supabase
                     OmniTask Pro · GPU Compute
                   </p>
                   <p
-                    className="font-bold text-sm leading-none"
+                    className="font-bold text-sm leading-none truncate"
                     style={{ color: "#e2e8f0" }}
                   >
                     {userData?.full_name || userData?.email}
@@ -1168,7 +1172,7 @@ const userChannel = supabase
                 </div>
               </div>
               <div
-                className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-full"
+                className="hidden md:flex items-center gap-1.5 px-3 py-1.5 rounded-full shrink-0"
                 style={{
                   background: `${C_ACCENT}12`,
                   border: `1px solid ${C_ACCENT}25`,
@@ -1187,7 +1191,23 @@ const userChannel = supabase
                 </span>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 shrink-0">
+              {/* Small, always-visible Refer button — routes straight to the
+                  referral page. Kept visible at every screen size (not
+                  hidden md:flex) since the sidebar entry ("Network") wasn't
+                  being found by users looking for "Refer". */}
+              <button
+                onClick={() => navigate("/dashboard/network")}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl font-black text-[11px] transition-all"
+                style={{
+                  background: `${C_ACCENT}15`,
+                  border: `1px solid ${C_ACCENT}35`,
+                  color: C_ACCENT,
+                }}
+              >
+                <Gift size={12} />
+                <span>Refer</span>
+              </button>
               {userData?.id && <LicenseStatusBadge userId={userData.id} />}
               <button
                 onClick={logout}

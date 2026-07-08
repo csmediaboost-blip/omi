@@ -55,17 +55,17 @@ export const metadata: Metadata = {
 
   title: {
     default:
-      "OmniTask Pro — Distributed GPU Computing & AI Investment Platform",
+      "OmniTask Pro — Distributed GPU Computing & AI Mining Platform",
     template: "%s | OmniTask Pro",
   },
 
   description:
-    "OmniTask Pro is a globally regulated GPU computing investment platform. Earn daily returns from enterprise AI workloads. 12,400+ active GPU nodes. 180+ enterprise clients. Join 9,800+ verified investors worldwide.",
+    "OmniTask Pro is a globally regulated GPU computing mining platform. Earn daily returns from enterprise AI workloads. 12,400+ active GPU nodes. 180+ enterprise clients. Join 9,800+ verified investors worldwide.",
 
   keywords: [
-    "GPU computing investment",
-    "AI infrastructure investment",
-    "GPU node investment",
+    "GPU computing Mining",
+    "AI infrastructure Mining",
+    "GPU node Mining",
     "passive income AI",
     "GPU rental income",
     "distributed computing platform",
@@ -83,14 +83,14 @@ export const metadata: Metadata = {
     type: "website",
     url: DOMAIN,
     siteName: "OmniTask Pro",
-    title: "OmniTask Pro — GPU Computing Investment Platform",
+    title: "OmniTask Pro — GPU Computing Mining Platform",
     description: "Earn daily returns from enterprise AI GPU workloads.",
     images: [{ url: `${DOMAIN}/og-image.png`, width: 1200, height: 630 }],
   },
 
   twitter: {
     card: "summary_large_image",
-    title: "OmniTask Pro — GPU Computing Investment Platform",
+    title: "OmniTask Pro — GPU Computing Mining Platform",
     description: "Earn daily returns from enterprise AI GPU workloads.",
     images: [`${DOMAIN}/og-image.png`],
   },
@@ -128,7 +128,7 @@ const jsonLdOrganization = {
   name: "OmniTask Pro Ltd.",
   url: DOMAIN,
   logo: `${DOMAIN}/logo.png`,
-  description: "Distributed GPU computing investment platform",
+  description: "Distributed GPU computing mining platform",
   foundingDate: "2024",
   address: {
     "@type": "PostalAddress",

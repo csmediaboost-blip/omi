@@ -38,7 +38,7 @@
 - "with node-specific ROI multipliers" from hero and pricing sections
 
 **Updated Sections**:
-- FAQ: Minimum investment
+- FAQ: Minimum mining
 - FAQ: Mining earnings
 - FAQ: GPU hardware tiers
 - FAQ: Withdrawal requirements
@@ -79,18 +79,18 @@ calculateDailyRoiPercentage() - no longer needed
 ### 3. Financials Page (`app/dashboard/financials/page.tsx`)
 
 **Minor Terminology Updates**:
-- "GPU Investments" → "Mining Portfolio"
+- "GPU Mining" → "Mining Portfolio"
 - "Total Invested" → "Total Committed"
-- "No GPU investments yet" → "No GPU mining sessions yet"
-- Tab comment: "INVESTMENTS TAB" → "MINING PORTFOLIO TAB"
+- "No GPU Mining yet" → "No GPU mining sessions yet"
+- Tab comment: "MINING TAB" → "MINING PORTFOLIO TAB"
 
 **No ROI references removed** (none existed here)
 
 ### 4. Checkout Page (`app/dashboard/checkout/page.tsx`)
 
 **Terminology Updates**:
-- "Total Investment" → "Mining Amount"
-- "Contract Investment Notice" → "Mining Notice"
+- "Total mining" → "Mining Amount"
+- "Contract Mining Notice" → "Mining Notice"
 
 **KYC Check Added**:
 ```typescript
