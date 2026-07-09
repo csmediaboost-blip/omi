@@ -127,10 +127,12 @@ export async function POST(req: NextRequest) {
       ({ error: updateErr } = await withTimeout<{
         error: PostgrestError | null;
       }>(
-        supabaseAdmin
-          .from("users")
-          .update({ pin_hash: newHash, pin_attempts: 0, pin_locked: false })
-          .eq("id", user.id),
+        Promise.resolve(
+          supabaseAdmin
+            .from("users")
+            .update({ pin_hash: newHash, pin_attempts: 0, pin_locked: false })
+            .eq("id", user.id),
+        ),
         12_000,
         "TIMEOUT_UPDATE_PIN",
       ));
