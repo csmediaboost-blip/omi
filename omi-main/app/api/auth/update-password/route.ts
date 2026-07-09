@@ -14,8 +14,24 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase-admin";
+import type { AuthError, User } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+// Give the function enough headroom to hit our own internal timeouts
+// below and still return a response, rather than getting killed by
+// Vercel's default limit mid-call (which can leave the client fetch
+// hanging instead of erroring cleanly).
+export const maxDuration = 30;
+
+// Wrap a Supabase call so a stalled request to Supabase's own servers
+// can't hang this function indefinitely. Explicit generic required —
+// Promise.race widens to `unknown` under this tsconfig otherwise.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  const timeoutPromise = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(message)), ms),
+  );
+  return Promise.race<T>([promise, timeoutPromise]);
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -40,8 +56,21 @@ export async function POST(req: NextRequest) {
     // Verify the token is a real, currently-valid session before doing
     // anything — this stands in for the RLS check we'd otherwise lose by
     // using the service role key.
-    const { data: userData, error: userErr } =
-      await supabaseAdmin.auth.getUser(access_token);
+    let userData: { user: User | null };
+    let userErr: AuthError | null;
+    try {
+      ({ data: userData, error: userErr } = await withTimeout(
+        supabaseAdmin.auth.getUser(access_token),
+        12_000,
+        "TIMEOUT_GET_USER",
+      ));
+    } catch (e) {
+      console.error("[api/update-password] getUser timed out:", e);
+      return NextResponse.json(
+        { error: "Verifying your session is taking too long. Please try again." },
+        { status: 504 },
+      );
+    }
 
     if (userErr || !userData?.user) {
       return NextResponse.json(
@@ -50,10 +79,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { error: updateErr } = await supabaseAdmin.auth.admin.updateUserById(
-      userData.user.id,
-      { password },
-    );
+    let updateErr: AuthError | null;
+    try {
+      ({ error: updateErr } = await withTimeout(
+        supabaseAdmin.auth.admin.updateUserById(userData.user.id, { password }),
+        12_000,
+        "TIMEOUT_UPDATE_USER",
+      ));
+    } catch (e) {
+      console.error("[api/update-password] updateUserById timed out:", e);
+      return NextResponse.json(
+        {
+          error:
+            "Updating your password is taking too long. If it doesn't confirm shortly, it may have already changed — try signing in with the new password.",
+        },
+        { status: 504 },
+      );
+    }
 
     if (updateErr) {
       console.error("[api/update-password] admin.updateUserById error:", updateErr);
@@ -64,7 +106,7 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[api/update-password] unexpected error:", err);
     return NextResponse.json(
       { error: "Unexpected server error. Please try again." },

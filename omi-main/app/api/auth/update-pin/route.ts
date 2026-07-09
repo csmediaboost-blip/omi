@@ -9,10 +9,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import type { AuthError, User } from "@supabase/supabase-js";
 import crypto from "crypto";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
 export const runtime = "nodejs";
+// Give the function enough headroom to hit our own internal timeouts
+// below and still return a response, rather than getting killed by
+// Vercel's default limit mid-call (which can leave the client fetch
+// hanging instead of erroring cleanly).
+export const maxDuration = 30;
 
 // Separate anon-key client, server-side, used only to verify the
 // account password via signInWithPassword (Supabase has no
@@ -26,6 +32,16 @@ const supabaseAnon = createClient(
 // Must match the client-side hashPin() exactly: SHA-256(pin + userId), hex.
 function hashPin(pin: string, userId: string): string {
   return crypto.createHash("sha256").update(pin + userId).digest("hex");
+}
+
+// Wrap a Supabase call so a stalled request to Supabase's own servers
+// can't hang this function indefinitely. Explicit generic required —
+// Promise.race widens to `unknown` under this tsconfig otherwise.
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  const timeoutPromise = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(message)), ms),
+  );
+  return Promise.race<T>([promise, timeoutPromise]);
 }
 
 export async function POST(req: NextRequest) {
@@ -50,8 +66,21 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify the caller's session is real before doing anything.
-    const { data: userData, error: userErr } =
-      await supabaseAdmin.auth.getUser(access_token);
+    let userData: { user: User | null };
+    let userErr: AuthError | null;
+    try {
+      ({ data: userData, error: userErr } = await withTimeout(
+        supabaseAdmin.auth.getUser(access_token),
+        12_000,
+        "TIMEOUT_GET_USER",
+      ));
+    } catch (e) {
+      console.error("[api/update-pin] getUser timed out:", e);
+      return NextResponse.json(
+        { error: "Verifying your session is taking too long. Please try again." },
+        { status: 504 },
+      );
+    }
 
     if (userErr || !userData?.user?.email) {
       return NextResponse.json(
@@ -63,10 +92,21 @@ export async function POST(req: NextRequest) {
     const { user } = userData;
 
     // Identity check: re-verify the account password server-side.
-    const { error: reauthErr } = await supabaseAnon.auth.signInWithPassword({
-      email: user.email!,
-      password,
-    });
+    let reauthErr: AuthError | null;
+    try {
+      ({ error: reauthErr } = await withTimeout(
+        supabaseAnon.auth.signInWithPassword({ email: user.email!, password }),
+        12_000,
+        "TIMEOUT_REAUTH",
+      ));
+    } catch (e) {
+      console.error("[api/update-pin] signInWithPassword timed out:", e);
+      return NextResponse.json(
+        { error: "Verifying your password is taking too long. Please try again." },
+        { status: 504 },
+      );
+    }
+
     if (reauthErr) {
       return NextResponse.json(
         { error: "Password is incorrect." },
@@ -76,14 +116,26 @@ export async function POST(req: NextRequest) {
 
     const newHash = hashPin(newPin, user.id);
 
-    const { error: updateErr } = await supabaseAdmin
-      .from("users")
-      .update({
-        pin_hash: newHash,
-        pin_attempts: 0,
-        pin_locked: false,
-      })
-      .eq("id", user.id);
+    let updateErr: { message?: string } | null;
+    try {
+      ({ error: updateErr } = await withTimeout(
+        supabaseAdmin
+          .from("users")
+          .update({ pin_hash: newHash, pin_attempts: 0, pin_locked: false })
+          .eq("id", user.id),
+        12_000,
+        "TIMEOUT_UPDATE_PIN",
+      ));
+    } catch (e) {
+      console.error("[api/update-pin] users update timed out:", e);
+      return NextResponse.json(
+        {
+          error:
+            "Updating your PIN is taking too long. If it doesn't confirm shortly, it may have already changed — try signing in with the new PIN.",
+        },
+        { status: 504 },
+      );
+    }
 
     if (updateErr) {
       console.error("[api/update-pin] users update error:", updateErr);
@@ -94,7 +146,7 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[api/update-pin] unexpected error:", err);
     return NextResponse.json(
       { error: "Unexpected server error. Please try again." },
