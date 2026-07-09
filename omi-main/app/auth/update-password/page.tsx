@@ -1,16 +1,22 @@
 "use client";
-// app/auth/update-password/page.tsx — FIXED
+// app/auth/update-password/page.tsx — FIXED (v2: routes through our own API)
 //
-// ROOT CAUSE: supabase.auth.updateUser() had no timeout (the global fetch
-// timeout was intentionally removed to stop breaking file uploads — see
-// lib/supabase.ts). If that specific network call stalls, there was
-// nothing to catch it, so the button spun on "Updating…" forever with no
-// error ever surfacing.
+// HISTORY:
+// v1 fix raced supabase.auth.updateUser() against a client-side timeout.
+// That stopped the spinner, but reports kept coming in of the password
+// actually changing while the UI still hung — and the reset link is
+// being opened from in-app browsers (e.g. Facebook/Messenger WebView,
+// visible in the screenshot status bar). Those environments can block or
+// swallow the *response* of a cross-origin request to *.supabase.co even
+// though the request itself lands, which explains "it worked but never
+// stopped spinning."
 //
-// FIX: race updateUser() against a local 15s timeout, scoped to just this
-// one call — does not touch the global client config, so uploads are
-// unaffected. Also guards against submitting with an already-expired
-// recovery session.
+// v2: the recovery session is still established client-side exactly as
+// before (magic-link redirect → onAuthStateChange/getSession), since
+// that part was already working. But the actual password write now goes
+// through our own same-origin API route (/api/auth/update-password),
+// which is far less likely to be interfered with by an embedded browser,
+// and moves the update to the service-role key server-side.
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -50,19 +56,22 @@ const UpdatePasswordSchema = z
 type UpdatePasswordData = z.infer<typeof UpdatePasswordSchema>;
 type PageState = "loading" | "ready" | "error" | "done";
 
-// Wrap any promise with a timeout so a stalled network request always
-// resolves into a catchable error instead of hanging the UI forever.
-// NOTE: the timeout branch is typed as Promise<T> (not Promise<never>) —
-// it never actually resolves with a value, but keeping the type as T
-// avoids TS widening Promise.race's result to `unknown`.
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  const timeoutPromise = new Promise<T>((_, reject) =>
-    setTimeout(() => reject(new Error(message)), ms),
-  );
-  // Explicit <T> here — without it, some tsconfig lib/target combos widen
-  // Promise.race's inferred return type to `unknown`, which is what was
-  // causing "Property 'error' does not exist on type 'unknown'".
-  return Promise.race<T>([promise, timeoutPromise]);
+// Fetch with a hard client-side timeout via AbortController. Even a
+// same-origin request could theoretically hang, so we still guard it —
+// this just makes the failure mode "clear error after 15s" instead of
+// "spins forever," no matter what's on the other end.
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  ms: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export default function UpdatePasswordPage() {
@@ -143,46 +152,58 @@ export default function UpdatePasswordPage() {
   const onSubmit = async (data: UpdatePasswordData) => {
     setSubmitting(true);
     try {
-      // NOTE: removed the getSession() call that used to run here — by the
-      // time the form is on screen (pageState === "ready"), the earlier
-      // useEffect already confirmed a valid recovery session exists. Calling
-      // getSession() again added a redundant round trip before the actual
-      // update request even started.
+      const {
+        data: { session },
+        error: sessionErr,
+      } = await supabase.auth.getSession();
 
-      const { error } = await withTimeout<{
-        data: { user: unknown } | null;
-        error: AuthError | null;
-      }>(
-        supabase.auth.updateUser({ password: data.password }),
-        10_000,
-        "This is taking unusually long. If you don't see a confirmation shortly, check your email — the password may have already changed. If it's consistently slow, there's likely a slow email hook attached to password updates on the backend.",
+      if (sessionErr || !session?.access_token) {
+        throw new Error("Session expired. Please request a new reset link.");
+      }
+
+      // Same-origin call to our own API route instead of hitting
+      // *.supabase.co directly from the client — see comment at top.
+      const res = await fetchWithTimeout(
+        "/api/auth/update-password",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            access_token: session.access_token,
+            password: data.password,
+          }),
+        },
+        15_000,
       );
-      console.log("[update-password] updateUser error:", error);
 
-      if (error) throw error;
+      const result = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(result?.error || "Failed to update password");
+      }
 
       setPageState("done");
       toast.success("Password updated! Redirecting to sign in…");
 
-      await withTimeout(
-        supabase.auth.signOut(),
-        5_000,
-        "Sign out timed out",
-      ).catch((err) => {
-        // Non-fatal — the password is already updated at this point.
-        // Don't block the redirect on a slow/stuck signOut call.
+      // Sign out locally (clears the recovery session from this device).
+      // Non-fatal if it fails — the password is already updated.
+      supabase.auth.signOut().catch((err) => {
         console.warn("[update-password] signOut warning:", err);
       });
 
       setTimeout(() => router.push("/auth/signin"), 2500);
     } catch (error: unknown) {
       const msg =
-        error instanceof Error ? error.message : "Failed to update password";
+        error instanceof Error
+          ? error.name === "AbortError"
+            ? "This is taking unusually long. If you don't see a confirmation shortly, check your email — the password may have already changed."
+            : error.message
+          : "Failed to update password";
       console.error("[update-password] submit error:", error);
       toast.error(msg);
     } finally {
-      // Always runs, even on timeout — this is what stops the button
-      // from spinning forever.
+      // Always runs, even on timeout/abort — this is what stops the
+      // button from spinning forever.
       setSubmitting(false);
     }
   };

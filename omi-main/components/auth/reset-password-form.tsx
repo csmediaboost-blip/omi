@@ -3,6 +3,12 @@
 // - Wrapped in a real <form> (Enter-to-submit works, no dead-click surface)
 // - Requires <Toaster /> in root layout (see note at bottom)
 // - Adds defensive logging so failures are visible instead of silently hanging
+// - NEW: supabase.auth.resetPasswordForEmail() had no timeout. If that call
+//   (or a backend hook chained after it, e.g. the Resend email send) stalls,
+//   the awaited promise never settles, so `loading` never flips back to
+//   false and the button spins forever — same root cause as the
+//   update-password hang. Fixed by racing the call against a local 10s
+//   timeout, scoped to just this component.
 
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -12,6 +18,17 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { Mail, ArrowLeft, CheckCircle } from "lucide-react";
+
+// Wrap any promise with a timeout so a stalled network request always
+// resolves into a catchable error instead of hanging the UI forever.
+// Scoped locally to this component — does not touch the global supabase
+// client config, so it can't affect anything else (e.g. file uploads).
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  const timeoutPromise = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(message)), ms),
+  );
+  return Promise.race<T>([promise, timeoutPromise]);
+}
 
 export function ResetPasswordForm() {
   const [loading, setLoading] = useState(false);
@@ -28,11 +45,12 @@ export function ResetPasswordForm() {
   const onSubmit = async (data: PasswordResetData) => {
     setLoading(true);
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(
-        data.email,
-        {
+      const { error } = await withTimeout(
+        supabase.auth.resetPasswordForEmail(data.email, {
           redirectTo: `${window.location.origin}/auth/update-password`,
-        }
+        }),
+        10_000,
+        "This is taking unusually long. If you don't see the email shortly, check your spam folder or try again in a moment — there may be a slow email hook on the backend.",
       );
 
       if (error) {
@@ -46,6 +64,8 @@ export function ResetPasswordForm() {
       console.error("Password reset error:", error);
       toast.error(error?.message || "Failed to send reset email");
     } finally {
+      // Always runs, even on timeout — this is what stops the button
+      // from spinning forever.
       setLoading(false);
     }
   };
@@ -187,4 +207,12 @@ export default ResetPasswordForm;
     </body>
 
   Without it, toast.success()/toast.error() are silent no-ops.
+
+  PERFORMANCE NOTE: if the timeout above fires regularly (not just under
+  bad network conditions), check for a slow Postgres trigger / webhook /
+  Supabase Auth hook attached to password reset requests (e.g. one that
+  calls out to Resend synchronously). That would explain "the email
+  actually arrives but the UI still times out" — the request succeeds,
+  but the client is waiting on a slow hook chained after it. Fire-and-
+  forget that hook (queue/async) on the backend instead.
 */

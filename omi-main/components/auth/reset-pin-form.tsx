@@ -1,14 +1,17 @@
 "use client";
-// components/auth/reset-pin-form.tsx — FIXED (forgot-PIN flow)
+// components/auth/reset-pin-form.tsx — FIXED (v2: routes through our own API)
 //
-// KEY CHANGE: no longer asks for the current PIN. A user who forgot
-// their PIN cannot supply it — that was the reported bug. Identity is now
-// verified by re-authenticating with the account password instead
-// (swap for an email-OTP step if you'd rather not require the password).
-//
-// If you ALSO need a "change PIN while logged in and PIN is known" flow,
-// keep a separate component for that (your original version) and use
-// this one only behind "Forgot PIN?".
+// HISTORY:
+// v1 asked for the account password instead of the (forgotten) current
+// PIN, and raced the Supabase calls against a client-side timeout.
+// v2: the reauth + PIN write now goes through our own same-origin API
+// route (/api/auth/update-pin) instead of hitting *.supabase.co directly
+// from the browser. This sidesteps in-app-browser/WebView environments
+// (e.g. links opened inside Facebook/Messenger) that can block or
+// swallow the *response* of a cross-origin request even though the
+// request itself lands — which is what produced "it changed but the UI
+// never stopped spinning." It also moves the pin_hash write to the
+// service-role key on the server instead of anon key + RLS.
 
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -36,13 +39,19 @@ const ResetPinSchema = z
 
 type ResetPinData = z.infer<typeof ResetPinSchema>;
 
-async function hashPin(pin: string, userId: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(pin + userId);
-  const hashBuffer = await window.crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+// Fetch with a hard client-side timeout via AbortController.
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  ms: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export function ResetPinForm() {
@@ -82,45 +91,45 @@ export function ResetPinForm() {
         data: { session },
         error: sessionErr,
       } = await supabase.auth.getSession();
-      if (sessionErr || !session?.user || !session.user.email) {
+
+      if (sessionErr || !session?.access_token) {
         throw new Error("Session expired. Please sign in again.");
       }
 
-      // Re-authenticate with the account password. This is the identity
-      // check that replaces "enter your current PIN" — it works even if
-      // the user has completely forgotten their PIN.
-      const { error: reauthErr } = await supabase.auth.signInWithPassword({
-        email: session.user.email,
-        password: data.password,
-      });
-      if (reauthErr) {
-        throw new Error("Password is incorrect.");
-      }
+      // Same-origin call to our own API route instead of hitting
+      // *.supabase.co directly from the client — see comment at top.
+      const res = await fetchWithTimeout(
+        "/api/auth/update-pin",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            access_token: session.access_token,
+            password: data.password,
+            newPin: data.newPin,
+          }),
+        },
+        15_000,
+      );
 
-      const newHash = await hashPin(data.newPin, session.user.id);
+      const result = await res.json().catch(() => ({}));
 
-      const { error: updateError } = await supabase
-        .from("users")
-        .update({
-          pin_hash: newHash,
-          pin_attempts: 0,
-          pin_locked: false,
-        })
-        .eq("id", session.user.id);
-
-      if (updateError) {
-        console.error("PIN update error:", updateError);
-        throw new Error(
-          updateError.message || "Failed to update PIN. Please try again."
-        );
+      if (!res.ok) {
+        throw new Error(result?.error || "Failed to update PIN");
       }
 
       toast.success("PIN updated successfully!");
       router.push("/dashboard");
     } catch (error: any) {
+      const msg =
+        error?.name === "AbortError"
+          ? "This is taking unusually long. If you don't see a confirmation shortly, your PIN may have already changed — try signing in with the new one."
+          : error?.message || "Failed to update PIN";
       console.error("Reset PIN error:", error);
-      toast.error(error?.message || "Failed to update PIN");
+      toast.error(msg);
     } finally {
+      // Always runs, even on timeout/abort — this is what stops the
+      // button from spinning forever.
       setLoading(false);
     }
   };
@@ -275,15 +284,3 @@ export function ResetPinForm() {
 }
 
 export default ResetPinForm;
-
-/*
-  SECURITY NOTE: pin_hash comparisons/updates going through the browser
-  Supabase client (as in the original file) mean the anon key + RLS are
-  your only protection. For real security, move PIN verification and
-  update into a Supabase Edge Function (service-role key, never exposed
-  to the client) and call that function from here via fetch/invoke
-  instead of touching the `users` table directly. Also confirm your RLS
-  policy does NOT allow SELECT on pin_hash from the client — the old
-  code depended on being able to read it, which a correctly locked-down
-  policy would silently block.
-*/
