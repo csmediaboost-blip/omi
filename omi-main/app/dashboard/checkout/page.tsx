@@ -255,7 +255,7 @@ function Receipt({data,onClose}:{data:{txId:string;purchaseType:PurchaseType|"ap
     :[["Transaction ID",data.txId],["Date & Time",data.date],["Node Allocated",data.nodeName],["GPU Model",data.gpu],["VRAM",data.vram],["Payment Model",isContract?`Contract — ${contractDurLabel}`:"Pay-As-You-Go"],["Mining Session",isContract?contractDurLabel:periodLabel],["Amount Paid",`$${data.amount.toFixed(2)}${data.discounted?" (Crypto discount)":""}`],["Payment Method",data.payMethod],...(data.walletAddress?[["Sender Wallet",data.walletAddress]]:[]),["Country",data.country],["Status","Mining Active"]];
   return(
     <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="max-w-md w-full rounded-2xl overflow-hidden" style={{background:"rgb(10,16,28)",border:"1px solid rgba(255,255,255,0.1)"}} onClick={e=>e.stopPropagation()}>
+      <div className="max-w-md w-full rounded-2xl overflow-hidden" style={{background:"rgb(10,16,28)",border:"1px solid rgba(255,255,255,0.1)"}} onClick={(e:React.MouseEvent)=>e.stopPropagation()}>
         <div ref={ref}>
           <div className="p-6 text-center" style={{background:"linear-gradient(135deg,rgba(16,185,129,0.15),rgba(6,12,24,0.9))"}}>
             <div className="w-12 h-12 rounded-full bg-emerald-500/20 border-2 border-emerald-500/40 flex items-center justify-center mx-auto mb-3"><CheckCircle size={22} className="text-emerald-400"/></div>
@@ -280,7 +280,7 @@ function Receipt({data,onClose}:{data:{txId:string;purchaseType:PurchaseType|"ap
   );
 }
 
-function OrderSummary({purchaseType,nodeName,gpu,vram,itype,paymentModel,contractMonths,price,licenseType,effectivePrice,cryptoDiscount,payMethod,miningPeriod}:{purchaseType:PurchaseType;nodeName:string;gpu:string;vram:string;itype:string;paymentModel:string;contractLabel:string;contractMonths:number;price:number;licenseType:string;effectivePrice:number;cryptoDiscount:number;payMethod:PayMethod;miningPeriod:string;}){
+function OrderSummary({purchaseType,nodeName,gpu,vram,itype,paymentModel,contractLabel,contractMonths,price,licenseType,effectivePrice,cryptoDiscount,payMethod,miningPeriod}:{purchaseType:PurchaseType;nodeName:string;gpu:string;vram:string;itype:string;paymentModel:string;contractLabel:string;contractMonths:number;price:number;licenseType:string;effectivePrice:number;cryptoDiscount:number;payMethod:PayMethod;miningPeriod:string;}){
   const isContract=paymentModel==="contract";
   const contractDurLabel=contractMonths===6?"6 months":contractMonths===12?"12 months":`${contractMonths} months`;
   const licConfig=LICENSE_CONFIGS[licenseType]??LICENSE_CONFIGS.operator_license;
@@ -387,7 +387,7 @@ function CheckoutInner(){
   useEffect(()=>{
     let cancelled=false;
     // Auth — fires immediately, page already shows spinner
-    supabase.auth.getUser().then(({data:{user}})=>{
+    supabase.auth.getUser().then(({data:{user}}:{data:{user:User|null}})=>{
       if(cancelled)return;
       if(!user){router.push("/auth/signin");return;}
       setUserId(user.id);
@@ -421,7 +421,7 @@ function CheckoutInner(){
           if(updated.completed>=updated.installmentsNGN.length){
             sessionStorage.removeItem("korapay_split_checkout");
             setTransactionId(r);setActualAmountPaid(updated.totalUSD);setConfirmedPayMethod("bank_transfer");
-            supabase.auth.getUser().then(async({data:{user}})=>{if(!user)return;try{const id=await createMiningAllocation({...updated.planData,userId:user.id,transactionRef:updated.references.join(",")} as any);if(id)setAllocationId(id);}catch{}});
+            supabase.auth.getUser().then(async({data:{user}}:{data:{user:User|null}})=>{if(!user)return;try{const id=await createMiningAllocation({...updated.planData,userId:user.id,transactionRef:updated.references.join(",")} as any);if(id)setAllocationId(id);}catch{}});
             setStep("success");
           }else{sessionStorage.setItem("korapay_split_checkout",JSON.stringify(updated));setSplitState(updated);setStep("details");}
         }catch{sessionStorage.removeItem("korapay_split_checkout");setStep("failed");setErrorMsg("Payment session error. Please contact support.");}
@@ -444,7 +444,7 @@ function CheckoutInner(){
           const cd=JSON.parse(saved);
           setActualAmountPaid(cd.originalPrice??cd.amount??price);setConfirmedPayMethod("bank_transfer");
           if(cd.countryCode){setCountryCode(cd.countryCode);setCountryName(cd.countryName||"");}
-          supabase.auth.getUser().then(async({data:{user}})=>{if(!user)return;try{const id=await createMiningAllocation({...cd,userId:user.id,transactionRef:r} as any);if(id)setAllocationId(id);}catch{}});
+          supabase.auth.getUser().then(async({data:{user}}:{data:{user:User|null}})=>{if(!user)return;try{const id=await createMiningAllocation({...cd,userId:user.id,transactionRef:r} as any);if(id)setAllocationId(id);}catch{}});
         }catch{}
       }
     }else if(s==="declined"){
@@ -457,7 +457,7 @@ function CheckoutInner(){
       setStep("verifying");
       pollForPaymentConfirmation(r).then(confirmed=>{
         if(confirmed){
-          if(savedData){sessionStorage.removeItem("korapay_pending_checkout");setActualAmountPaid(savedData.originalPrice??savedData.amount??price);setConfirmedPayMethod("bank_transfer");supabase.auth.getUser().then(async({data:{user}})=>{if(!user)return;try{const id=await createMiningAllocation({...savedData,userId:user.id,transactionRef:r} as any);if(id)setAllocationId(id);}catch{}});}
+          if(savedData){sessionStorage.removeItem("korapay_pending_checkout");setActualAmountPaid(savedData.originalPrice??savedData.amount??price);setConfirmedPayMethod("bank_transfer");supabase.auth.getUser().then(async({data:{user}}:{data:{user:User|null}})=>{if(!user)return;try{const id=await createMiningAllocation({...savedData,userId:user.id,transactionRef:r} as any);if(id)setAllocationId(id);}catch{}});}
           setStep("success");
         }else{sessionStorage.removeItem("korapay_pending_checkout");setStep("declined");}
       });
@@ -616,7 +616,7 @@ function CheckoutInner(){
         <div className="max-w-[960px] mx-auto">
           <div className="text-center mb-8"><h1 className="text-3xl font-black text-white mb-2">Select Your Country</h1><p className="text-slate-400">Determines your available payment methods</p></div>
           <div className="rounded-2xl p-8" style={{background:"rgba(22,28,36,0.95)",border:"1px solid rgba(255,255,255,0.08)"}}>
-            <div className="mb-6 relative"><Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/><input type="text" placeholder="Search countries…" value={countrySearch} onChange={e=>setCountrySearch(e.target.value)} className="w-full pl-10 pr-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none"/></div>
+            <div className="mb-6 relative"><Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/><input type="text" placeholder="Search countries…" value={countrySearch} onChange={(e:React.ChangeEvent<HTMLInputElement>)=>setCountrySearch(e.target.value)} className="w-full pl-10 pr-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none"/></div>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-[400px] overflow-y-auto">
               {filteredCountries.map(c=>(
                 <button key={c.code} onClick={()=>{setCountryCode(c.code);setCountryName(c.name);}} className={`p-3 rounded-lg text-left transition-all border ${countryCode===c.code?"bg-emerald-600/20 border-emerald-500 text-emerald-100":"bg-black/20 border-slate-700 text-slate-300 hover:border-slate-600"}`}>
@@ -703,7 +703,7 @@ function CheckoutInner(){
                           ))}
                         </div>
                       </div>}
-                    <div><label className="block text-white text-sm font-bold mb-1.5">Your Wallet Address <span className="text-slate-500 font-normal text-xs">(optional)</span></label><input type="text" placeholder="Paste your sending wallet address" value={twSenderAddress} onChange={e=>setTwSenderAddress(e.target.value)} className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 font-mono text-xs focus:outline-none focus:border-violet-500"/></div>
+                    <div><label className="block text-white text-sm font-bold mb-1.5">Your Wallet Address <span className="text-slate-500 font-normal text-xs">(optional)</span></label><input type="text" placeholder="Paste your sending wallet address" value={twSenderAddress} onChange={(e:React.ChangeEvent<HTMLInputElement>)=>setTwSenderAddress(e.target.value)} className="w-full px-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 font-mono text-xs focus:outline-none focus:border-violet-500"/></div>
                     <label className="flex items-start gap-2.5 cursor-pointer">
                       <div onClick={()=>setTwConfirmed(v=>!v)} className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 ${twConfirmed?"bg-violet-500 border-violet-500":"border-slate-600"}`}>{twConfirmed&&<Check size={12} className="text-white"/>}</div>
                       <p className="text-slate-300 text-xs leading-relaxed">I understand I must send exactly <strong className="text-white">{discountedPrice.toFixed(2)} USDT</strong> on the <strong className="text-white">{cryptoNetwork}</strong> network.</p>
