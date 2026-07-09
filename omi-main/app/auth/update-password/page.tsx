@@ -187,7 +187,7 @@ export default function UpdatePasswordPage() {
 
       // Sign out locally (clears the recovery session from this device).
       // Non-fatal if it fails — the password is already updated.
-      supabase.auth.signOut().catch((err) => {
+      supabase.auth.signOut().catch((err: unknown) => {
         console.warn("[update-password] signOut warning:", err);
       });
 
