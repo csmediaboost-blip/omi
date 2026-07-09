@@ -17,6 +17,7 @@ import { PasswordResetSchema, PasswordResetData } from "@/lib/validators";
 import { toast } from "sonner";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import type { AuthError } from "@supabase/supabase-js";
 import { Mail, ArrowLeft, CheckCircle } from "lucide-react";
 
 // Wrap any promise with a timeout so a stalled network request always
@@ -45,7 +46,10 @@ export function ResetPasswordForm() {
   const onSubmit = async (data: PasswordResetData) => {
     setLoading(true);
     try {
-      const { error } = await withTimeout(
+      const { error } = await withTimeout<{
+        data: {} | null;
+        error: AuthError | null;
+      }>(
         supabase.auth.resetPasswordForEmail(data.email, {
           redirectTo: `${window.location.origin}/auth/update-password`,
         }),
