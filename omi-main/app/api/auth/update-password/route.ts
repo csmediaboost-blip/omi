@@ -59,7 +59,10 @@ export async function POST(req: NextRequest) {
     let userData: { user: User | null };
     let userErr: AuthError | null;
     try {
-      ({ data: userData, error: userErr } = await withTimeout(
+      ({ data: userData, error: userErr } = await withTimeout<{
+        data: { user: User | null };
+        error: AuthError | null;
+      }>(
         supabaseAdmin.auth.getUser(access_token),
         12_000,
         "TIMEOUT_GET_USER",
@@ -81,7 +84,10 @@ export async function POST(req: NextRequest) {
 
     let updateErr: AuthError | null;
     try {
-      ({ error: updateErr } = await withTimeout(
+      ({ error: updateErr } = await withTimeout<{
+        data: unknown;
+        error: AuthError | null;
+      }>(
         supabaseAdmin.auth.admin.updateUserById(userData.user.id, { password }),
         12_000,
         "TIMEOUT_UPDATE_USER",

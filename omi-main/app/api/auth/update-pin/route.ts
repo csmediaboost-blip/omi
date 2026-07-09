@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import type { AuthError, User } from "@supabase/supabase-js";
+import type { AuthError, User, PostgrestError } from "@supabase/supabase-js";
 import crypto from "crypto";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 
@@ -69,7 +69,10 @@ export async function POST(req: NextRequest) {
     let userData: { user: User | null };
     let userErr: AuthError | null;
     try {
-      ({ data: userData, error: userErr } = await withTimeout(
+      ({ data: userData, error: userErr } = await withTimeout<{
+        data: { user: User | null };
+        error: AuthError | null;
+      }>(
         supabaseAdmin.auth.getUser(access_token),
         12_000,
         "TIMEOUT_GET_USER",
@@ -94,7 +97,10 @@ export async function POST(req: NextRequest) {
     // Identity check: re-verify the account password server-side.
     let reauthErr: AuthError | null;
     try {
-      ({ error: reauthErr } = await withTimeout(
+      ({ error: reauthErr } = await withTimeout<{
+        data: unknown;
+        error: AuthError | null;
+      }>(
         supabaseAnon.auth.signInWithPassword({ email: user.email!, password }),
         12_000,
         "TIMEOUT_REAUTH",
@@ -116,9 +122,11 @@ export async function POST(req: NextRequest) {
 
     const newHash = hashPin(newPin, user.id);
 
-    let updateErr: { message?: string } | null;
+    let updateErr: PostgrestError | null;
     try {
-      ({ error: updateErr } = await withTimeout(
+      ({ error: updateErr } = await withTimeout<{
+        error: PostgrestError | null;
+      }>(
         supabaseAdmin
           .from("users")
           .update({ pin_hash: newHash, pin_attempts: 0, pin_locked: false })
