@@ -8,6 +8,17 @@
 //  FIX-5  purchaseType detection is robust — checks metadata AND gateway field fallback
 //  FIX-6  processReferralCommission now receives txData.node_key as 4th arg
 //         so purchased_node is correctly recorded in referral_commissions table
+//  FIX-7  NEW: on any confirmed payment, stamp users.license_paid = true (and
+//         license_activated_at/license_expires_at for license purchases) on
+//         the PAYING user's own row. This was never being written anywhere —
+//         operator_licenses/node_allocations got the activation record, but
+//         the users table (which the referral network page reads to decide
+//         PAID vs PENDING) was never updated, so every referral stayed
+//         "pending" forever even after actually paying.
+//         ASSUMPTION: "made a payment" = any confirmed purchase (license OR
+//         GPU mining/node), not license purchases only. If you want referral
+//         credit to require a *license* specifically, gate this behind
+//         `purchaseType === "license"` instead — see comment at FIX-7 below.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createClient } from "@supabase/supabase-js";
@@ -169,6 +180,45 @@ export async function POST(req: NextRequest) {
         updated_at: now,
       })
       .eq("gateway_reference", reference);
+
+    // ── 1b. FIX-7: Stamp the PAYING user's own users row as paid ───────────────
+    // This is what app/network/page.tsx reads (`license_paid`) to decide
+    // whether a referral counts toward the referrer's "Referrals" stat and
+    // prize progress. Nothing was writing this before, so every referral
+    // stayed PENDING forever even after the referred user paid.
+    try {
+      const userUpdate: Record<string, unknown> = {
+        license_paid: true,
+      };
+      // Only stamp license activation/expiry fields for actual license
+      // purchases — GPU mining purchases still flip license_paid=true
+      // (counts as "made a payment") but shouldn't imply a license exists.
+      if (purchaseType === "license") {
+        const licenseExpiresAt = new Date();
+        licenseExpiresAt.setFullYear(licenseExpiresAt.getFullYear() + 1);
+        userUpdate.license_activated_at = now;
+        userUpdate.license_expires_at = licenseExpiresAt.toISOString();
+      }
+
+      const { error: userUpdateErr } = await supabase
+        .from("users")
+        .update(userUpdate)
+        .eq("id", txData.user_id);
+
+      if (userUpdateErr) {
+        console.error(
+          "[webhook] users.license_paid update failed:",
+          userUpdateErr.message,
+        );
+      } else {
+        console.log(
+          "[webhook] ✅ users.license_paid=true for user:",
+          txData.user_id?.slice(0, 8),
+        );
+      }
+    } catch (e: any) {
+      console.error("[webhook] users.license_paid update error:", e.message);
+    }
 
     // ── 2. Credit referral commissions ────────────────────────────────────────
     // FIX-6: pass txData.node_key as 4th arg so purchased_node is recorded
