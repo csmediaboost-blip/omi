@@ -887,37 +887,47 @@ export default function NetworkPage() {
     // referrer's UUID), every query below will silently match zero rows
     // without ever throwing — worth double-checking the column's type and
     // what value actually gets written into it at signup.
+    // NOTE: user.id is a UUID. If `referred_by` on the users table is a
+    // different type (e.g. text storing the referral CODE instead of the
+    // referrer's UUID), every query below will silently match zero rows
+    // without ever throwing — worth double-checking the column's type and
+    // what value actually gets written into it at signup.
+    //
+    // FIXED: the previous select referenced `tier` and `node_expiry_date`,
+    // neither of which exist on the users table (confirmed via
+    // information_schema.columns — this was throwing Postgres error 42703
+    // "undefined column" on every load, which is why this list was always
+    // empty). Swapped in the real columns: `license_paid` (whether they
+    // actually paid — used below to count only paying referrals, not
+    // everyone who merely signed up) and `license_expires_at`.
     const { data: refs, error: refsErr } = await supabase
       .from("users")
-      .select("id,full_name,tier,node_expiry_date,created_at")
+      .select("id,full_name,license_paid,license_expires_at,created_at")
       .eq("referred_by", user.id)
       .order("created_at", { ascending: false });
     if (refsErr) {
-      // This is the query behind the "Referrals" count and "My Referrals"
-      // list. If this logs an error while monthlyCount below still shows
-      // a nonzero number, that confirms this specific select is failing
-      // (bad column name, RLS, or a type mismatch on `referred_by`) while
-      // the head-count-only query below is unaffected.
       console.error("[network] referrals fetch error:", refsErr);
     }
     setReferrals(refs || []);
 
-    const now = new Date();
-    const active = (refs || []).filter(
-      (r: { node_expiry_date: string | null }) =>
-        r.node_expiry_date && new Date(r.node_expiry_date) > now,
+    // Only referrals who actually paid count toward "active" / the
+    // Referrals stat and prize progress — not everyone who just registered.
+    const paid = (refs || []).filter(
+      (r: { license_paid: boolean | null }) => r.license_paid === true,
     );
-    setActiveCount(active.length);
+    setActiveCount(paid.length);
 
     const monthStart = new Date(
-      now.getFullYear(),
-      now.getMonth(),
+      new Date().getFullYear(),
+      new Date().getMonth(),
       1,
     ).toISOString();
+    // Prize-eligible count: paying referrals created this month only.
     const { count: mCount, error: mCountErr } = await supabase
       .from("users")
       .select("id", { count: "exact", head: true })
       .eq("referred_by", user.id)
+      .eq("license_paid", true)
       .gte("created_at", monthStart);
     if (mCountErr) {
       console.error("[network] monthly count error:", mCountErr);
@@ -1282,7 +1292,7 @@ export default function NetworkPage() {
               value: `$${weeklyEarned.toFixed(2)}`,
               color: "#f59e0b",
             },
-            { label: "Referrals", value: referrals.length, color: "#60a5fa" },
+            { label: "Referrals", value: activeCount, color: "#60a5fa" },
           ].map(({ label, value, color }) => (
             <div
               key={label}
@@ -1478,7 +1488,7 @@ export default function NetworkPage() {
                   }}
                 >
                   <div className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />{" "}
-                  {activeCount} active
+                  {activeCount} paid
                 </span>
               )}
             </div>
@@ -1513,9 +1523,7 @@ export default function NetworkPage() {
                   style={{ borderColor: cardBorder }}
                 >
                   {referrals.map((r, i) => {
-                    const isActive =
-                      r.node_expiry_date &&
-                      new Date(r.node_expiry_date) > new Date();
+                    const isPaid = r.license_paid === true;
                     return (
                       <div
                         key={r.id}
@@ -1542,7 +1550,6 @@ export default function NetworkPage() {
                             className="text-[10px]"
                             style={{ color: "rgba(147,197,253,0.3)" }}
                           >
-                            {r.tier || "free"} ·{" "}
                             {new Date(r.created_at).toLocaleDateString("en", {
                               month: "short",
                               day: "numeric",
@@ -1552,7 +1559,7 @@ export default function NetworkPage() {
                         <span
                           className="text-[9px] font-black px-2 py-1 rounded-full"
                           style={
-                            isActive
+                            isPaid
                               ? {
                                   color: "#34d399",
                                   background: "rgba(16,185,129,0.1)",
@@ -1564,7 +1571,7 @@ export default function NetworkPage() {
                                 }
                           }
                         >
-                          {isActive ? "ACTIVE" : "PENDING"}
+                          {isPaid ? "PAID" : "PENDING"}
                         </span>
                       </div>
                     );
