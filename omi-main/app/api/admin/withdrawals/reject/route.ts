@@ -30,8 +30,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ error: "Forbidden." }, { status: 403 });
     }
 
-    // 2. Parse body
-    const { withdrawal_id, reason } = await req.json().catch(() => ({}));
+    // 2. Parse body — NEW: added reset_payout field
+    const { withdrawal_id, reason, reset_payout = false } = await req.json().catch(() => ({}));
     if (!withdrawal_id) {
       return NextResponse.json({ error: "withdrawal_id is required." }, { status: 400 });
     }
@@ -114,19 +114,46 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       })
       .eq("id", withdrawal_id);
 
-    // 8. Notify user with reason
+    // 8. NEW: Reset payout account if admin checked the option
+    if (reset_payout) {
+      await admin
+        .from("users")
+        .update({
+          payout_registered: false,
+          payout_account_name: null,
+          payout_account_number: null,
+          payout_bank_name: null,
+          payout_bank_code: null,
+          payout_kyc_match: false,
+          payout_gateway: null,
+          payout_currency: null,
+          payout_account_type: null,
+          payout_locked: false,
+          payout_change_requested: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", wd.user_id);
+    }
+
+    // 9. Notify user — NEW: different message when payout is reset
+    const notifMessage = reset_payout
+      ? `Your withdrawal of $${refundAmount.toFixed(2)} was rejected and your balance has been refunded. Reason: ${reason.trim()}. Your payout account has been reset — please go to Dashboard → Verification → Payout Setup to re-enter your correct bank account details before withdrawing again.`
+      : `Your withdrawal of $${refundAmount.toFixed(2)} was rejected. Reason: ${reason.trim()}. Your balance has been refunded.`;
+
     await admin.from("user_notifications").insert({
       user_id: wd.user_id,
       type: "withdrawal_rejected",
-      title: "Withdrawal Rejected",
-      message: `Your withdrawal of $${refundAmount.toFixed(2)} was rejected. Reason: ${reason.trim()}. Your balance has been refunded.`,
+      title: reset_payout
+        ? "⚠️ Withdrawal Rejected — Update Payout Account"
+        : "Withdrawal Rejected",
+      message: notifMessage,
       is_read: false,
       created_at: new Date().toISOString(),
     });
 
     return NextResponse.json({
       success: true,
-      message: `Withdrawal rejected. $${refundAmount.toFixed(2)} refunded to user.`,
+      message: `Withdrawal rejected. $${refundAmount.toFixed(2)} refunded to user.${reset_payout ? " Payout account reset." : ""}`,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Unknown error";

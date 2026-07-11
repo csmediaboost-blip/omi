@@ -1,5 +1,8 @@
 "use client";
 // app/admin/withdrawals/page.tsx
+// UPDATED: Reject dialog now has a "Reset payout account" checkbox.
+// When checked, the reject API clears the user's payout account details
+// so they can re-enter correct information before withdrawing again.
 
 import { useEffect, useState, useCallback } from "react";
 import { Input } from "@/components/ui/input";
@@ -66,6 +69,7 @@ export default function WithdrawalQueuePage() {
   const [selected, setSelected] = useState<Withdrawal | null>(null);
   const [actionType, setActionType] = useState<ActionType>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [resetPayout, setResetPayout] = useState(true); // NEW: default ON
   const [korapayRef, setKorapayRef] = useState("");
   const [acting, setActing] = useState(false);
 
@@ -128,6 +132,7 @@ export default function WithdrawalQueuePage() {
       const result = await callApi("/api/admin/withdrawals/reject", {
         withdrawal_id: selected.id,
         reason: rejectReason.trim(),
+        reset_payout: resetPayout, // NEW: pass reset flag
       });
       if (result.ok) {
         toast.success(result.message ?? "Rejected and refunded.");
@@ -158,6 +163,7 @@ export default function WithdrawalQueuePage() {
     setActionType(null);
     setRejectReason("");
     setKorapayRef("");
+    setResetPayout(true); // reset back to default ON
   };
 
   const isPayable = (s: string) => ["queued", "processing"].includes(s);
@@ -270,7 +276,7 @@ export default function WithdrawalQueuePage() {
                               ✓ Mark Paid
                             </button>
                             <button
-                              onClick={() => { setSelected(item); setActionType("reject"); setRejectReason(""); }}
+                              onClick={() => { setSelected(item); setActionType("reject"); setRejectReason(""); setResetPayout(true); }}
                               className="px-2 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded font-medium"
                             >
                               Reject
@@ -309,14 +315,14 @@ export default function WithdrawalQueuePage() {
               {/* Detail grid */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-2 bg-slate-50 rounded-lg p-3 text-xs border border-slate-200">
                 {([
-                  ["User", <span>{selected.user_full_name}<br /><span className="text-slate-400">{selected.user_email}</span></span>],
-                  ["Gross", <span>${(selected.amount_gross ?? selected.amount ?? 0).toFixed(2)}</span>],
-                  ["Fee", <span>${(selected.amount_fee ?? 0).toFixed(2)}</span>],
-                  ["Net (to pay)", <span className="font-semibold text-slate-900">${(selected.amount_net ?? selected.amount ?? 0).toFixed(2)} <span className="text-slate-400">(≈ ₦{toNgn(selected.amount_net ?? selected.amount ?? 0)})</span></span>],
+                  ["User", <span key="user">{selected.user_full_name}<br /><span className="text-slate-400">{selected.user_email}</span></span>],
+                  ["Gross", <span key="gross">${(selected.amount_gross ?? selected.amount ?? 0).toFixed(2)}</span>],
+                  ["Fee", <span key="fee">${(selected.amount_fee ?? 0).toFixed(2)}</span>],
+                  ["Net (to pay)", <span key="net" className="font-semibold text-slate-900">${(selected.amount_net ?? selected.amount ?? 0).toFixed(2)} <span className="text-slate-400">(≈ ₦{toNgn(selected.amount_net ?? selected.amount ?? 0)})</span></span>],
                   ["Account Name", selected.payout_account_name || "—"],
                   ["Bank", selected.payout_bank_name || "—"],
-                  ["Account No.", <span className="font-mono">{selected.wallet_address || "—"}</span>],
-                  ["Status", <StatusBadge status={selected.status} />],
+                  ["Account No.", <span key="acct" className="font-mono">{selected.wallet_address || "—"}</span>],
+                  ["Status", <StatusBadge key="status" status={selected.status} />],
                 ] as [string, React.ReactNode][]).map(([label, value], i) => (
                   <>
                     <div key={`l-${i}`} className="text-slate-500">{label}</div>
@@ -360,22 +366,71 @@ export default function WithdrawalQueuePage() {
               {actionType === "reject" && (
                 <div className="space-y-3">
                   <div>
-                    <label className="text-sm font-medium text-red-600">Rejection reason <span className="text-red-500">*</span></label>
+                    <label className="text-sm font-medium text-red-600">
+                      Rejection reason <span className="text-red-500">*</span>
+                    </label>
                     <Input
                       className="mt-1 bg-white border-red-300 text-slate-800 placeholder:text-slate-400"
-                      placeholder="e.g. KYC name mismatch, suspicious activity…"
+                      placeholder="e.g. Account name doesn't match KYC, wrong account number…"
                       value={rejectReason}
                       onChange={(e) => setRejectReason(e.target.value)}
                     />
-                    <p className="text-xs text-slate-400 mt-1">The user's balance will be refunded automatically.</p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      The user's balance will be refunded automatically.
+                    </p>
                   </div>
+
+                  {/* ── NEW: Reset payout account checkbox ── */}
+                  <div
+                    className={`rounded-xl p-3 border cursor-pointer transition-all ${
+                      resetPayout
+                        ? "bg-orange-50 border-orange-300"
+                        : "bg-slate-50 border-slate-200 hover:border-slate-300"
+                    }`}
+                    onClick={() => setResetPayout(v => !v)}
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className={`w-5 h-5 rounded border-2 flex items-center justify-center shrink-0 mt-0.5 transition-all ${resetPayout ? "bg-orange-500 border-orange-500" : "border-slate-400"}`}>
+                        {resetPayout && (
+                          <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                      </div>
+                      <div>
+                        <p className={`text-sm font-semibold ${resetPayout ? "text-orange-700" : "text-slate-600"}`}>
+                          Reset user's payout account
+                        </p>
+                        <p className={`text-xs mt-0.5 leading-relaxed ${resetPayout ? "text-orange-600" : "text-slate-400"}`}>
+                          Clears their saved bank account details so they are forced to re-enter correct information before withdrawing again. Use this when the account name or number is wrong.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {resetPayout && (
+                    <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+                      <p className="font-semibold mb-1">⚠️ What will happen:</p>
+                      <ul className="space-y-1 list-disc list-inside text-amber-700">
+                        <li>Withdrawal rejected + balance refunded</li>
+                        <li>Payout account fully cleared</li>
+                        <li>User must go to Verification → Payout Setup to add correct details</li>
+                        <li>User notified via in-app notification</li>
+                      </ul>
+                    </div>
+                  )}
+
                   <div className="flex gap-2">
                     <button
                       onClick={handleReject}
                       disabled={acting || !rejectReason.trim()}
                       className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white font-semibold rounded-lg disabled:opacity-50 flex items-center justify-center gap-2"
                     >
-                      {acting ? <><Spinner className="w-4 h-4" /> Rejecting…</> : "✗ Reject & Refund"}
+                      {acting
+                        ? <><Spinner className="w-4 h-4" /> Rejecting…</>
+                        : resetPayout
+                          ? "✗ Reject & Reset Payout Account"
+                          : "✗ Reject & Refund"}
                     </button>
                     <button onClick={closeDialog} disabled={acting} className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">
                       Cancel
