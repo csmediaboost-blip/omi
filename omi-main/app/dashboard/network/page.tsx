@@ -841,21 +841,27 @@ export default function NetworkPage() {
     } = await supabase.auth.getUser();
     if (!user) return;
 
-    const { data: profile } = await supabase
+    const { data: profile, error: profileErr } = await supabase
       .from("users")
       .select(
         "referral_code,referral_earnings,delivery_details_submitted,country,full_name,phone,delivery_address,city",
       )
       .eq("id", user.id)
       .single();
+    if (profileErr) {
+      console.error("[network] profile fetch error:", profileErr);
+    }
 
     let code = profile?.referral_code;
     if (!code) {
       code = `REF-${user.id.slice(0, 8).toUpperCase()}`;
-      await supabase
+      const { error: codeErr } = await supabase
         .from("users")
         .update({ referral_code: code })
         .eq("id", user.id);
+      if (codeErr) {
+        console.error("[network] referral_code write error:", codeErr);
+      }
     }
     setReferralCode(code);
     setTotalEarned(profile?.referral_earnings || 0);
@@ -876,11 +882,24 @@ export default function NetworkPage() {
       setSavedAddress(dbAddr);
     }
 
-    const { data: refs } = await supabase
+    // NOTE: user.id is a UUID. If `referred_by` on the users table is a
+    // different type (e.g. text storing the referral CODE instead of the
+    // referrer's UUID), every query below will silently match zero rows
+    // without ever throwing — worth double-checking the column's type and
+    // what value actually gets written into it at signup.
+    const { data: refs, error: refsErr } = await supabase
       .from("users")
       .select("id,full_name,tier,node_expiry_date,created_at")
       .eq("referred_by", user.id)
       .order("created_at", { ascending: false });
+    if (refsErr) {
+      // This is the query behind the "Referrals" count and "My Referrals"
+      // list. If this logs an error while monthlyCount below still shows
+      // a nonzero number, that confirms this specific select is failing
+      // (bad column name, RLS, or a type mismatch on `referred_by`) while
+      // the head-count-only query below is unaffected.
+      console.error("[network] referrals fetch error:", refsErr);
+    }
     setReferrals(refs || []);
 
     const now = new Date();
@@ -895,19 +914,25 @@ export default function NetworkPage() {
       now.getMonth(),
       1,
     ).toISOString();
-    const { count: mCount } = await supabase
+    const { count: mCount, error: mCountErr } = await supabase
       .from("users")
       .select("id", { count: "exact", head: true })
       .eq("referred_by", user.id)
       .gte("created_at", monthStart);
+    if (mCountErr) {
+      console.error("[network] monthly count error:", mCountErr);
+    }
     setMonthlyCount(mCount || 0);
 
     const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
-    const { data: weekComm } = await supabase
+    const { data: weekComm, error: weekCommErr } = await supabase
       .from("referral_commissions")
       .select("commission_amount")
       .eq("referrer_id", user.id)
       .gte("created_at", weekAgo);
+    if (weekCommErr) {
+      console.error("[network] weekly commissions error:", weekCommErr);
+    }
     setWeeklyEarned(
       (weekComm || []).reduce(
         (s: number, c: any) => s + (c.commission_amount || 0),
@@ -1274,11 +1299,7 @@ export default function NetworkPage() {
           ))}
         </div>
 
-        {/* ── YOUR LINK ──
-             FIXED: added min-w-0 to the flex row and the link box so the
-             truncate class actually has a computed width to truncate
-             against on narrow phone screens instead of overflowing and
-             pushing the Copy button partially off-screen. */}
+        {/* ── YOUR LINK ── */}
         <div className="rounded-2xl p-4 space-y-3" style={card}>
           <div className="flex items-center justify-between">
             <p className="text-white font-bold text-sm">Your Referral Link</p>
@@ -1555,10 +1576,7 @@ export default function NetworkPage() {
         </div>
       </div>
 
-      {/* ── CHANGE 2: STICKY BOTTOM CTA (fixed mobile cutoff)
-           FIXED: added min-w-0 to the button and the text span, truncate
-           on the span, and tightened gap/padding so the trailing
-           ChevronRight icon can't get pushed off narrow screens. */}
+      {/* ── STICKY BOTTOM CTA ── */}
       <div
         className="fixed bottom-0 left-0 right-0 px-4 pb-4 pt-6"
         style={{
