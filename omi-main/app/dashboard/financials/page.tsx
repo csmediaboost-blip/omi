@@ -934,9 +934,7 @@ export default function FinancialsPage() {
     }
     setUserId(user.id);
 
-    try {
-      await fetch("/api/mining/claim-session", { method: "POST" });
-    } catch {}
+    fetch("/api/mining/claim-session", { method: "POST" }).catch(() => {});
 
     const [
       profRes,
@@ -1173,6 +1171,24 @@ export default function FinancialsPage() {
     !!profile?.pin_set &&
     policySnapshot !== null;
 
+  function getWithdrawBlockReason(): string | null {
+    if (isFrozen) return "Your withdrawals are currently frozen. Contact support.";
+    if (!profile?.payout_registered) return "Set up a payout account first (Verification → Payout Setup).";
+    if (!kycOk) return "KYC verification is required before withdrawing.";
+    if (!profile?.pin_set) return "Set a security PIN in Settings before withdrawing.";
+    if (policySnapshot === null) return "Couldn't load withdrawal settings. Please refresh and try again.";
+    return null;
+  }
+
+  function handleWithdrawClick() {
+    const reason = getWithdrawBlockReason();
+    if (reason) {
+      showToast(reason, false);
+      return;
+    }
+    setShowWithdrawModal(true);
+  }
+
   // ─── DEPOSIT ENTRIES ─────────────────────────────────────────────────────
   const depositEntries: DepositEntry[] = [];
   for (const pt of paymentTxs) {
@@ -1305,13 +1321,13 @@ export default function FinancialsPage() {
                 <RefreshCw size={12} /> Refresh
               </button>
               <button
-                onClick={() => setShowWithdrawModal(true)}
-                disabled={!canWithdraw}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-black text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
-              >
-                <ArrowUpRight size={14} /> Withdraw
-              </button>
+                  onClick={() => setShowWithdrawModal(true)}
+                  disabled={!canWithdraw}
+                  className="shrink-0 px-5 py-2.5 rounded-xl text-sm font-black text-white flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
+                >
+                  <ArrowUpRight size={14} /> Withdraw
+                </button>
             </div>
           </div>
 
@@ -1515,9 +1531,8 @@ export default function FinancialsPage() {
                   </p>
                 </div>
                 <button
-                  onClick={() => setShowWithdrawModal(true)}
-                  disabled={!canWithdraw}
-                  className="shrink-0 px-5 py-2.5 rounded-xl text-sm font-black text-white flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  onClick={handleWithdrawClick}
+                  className="shrink-0 px-5 py-2.5 rounded-xl text-sm font-black text-white flex items-center gap-2 transition-all"
                   style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
                 >
                   <ArrowUpRight size={14} /> Withdraw
@@ -1708,9 +1723,8 @@ export default function FinancialsPage() {
                 ))}
               </div>
               <button
-                onClick={() => setShowWithdrawModal(true)}
-                disabled={!canWithdraw}
-                className="w-full py-4 rounded-xl text-sm font-black text-white flex items-center justify-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={handleWithdrawClick}
+                className="w-full py-4 rounded-xl text-sm font-black text-white flex items-center justify-center gap-2 transition-all"
                 style={{ background: "linear-gradient(135deg,#10b981,#059669)" }}
               >
                 <ArrowUpRight size={15} />

@@ -413,5 +413,3 @@ export async function POST(req: NextRequest) {
     const msg = err instanceof Error ? err.message : "Internal server error";
     console.error("[webhook] Unhandled error:", msg);
     return NextResponse.json({ error: msg }, { status: 500 });
-  }
-}
