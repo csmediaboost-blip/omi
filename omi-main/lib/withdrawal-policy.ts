@@ -296,12 +296,17 @@ export function checkWithdrawalEligibility(params: {
   weeklyWithdrawnUSD: number;
   lockStatuses: LockStatus[];
   holidays?: Holiday[];
+  pendingWithdrawal?: { amount: number; created_at: string } | null;
 }): WithdrawalEligibility {
   const window = getWithdrawalWindow(params.adminPaused, params.holidays);
   const policy = getUserWithdrawalPolicy(params.allocTiers);
   const weeklyRemainingUSD = Math.max(0, policy.weeklyMaxUSD - params.weeklyWithdrawnUSD);
   const reasons: string[] = [];
 
+  if (params.pendingWithdrawal) {
+    const d = new Date(params.pendingWithdrawal.created_at).toLocaleDateString();
+    reasons.push(`You already have a pending withdrawal of $${params.pendingWithdrawal.amount} requested on ${d}. Please wait until it's paid before requesting another.`);
+  }
   if (!window.isOpen)               reasons.push(getWindowClosedReason(window));
   if (params.frozen)                reasons.push("Your withdrawals are currently frozen. Contact support.");
   if (!params.kycVerified)          reasons.push("KYC verification required.");
