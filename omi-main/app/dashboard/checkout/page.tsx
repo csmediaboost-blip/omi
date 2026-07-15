@@ -1,13 +1,28 @@
- "use client";
-// app/dashboard/checkout/page.tsx — FULL MERGED VERSION
+"use client";
+// app/dashboard/checkout/page.tsx — FULL MERGED VERSION (v2)
 // ─────────────────────────────────────────────────────────────────────────────
-// Original 2,923-line file with these fixes applied on top:
+// FIXES vs previous version:
 //  [FIX-DECLINED]   Poll DB 30s on ?status=declined before showing "Payment Declined"
 //                   Catches race: KoraPay redirect fires before webhook confirms payment
 //  [FIX-LOADING-1]  Auth + config fetched in PARALLEL (was sequential — 3-8s blank screen)
 //  [FIX-LOADING-2]  payment-config API has 5s timeout + graceful fallback (was infinite hang)
 //  [FIX-LOADING-3]  Daily limit check runs in background — never blocks page render
 //  [FIX-VERIFYING]  New "verifying" step shown while polling DB after declined redirect
+//  [FIX-FALSE-DECLINE] NEW: the 30s poll window was too short for bank transfers/mobile
+//                   money, which routinely take longer than 30s to clear. When the poll
+//                   simply timed out (payment still pending, not actually declined), the
+//                   old code showed "Payment Declined" anyway — a false negative. Meanwhile
+//                   the webhook independently confirmed the payment moments later and
+//                   started mining, so users saw "Declined" on a payment that actually
+//                   succeeded. Fixed by:
+//                     1. Distinguishing an EXPLICIT "failed" status (real decline, written
+//                        by the webhook) from a poll that simply timed out without any
+//                        definitive answer yet.
+//                     2. Extending the poll window to ~3.3 minutes (40 attempts x 5s),
+//                        long enough to cover the vast majority of bank transfer delays.
+//                     3. Only a confirmed EXPLICIT failure shows "Payment Declined". A
+//                        timeout with no definitive status shows a new, calmer
+//                        "still processing" screen instead — never a false decline.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { useEffect, useState, useRef, useCallback, Suspense } from "react";
@@ -46,7 +61,8 @@ type CheckoutStep =
   | "failed"
   | "pending_crypto"
   | "declined"
-  | "verifying"; // [FIX-VERIFYING] polls DB before showing declined
+  | "verifying" // [FIX-VERIFYING] polls DB before showing declined
+  | "still_processing"; // [FIX-FALSE-DECLINE] poll timed out without a definitive answer
 
 type PayMethod = "card" | "bank_transfer" | "crypto_wallet";
 type PurchaseType = "gpu_plan" | "license" | "task";
@@ -104,7 +120,7 @@ const COUNTRIES = [
   { code: "BR", name: "Brazil" },
   { code: "CA", name: "Canada" },
   { code: "CM", name: "Cameroon (XAF)" },
-  { code: "CI", name: "Côte d'Ivoire (XOF)" },
+  { code: "CI", name: "Cote d'Ivoire (XOF)" },
   { code: "EG", name: "Egypt (EGP)" },
   { code: "FR", name: "France" },
   { code: "DE", name: "Germany" },
@@ -292,12 +308,18 @@ async function fetchWithTimeout(url: string, ms = 5000): Promise<Response> {
   }
 }
 
-// ─── [FIX-DECLINED] Poll DB until confirmed or timeout ────────────────────────
+// ─── [FIX-FALSE-DECLINE] Poll DB until confirmed, explicitly failed, or timeout ──
+// Returns "confirmed" only on a real success, "failed" only on an EXPLICIT
+// failure status written by the webhook, and "pending" if we simply ran out
+// of time without a definitive answer — "pending" must NEVER be shown to the
+// user as "Declined", since the payment may still be processing.
+type PollResult = "confirmed" | "failed" | "pending";
+
 async function pollForPaymentConfirmation(
   reference: string,
-  maxAttempts = 10,
-  intervalMs = 3000,
-): Promise<boolean> {
+  maxAttempts = 40, // ~3.3 minutes total — covers most bank transfer delays
+  intervalMs = 5000,
+): Promise<PollResult> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, intervalMs));
     try {
@@ -306,10 +328,18 @@ async function pollForPaymentConfirmation(
         .select("status")
         .eq("gateway_reference", reference)
         .maybeSingle();
-      if (data?.status === "confirmed" || data?.status === "completed") return true;
-    } catch {}
+      if (data?.status === "confirmed" || data?.status === "completed") {
+        return "confirmed";
+      }
+      if (data?.status === "failed") {
+        return "failed";
+      }
+      // any other status (pending, etc.) — keep polling
+    } catch {
+      // transient read error — keep polling rather than giving up early
+    }
   }
-  return false;
+  return "pending";
 }
 
 // ─── ALLOCATION CREATION ──────────────────────────────────────────────────────
@@ -507,7 +537,7 @@ function SplitPaymentModal({
               {!isFirst && (
                 <p className="text-emerald-400 text-sm font-bold mt-1 flex items-center gap-1.5">
                   <CheckCircle size={12} />
-                  &#x20A6;{state.installmentsNGN[state.completed - 1].toLocaleString()} received successfully
+                  ₦{state.installmentsNGN[state.completed - 1].toLocaleString()} received successfully
                 </p>
               )}
             </div>
@@ -524,7 +554,7 @@ function SplitPaymentModal({
               <p className="text-slate-500 text-[11px] leading-relaxed">
                 In accordance with Anti-Money Laundering (AML) directives and electronic payment regulations,
                 individual bank transfer transactions are subject to a{" "}
-                <strong className="text-slate-300">&#x20A6;200,000 per-transaction ceiling</strong>.
+                <strong className="text-slate-300">₦200,000 per-transaction ceiling</strong>.
                 This safeguard protects you against unauthorised use of payment instruments. Each installment
                 undergoes real-time fraud screening and transaction monitoring by our payment processor.
                 Your service activates automatically once all installments are received and reconciled.{" "}
@@ -537,15 +567,15 @@ function SplitPaymentModal({
           <div className="flex justify-between items-center">
             <p className="text-slate-400 text-xs font-bold uppercase tracking-wider">Payment Plan</p>
             <p className="text-slate-400 text-xs">
-              Total: <span className="text-white font-black">&#x20A6;{state.totalNGN.toLocaleString()}</span>{" "}
+              Total: <span className="text-white font-black">₦{state.totalNGN.toLocaleString()}</span>{" "}
               <span className="text-slate-600">(${state.totalUSD.toFixed(2)})</span>
             </p>
           </div>
           <div>
             <div className="flex justify-between text-[10px] text-slate-600 mb-1.5">
-              <span>&#x20A6;{paidNGN.toLocaleString()} paid</span>
+              <span>₦{paidNGN.toLocaleString()} paid</span>
               <span>{progressPct.toFixed(0)}% complete</span>
-              <span>&#x20A6;{(state.totalNGN - paidNGN).toLocaleString()} remaining</span>
+              <span>₦{(state.totalNGN - paidNGN).toLocaleString()} remaining</span>
             </div>
             <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
               <div className="h-2 rounded-full transition-all duration-700"
@@ -577,17 +607,17 @@ function SplitPaymentModal({
                       </p>
                       {isPaid && state.references[i] && (
                         <p className="text-emerald-600 text-[10px] font-mono">
-                          Ref: {state.references[i].slice(-10)}&#x2026;
+                          Ref: {state.references[i].slice(-10)}…
                         </p>
                       )}
                     </div>
                   </div>
                   <div className="text-right">
                     <p className={`font-black text-sm ${isPaid ? "text-emerald-400" : isCurrent ? "text-amber-400" : "text-slate-600"}`}>
-                      &#x20A6;{amt.toLocaleString()}
+                      ₦{amt.toLocaleString()}
                     </p>
                     <p className="text-[10px]" style={{ color: isPaid ? "#059669" : isCurrent ? "#d97706" : "#334155" }}>
-                      {isPaid ? "&#x2713; Paid" : isCurrent ? "&#x2192; Next" : "&#x25CB; Pending"}
+                      {isPaid ? "✓ Paid" : isCurrent ? "→ Next" : "○ Pending"}
                     </p>
                   </div>
                 </div>
@@ -607,17 +637,17 @@ function SplitPaymentModal({
             className="w-full py-4 rounded-2xl font-black text-base flex items-center justify-center gap-2 transition-all disabled:opacity-60"
             style={{ background: "linear-gradient(135deg, #f59e0b, #d97706)", color: "#0c0a00" }}>
             {loading ? (
-              <><Loader2 size={16} className="animate-spin" /> Connecting to bank&#x2026;</>
+              <><Loader2 size={16} className="animate-spin" /> Connecting to bank…</>
             ) : isFirst ? (
-              <><Landmark size={16} />Begin Payment &#x2014; Installment 1 of {totalCount}: &#x20A6;{state.installmentsNGN[0].toLocaleString()}</>
+              <><Landmark size={16} />Begin Payment — Installment 1 of {totalCount}: ₦{state.installmentsNGN[0].toLocaleString()}</>
             ) : (
-              <><Landmark size={16} />Continue &#x2014; Installment {nextIndex} of {totalCount}: &#x20A6;{currentInstallmentNGN.toLocaleString()}</>
+              <><Landmark size={16} />Continue — Installment {nextIndex} of {totalCount}: ₦{currentInstallmentNGN.toLocaleString()}</>
             )}
           </button>
           <button onClick={onCancel} disabled={loading}
             className="w-full py-3 rounded-xl font-black text-sm flex items-center justify-center gap-2 transition-all disabled:opacity-50"
             style={{ background: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.35)", color: "#a78bfa" }}>
-            &#x20BF; Pay with Crypto &nbsp;&#xB7;&nbsp; &#x1F4B3; Pay with Card
+            ₿ Pay with Crypto &nbsp;·&nbsp; 💳 Pay with Card
           </button>
           <p className="text-slate-600 text-[11px] text-center pb-1">
             Tap above to cancel this split and choose a different payment method
@@ -685,7 +715,7 @@ function Receipt({
             </div>
             <h3 className="text-white font-black text-lg">Payment Receipt</h3>
             <p className="text-slate-400 text-xs mt-1">
-              OmniTask Pro &middot;{" "}
+              OmniTask Pro ·{" "}
               {data.purchaseType === "api_access" ? "API Developer Access"
                 : data.purchaseType === "license" ? "Operator License"
                 : "GPU Mining Session"}
@@ -904,6 +934,7 @@ function CheckoutInner() {
   const [allocationId, setAllocationId] = useState<string | null>(null);
   const [actualAmountPaid, setActualAmountPaid] = useState<number | null>(null);
   const [confirmedPayMethod, setConfirmedPayMethod] = useState<PayMethod>("bank_transfer");
+  const [recheckLoading, setRecheckLoading] = useState(false);
 
   // Config — fetched from server (never hardcoded)
   const [cryptoDiscount, setCryptoDiscount] = useState(5);
@@ -1015,6 +1046,29 @@ function CheckoutInner() {
     return () => { cancelled = true; };
   }, []); // eslint-disable-line
 
+  // ── Resolve a confirmed payment: create allocation (if needed) + go to success
+  const resolveConfirmed = useCallback(
+    (savedData: any, reference: string) => {
+      if (savedData) {
+        sessionStorage.removeItem("korapay_pending_checkout");
+        setActualAmountPaid(savedData.originalPrice ?? savedData.amount ?? price);
+        setConfirmedPayMethod("bank_transfer");
+        supabase.auth.getUser().then(
+          async ({ data: { user } }: { data: { user: User | null } }) => {
+            if (!user) return;
+            try {
+              const id = await createMiningAllocation({
+                ...savedData, userId: user.id, transactionRef: reference,
+              } as Parameters<typeof createMiningAllocation>[0]);
+              if (id) setAllocationId(id);
+            } catch {}
+          });
+      }
+      setStep("success");
+    },
+    [price],
+  );
+
   // ── KoraPay redirect handler ─────────────────────────────────────────────
   useEffect(() => {
     const s = params.get("status");
@@ -1067,13 +1121,23 @@ function CheckoutInner() {
           setErrorMsg("Payment session error. Please contact support.");
         }
       } else if (s === "declined") {
-        // [FIX-DECLINED] poll before showing declined
-        sessionStorage.removeItem("korapay_split_checkout");
+        // [FIX-FALSE-DECLINE] poll before showing declined; never trust the
+        // redirect's own "declined" param, since bank transfers commonly
+        // redirect before the actual transfer clears.
         window.history.replaceState({}, "", "/dashboard/checkout");
         setTransactionId(r);
         setStep("verifying");
-        pollForPaymentConfirmation(r).then((confirmed) => {
-          setStep(confirmed ? "success" : "declined");
+        pollForPaymentConfirmation(r).then((result) => {
+          if (result === "confirmed") {
+            sessionStorage.removeItem("korapay_split_checkout");
+            setStep("success");
+          } else if (result === "failed") {
+            sessionStorage.removeItem("korapay_split_checkout");
+            setStep("declined");
+          } else {
+            // Timed out with no definitive answer — do NOT say declined.
+            setStep("still_processing");
+          }
         });
       }
       return;
@@ -1108,7 +1172,9 @@ function CheckoutInner() {
         } catch (e) { console.error("[checkout] Failed to parse pending checkout data:", e); }
       }
     } else if (s === "declined") {
-      // [FIX-DECLINED] Don't immediately show declined — poll DB first
+      // [FIX-FALSE-DECLINE] Don't immediately show declined — poll DB first,
+      // and only show "Declined" on an EXPLICIT failure status. A poll
+      // timeout means "still processing", not "declined".
       window.history.replaceState({}, "", "/dashboard/checkout");
       setTransactionId(r);
       let savedData: any = null;
@@ -1124,31 +1190,47 @@ function CheckoutInner() {
         } catch {}
       }
       setStep("verifying");
-      pollForPaymentConfirmation(r).then((confirmed) => {
-        if (confirmed) {
-          if (savedData) {
-            sessionStorage.removeItem("korapay_pending_checkout");
-            setActualAmountPaid(savedData.originalPrice ?? savedData.amount ?? price);
-            setConfirmedPayMethod("bank_transfer");
-            supabase.auth.getUser().then(
-              async ({ data: { user } }: { data: { user: User | null } }) => {
-                if (!user) return;
-                try {
-                  const id = await createMiningAllocation({
-                    ...savedData, userId: user.id, transactionRef: r,
-                  } as Parameters<typeof createMiningAllocation>[0]);
-                  if (id) setAllocationId(id);
-                } catch {}
-              });
-          }
-          setStep("success");
-        } else {
+      pollForPaymentConfirmation(r).then((result) => {
+        if (result === "confirmed") {
+          resolveConfirmed(savedData, r);
+        } else if (result === "failed") {
           sessionStorage.removeItem("korapay_pending_checkout");
           setStep("declined");
+        } else {
+          // Timed out — payment may still be processing (common for bank
+          // transfers). Keep sessionStorage intact so a manual recheck can
+          // still resolve it, and show a calm, non-alarming state.
+          setStep("still_processing");
         }
       });
     }
-  }, [params]); // eslint-disable-line
+  }, [params, resolveConfirmed]); // eslint-disable-line
+
+  // Manual recheck from the "still processing" screen
+  async function handleManualRecheck() {
+    if (!transactionId) return;
+    setRecheckLoading(true);
+    try {
+      const { data } = await supabase
+        .from("payment_transactions")
+        .select("status")
+        .eq("gateway_reference", transactionId)
+        .maybeSingle();
+      const saved = sessionStorage.getItem("korapay_pending_checkout");
+      const savedData = saved ? JSON.parse(saved) : null;
+      if (data?.status === "confirmed" || data?.status === "completed") {
+        resolveConfirmed(savedData, transactionId);
+      } else if (data?.status === "failed") {
+        sessionStorage.removeItem("korapay_pending_checkout");
+        setStep("declined");
+      }
+      // else: still pending — stay on this screen, just stop the spinner
+    } catch (e) {
+      console.error("[checkout] Manual recheck error:", e);
+    } finally {
+      setRecheckLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (!countryCode) return;
@@ -1410,7 +1492,7 @@ function CheckoutInner() {
       <div className="min-h-screen flex items-center justify-center" style={{ background: "#0d1117" }}>
         <div className="flex flex-col items-center gap-4">
           <div className="w-10 h-10 border-2 border-t-emerald-400 border-slate-700 rounded-full animate-spin" />
-          <p className="text-slate-400 text-sm">Loading secure checkout&#x2026;</p>
+          <p className="text-slate-400 text-sm">Loading secure checkout…</p>
         </div>
       </div>
     );
@@ -1444,12 +1526,55 @@ function CheckoutInner() {
           <div className="rounded-3xl p-8 text-center"
             style={{ background: "rgba(22,28,36,0.95)", border: "1px solid rgba(255,255,255,0.08)" }}>
             <Loader2 size={36} className="text-emerald-400 mx-auto mb-5 animate-spin" />
-            <h2 className="text-white font-black text-2xl mb-2">Verifying Payment&#x2026;</h2>
+            <h2 className="text-white font-black text-2xl mb-2">Verifying Payment…</h2>
             <p className="text-slate-400 text-sm leading-relaxed">
-              Your bank processed the payment. We&#x27;re confirming with our payment processor &#x2014;
-              this usually takes a few seconds.
+              Your bank processed the payment. We're confirming with our payment processor —
+              this can take a couple of minutes for bank transfers.
             </p>
             <p className="text-slate-600 text-xs mt-4">Please do not close or refresh this page.</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── [FIX-FALSE-DECLINE] Still processing — NOT declined ── */}
+      {step === "still_processing" && (
+        <div className="max-w-[520px] mx-auto">
+          <div className="rounded-3xl p-8 text-center"
+            style={{ background: "rgba(22,28,36,0.95)", border: "1px solid rgba(245,158,11,0.25)" }}>
+            <div className="w-16 h-16 rounded-full bg-amber-500/15 border-2 border-amber-500/40 flex items-center justify-center mx-auto mb-5">
+              <Clock size={28} className="text-amber-400" />
+            </div>
+            <h2 className="text-white font-black text-2xl mb-2">Still Confirming Your Payment</h2>
+            <p className="text-slate-400 text-sm leading-relaxed mb-2">
+              This is taking longer than usual — common for bank transfers and mobile money.
+              Your payment has <strong className="text-slate-200">not</strong> been declined; we're
+              just waiting on final confirmation from your bank.
+            </p>
+            <p className="text-slate-500 text-xs mb-6">
+              You don't need to do anything. Your mining session or license will activate
+              automatically the moment it clears — check your dashboard in a few minutes.
+            </p>
+            <div className="rounded-xl p-3 mb-5 text-left"
+              style={{ background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.15)" }}>
+              <p className="text-amber-300 text-xs">
+                <strong>Please avoid making a second payment</strong> for the same order while this
+                confirms — it may already be processing.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={handleManualRecheck} disabled={recheckLoading}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2">
+                {recheckLoading ? (
+                  <><Loader2 size={14} className="animate-spin" /> Checking…</>
+                ) : (
+                  <><RefreshCw size={14} /> Check Again</>
+                )}
+              </button>
+              <button onClick={() => router.push("/dashboard")}
+                className="flex-1 border border-slate-700 text-slate-300 font-bold py-3 rounded-lg">
+                Go to Dashboard
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1485,7 +1610,7 @@ function CheckoutInner() {
                 style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.08)" }}>
                 <div className="flex items-center gap-2">
                   <p className="text-white font-mono text-xs break-all flex-1 select-all">
-                    {cryptoWalletAddress || "Loading&#x2026;"}
+                    {cryptoWalletAddress || "Loading…"}
                   </p>
                   {cryptoWalletAddress && <CopyButton text={cryptoWalletAddress} />}
                 </div>
@@ -1495,7 +1620,7 @@ function CheckoutInner() {
                   ["Amount to Send", `${discountedPrice.toFixed(2)} USDT`],
                   ["Network", cryptoNetwork],
                   ["Currency", "USDT (Tether)"],
-                  ["Transaction Ref", transactionId.slice(-12) + "&#x2026;"],
+                  ["Transaction Ref", transactionId.slice(-12) + "…"],
                 ].map(([l, v]) => (
                   <div key={l} className="rounded-lg p-2.5" style={{ background: "rgba(0,0,0,0.3)" }}>
                     <p className="text-slate-500 text-[10px] mb-0.5">{l}</p>
@@ -1513,13 +1638,13 @@ function CheckoutInner() {
             </div>
             <button onClick={() => router.push("/dashboard")}
               className="w-full bg-violet-600 hover:bg-violet-500 text-white font-bold py-3 rounded-xl transition-all">
-              I&#x27;ve Sent the Payment &#x2014; Return to Dashboard
+              I've Sent the Payment — Return to Dashboard
             </button>
           </div>
         </div>
       )}
 
-      {/* ── DECLINED ── */}
+      {/* ── DECLINED (only shown on an EXPLICIT failure status) ── */}
       {step === "declined" && (
         <div className="max-w-[520px] mx-auto">
           <div className="rounded-3xl p-8"
@@ -1556,7 +1681,7 @@ function CheckoutInner() {
             style={{ background: "rgba(22,28,36,0.95)", border: "1px solid rgba(255,255,255,0.08)" }}>
             <div className="mb-6 relative">
               <Globe size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input type="text" placeholder="Search countries&#x2026;" value={countrySearch}
+              <input type="text" placeholder="Search countries…" value={countrySearch}
                 onChange={(e) => setCountrySearch(e.target.value)}
                 className="w-full pl-10 pr-4 py-3 bg-black/30 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none" />
             </div>
@@ -1629,10 +1754,10 @@ function CheckoutInner() {
                         RECOMMENDED
                       </div>
                       <div className="flex items-center gap-3">
-                        <div className="text-2xl">&#x20BF;</div>
+                        <div className="text-2xl">₿</div>
                         <div className="text-left flex-1">
                           <div className="text-white font-bold text-sm">Crypto Payment (USDT)</div>
-                          <div className="text-slate-400 text-xs">{cryptoDiscount}% discount &middot; Instant &middot; Secure</div>
+                          <div className="text-slate-400 text-xs">{cryptoDiscount}% discount · Instant · Secure</div>
                         </div>
                         <div className="text-emerald-400 font-bold text-sm">${discountedPrice.toFixed(2)}</div>
                       </div>
@@ -1643,10 +1768,10 @@ function CheckoutInner() {
                         onClick={() => router.push(`/dashboard/checkout/card?${params.toString()}&miningPeriod=${miningPeriod}&autoReinvest=${autoReinvest}`)}
                         className="w-full p-4 rounded-xl transition-all border-2 bg-slate-800/30 border-slate-700 hover:border-slate-500">
                         <div className="flex items-center gap-3">
-                          <div className="text-xl">&#x1F4B3;</div>
+                          <div className="text-xl">💳</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">Credit / Debit Card</div>
-                            <div className="text-slate-500 text-xs">OTP Required &middot; Verify with your bank</div>
+                            <div className="text-slate-500 text-xs">OTP Required · Verify with your bank</div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">${price.toFixed(2)}</div>
                         </div>
@@ -1665,7 +1790,7 @@ function CheckoutInner() {
                               : "bg-slate-800/30 border-slate-700 hover:border-blue-500/50"
                         }`}>
                         <div className="flex items-center gap-3">
-                          <div className="text-xl">&#x1F3E6;</div>
+                          <div className="text-xl">🏦</div>
                           <div className="text-left flex-1">
                             <div className="text-slate-300 font-bold text-sm">
                               Local Transfer
@@ -1676,7 +1801,7 @@ function CheckoutInner() {
                               )}
                             </div>
                             <div className="text-slate-500 text-xs">
-                              {bankTransferBlocked ? "Unavailable today &#x2014; resets at midnight" : "Bank &middot; Card &middot; Mobile Money"}
+                              {bankTransferBlocked ? "Unavailable today — resets at midnight" : "Bank · Card · Mobile Money"}
                             </div>
                           </div>
                           <div className="text-slate-400 font-bold text-sm">${price.toFixed(2)}</div>
@@ -1721,8 +1846,8 @@ function CheckoutInner() {
                         <div>
                           <p className="text-amber-300 text-xs font-black">Installment Payment Required</p>
                           <p className="text-amber-400/70 text-xs mt-0.5 leading-relaxed">
-                            Your payment of <strong className="text-amber-200">&#x20A6;{localAmount.toLocaleString()}</strong>{" "}
-                            exceeds the &#x20A6;200,000 single-transaction limit. It will be split into{" "}
+                            Your payment of <strong className="text-amber-200">₦{localAmount.toLocaleString()}</strong>{" "}
+                            exceeds the ₦200,000 single-transaction limit. It will be split into{" "}
                             <strong className="text-amber-200">{computeInstallments(localAmount).length} installments</strong>{" "}
                             for regulatory compliance.
                           </p>
@@ -1752,7 +1877,7 @@ function CheckoutInner() {
                     <button type="submit" disabled={kpLoading}
                       className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all">
                       {kpLoading ? (
-                        <><Loader2 size={16} className="animate-spin" /> Connecting&#x2026;</>
+                        <><Loader2 size={16} className="animate-spin" /> Connecting…</>
                       ) : localAmount && localAmount > MAX_SINGLE_NGN_TXN ? (
                         <><Landmark size={14} /> Set Up Installment Payment</>
                       ) : (
@@ -1871,7 +1996,7 @@ function CheckoutInner() {
             style={{ background: "rgba(22,28,36,0.95)", border: "1px solid rgba(255,255,255,0.08)" }}>
             <Loader2 size={32} className="text-emerald-400 mx-auto mb-4 animate-spin" />
             <h2 className="text-white font-black text-2xl mb-2">Processing Payment</h2>
-            <p className="text-slate-400 text-sm mb-6">{PROCESSING_STEPS[processingStep]?.label || "Completing&#x2026;"}</p>
+            <p className="text-slate-400 text-sm mb-6">{PROCESSING_STEPS[processingStep]?.label || "Completing…"}</p>
             <div className="space-y-3">
               {PROCESSING_STEPS.map((ps, idx) => (
                 <div key={ps.id} className={`flex items-center gap-3 text-sm ${idx <= processingStep ? "text-emerald-300" : "text-slate-600"}`}>
