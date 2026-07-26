@@ -222,6 +222,21 @@ export async function POST(req: NextRequest) {
       const errorMsg =
         korapayData?.message || korapayData?.error || `HTTP ${korapayRes.status}`;
       console.error(`[cross-site-checkout] ✗ Korapay slot ${accountSlot} rejected:`, errorMsg);
+      console.error(
+        `[cross-site-checkout] ✗ Full Korapay response:`,
+        JSON.stringify(korapayData),
+      );
+      console.error(
+        `[cross-site-checkout] ✗ Request body sent:`,
+        JSON.stringify({
+          amount: korapayAmount,
+          currency,
+          reference,
+          redirect_url: redirectUrl,
+          narration: narration || "Payment",
+          customer: { email: customerEmail, name: customerName },
+        }),
+      );
       return NextResponse.json({ error: `Payment gateway error: ${errorMsg}` }, { status: 502 });
     }
 
