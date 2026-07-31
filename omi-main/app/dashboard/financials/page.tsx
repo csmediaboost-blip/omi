@@ -544,13 +544,7 @@ function WithdrawModal({
     if (elig.frozen)
       return "Your withdrawals are currently frozen. Please contact support.";
     if (elig.adminPaused)
-      return `Due to the national public holiday in Cuba, there will be no withdrawals processed today. All pending withdrawal requests will be processed on the next scheduled withdrawal day.
-
-This temporary pause is necessary because our Hosting GPU 100 infrastructure is located in Havana, Cuba, where the holiday affects on-site operations and technical support. As a result, essential infrastructure monitoring, security verification, and withdrawal authorization services are operating on a limited schedule, making it necessary to postpone withdrawal processing until normal operations resume.
-
-The Hosting GPU 100 infrastructure is a major investment in Omni Task Pro's next-generation platform, delivering enhanced computing performance, improved scalability, and greater system reliability. It remains on track for its official full launch on January 7, 2027.
-
-We sincerely appreciate your patience and understanding as we continue strengthening our infrastructure to provide a faster, more secure, and more reliable experience for all users. Thank you for your continued trust and support.`;
+      return `Withdrawal is temporary unavailable, please check back later.`;
 
     if (!windowSnap.isOpen) {
       if (windowSnap.state === "CLOSED_HOLIDAY")
