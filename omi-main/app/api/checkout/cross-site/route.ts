@@ -197,6 +197,8 @@ export async function POST(req: NextRequest) {
       `[cross-site-checkout] ▶ reference=${reference} slot=${accountSlot} amount=${korapayAmount} ${currency}`,
     );
 
+    const appUrl = (process.env.NEXT_PUBLIC_APP_URL || "https://omnitaskpro.online").replace(/\/$/, "");
+
     const korapayRes = await fetch(
       "https://api.korapay.com/merchant/api/v1/charges/initialize",
       {
@@ -210,6 +212,7 @@ export async function POST(req: NextRequest) {
           currency,
           reference,
           redirect_url: redirectUrl,
+          notification_url: `${appUrl}/api/korapay/webhook`,
           narration: narration || "Payment",
           customer: { email: customerEmail, name: customerName },
         }),
