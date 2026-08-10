@@ -189,6 +189,14 @@ type DepositEntry = {
   created_at: string;
 };
 
+type Announcement = {
+  id: string;
+  title: string;
+  body: string;
+  type: "info" | "warning" | "critical" | "compliance";
+  expires_at: string | null;
+};
+
 type PolicySnapshot = {
   window: {
     state: string;
@@ -548,16 +556,16 @@ function WithdrawModal({
 
     if (!windowSnap.isOpen) {
       if (windowSnap.state === "CLOSED_HOLIDAY")
-        return `Today is a public holiday (${windowSnap.todayHoliday?.name}). Banks are closed. Withdrawals process every Monday — next window: ${windowSnap.nextWindowLabel}.`;
+        return `Today is a public holiday (${windowSnap.todayHoliday?.name}). Withdrawals process every working day — next window: ${windowSnap.nextWindowLabel}.`;
       if (windowSnap.state === "CLOSED_OUTSIDE_HOURS") {
         const before = (windowSnap as any).currentWATHour < 8;
         return before
-          ? "The withdrawal window opens at 08:00 WAT today (Monday). Please come back after 08:00 WAT."
-          : `Today's withdrawal window closed at 16:00 WAT. Withdrawals process every Monday — next window: ${windowSnap.nextWindowLabel}.`;
+          ? "Today's withdrawal window opens at 08:00 WAT. Please come back after 08:00 WAT."
+          : `Today's withdrawal window closed at 16:00 WAT. Withdrawals process every working day — next window: ${windowSnap.nextWindowLabel}.`;
       }
       if (windowSnap.state === "PAUSED_ADMIN")
         return `Withdrawals are temporarily paused by the platform. Next window: ${windowSnap.nextWindowLabel}.`;
-      return `Withdrawals are processed every Monday, 08:00–16:00 WAT. Today is not a withdrawal day. Next window: ${windowSnap.nextWindowLabel}.`;
+      return `Withdrawals are processed every working day, 08:00–16:00 WAT. Next window: ${windowSnap.nextWindowLabel}.`;
     }
 
     if (selectedAmt > available)
@@ -682,10 +690,10 @@ function WithdrawModal({
             <Calendar size={15} className="text-slate-400 shrink-0 mt-0.5" />
             <div>
               <p className="text-slate-300 text-sm font-bold">
-                Withdrawals process every Monday
+                Withdrawals process every working day
               </p>
               <p className="text-slate-500 text-xs mt-0.5">
-                Banking hours: 08:00 – 16:00 WAT. Select an amount and submit —
+                Monday – Friday, excluding public holidays · 08:00 – 16:00 WAT. Select an amount and submit —
                 we'll let you know if there's any issue.
               </p>
             </div>
@@ -766,7 +774,7 @@ function WithdrawModal({
               </p>
               {[
                 { label: "Queued", desc: "Request received", done: true },
-                { label: "Monday 08:00 WAT", desc: "Processing on the next Monday window", done: false },
+                { label: "08:00 WAT", desc: "Processing on the next working-day window", done: false },
                 { label: "Bank Transfer", desc: "Via your registered payout account", done: false },
                 { label: "Paid", desc: `$${fee?.netAmount.toFixed(2) ?? "—"} net to you`, done: false },
               ].map((s) => (
@@ -845,7 +853,7 @@ function WithdrawModal({
             >
               <Lock size={12} className="text-amber-400 shrink-0" />
               <p className="text-amber-400 text-xs">
-                You selected <strong>${alreadyPicked}</strong> today. You can submit a new withdrawal next Monday.
+                You selected <strong>${alreadyPicked}</strong> today. You can submit a new withdrawal on the next working day.
               </p>
             </div>
           )}
@@ -900,6 +908,7 @@ export default function FinancialsPage() {
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState<Announcement | null>(null);
 
   const holidays = getHolidaysSync();
 
@@ -944,6 +953,7 @@ export default function FinancialsPage() {
       ledgerRes,
       wRes,
       plansRes,
+      announcementRes,
       policyRes,
     ] = await Promise.allSettled([
       supabase
@@ -994,6 +1004,14 @@ export default function FinancialsPage() {
         .order("created_at", { ascending: false })
         .limit(50),
       supabase.from("gpu_plans").select("id,name,gpu_model"),
+      supabase
+        .from("platform_announcements")
+        .select("id,title,body,type,expires_at")
+        .eq("is_active", true)
+        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
       (async () => {
         const {
           data: { session },
@@ -1026,6 +1044,9 @@ export default function FinancialsPage() {
       for (const p of plansRes.value.data)
         map[p.id] = { name: p.name, gpu_model: p.gpu_model };
       setGpuPlans(map);
+    }
+    if (announcementRes.status === "fulfilled" && (announcementRes.value as any).data) {
+      setAnnouncement((announcementRes.value as any).data as Announcement);
     }
     if (policyRes.status === "fulfilled" && (policyRes.value as any).data) {
       const snap = (policyRes.value as any).data as PolicySnapshot;
@@ -1310,7 +1331,7 @@ export default function FinancialsPage() {
                 <Wallet size={22} className="text-amber-400" /> Financials
               </h1>
               <p className="text-slate-500 text-xs mt-1">
-                Withdrawals process every Monday · 08:00 – 16:00 WAT
+                Withdrawals process every working day · 08:00 – 16:00 WAT
               </p>
             </div>
             <div className="flex gap-2">
@@ -1336,6 +1357,33 @@ export default function FinancialsPage() {
             allocations={nodeAllocations}
             gpuPlans={gpuPlans}
           />
+
+          {/* Platform Announcement */}
+          {announcement && (
+            <div
+              className="relative overflow-hidden rounded-2xl p-5"
+              style={{
+                background: "linear-gradient(135deg, #059669 0%, #0891b2 50%, #4f46e5 100%)",
+              }}
+            >
+              <div className="absolute inset-0 opacity-10" style={{ backgroundImage: "radial-gradient(circle at 20% 20%, white 1px, transparent 1px)", backgroundSize: "24px 24px" }} />
+              <div className="relative flex items-start gap-3">
+                <div className="w-9 h-9 rounded-xl bg-white/15 backdrop-blur flex items-center justify-center shrink-0">
+                  <Star size={16} className="text-white" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-white font-black text-sm mb-1.5">{announcement.title}</p>
+                  <p className="text-white/90 text-xs leading-relaxed whitespace-pre-line">{announcement.body}</p>
+                </div>
+                <button
+                  onClick={() => setAnnouncement(null)}
+                  className="shrink-0 text-white/70 hover:text-white"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Alerts */}
           {!kycOk && (
@@ -1490,7 +1538,7 @@ export default function FinancialsPage() {
                     { label: "Your Tier", value: policy.tierName, color: "text-white" },
                     { label: "Weekly Max", value: `$${policy.weeklyMaxUSD}`, color: "text-emerald-400" },
                     { label: "Weekly Remaining", value: `$${(policySnapshot?.policy.weeklyRemainingUSD ?? 0).toFixed(2)}`, color: "text-blue-400" },
-                    { label: "Window", value: "Monday 08:00 – 16:00 WAT", color: "text-amber-400" },
+                    { label: "Window", value: "Every working day, 08:00 – 16:00 WAT", color: "text-amber-400" },
                   ].map(({ label, value, color }) => (
                     <div key={label} className="bg-slate-800/40 rounded-xl p-3">
                       <p className="text-slate-500 text-[10px] uppercase tracking-wide">{label}</p>
@@ -1527,7 +1575,7 @@ export default function FinancialsPage() {
                   <p className="text-white font-black text-base">Ready to Withdraw?</p>
                   <p className="text-slate-400 text-sm mt-0.5">
                     <span className="text-emerald-400 font-bold">${effectiveAvail.toFixed(2)}</span> available.{" "}
-                    Processed every Monday 08:00 – 16:00 WAT.
+                    Processed every working day, 08:00 – 16:00 WAT.
                   </p>
                 </div>
                 <button

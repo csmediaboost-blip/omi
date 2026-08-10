@@ -8,7 +8,7 @@
 import {
   getHolidaysSync,
   getTodayHolidayWAT,
-  nextValidWithdrawalMonday,
+  nextValidWithdrawalDay,
   formatWithdrawalWindow,
   toWATDateString,
   nowInWAT,
@@ -48,7 +48,7 @@ export function getWithdrawalWindow(
   const day  = now.getDay();
   const hour = now.getHours();
   const todayHoliday = getTodayHolidayWAT(holidays);
-  const nextWindowDate = nextValidWithdrawalMonday(holidays);
+  const nextWindowDate = nextValidWithdrawalDay(holidays);
   const nextWindowLabel = formatWithdrawalWindow(nextWindowDate);
 
   if (adminPaused) {
@@ -59,9 +59,8 @@ export function getWithdrawalWindow(
     return { state: "CLOSED_HOLIDAY", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
   }
 
-  if (day !== WITHDRAWAL_DAY_OF_WEEK) {
-    const state = (day === 0 || day === 6) ? "CLOSED_WEEKEND" : "CLOSED_WEEKDAY";
-    return { state, isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
+  if (day === 0 || day === 6) {
+    return { state: "CLOSED_WEEKEND", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
   }
 
   // It IS Monday and not a holiday — check time

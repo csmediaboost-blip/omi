@@ -2,7 +2,7 @@
 // Nigerian public holidays (WAT UTC+1) + optional Google Calendar enrichment.
 // Primary source: static list (zero network dependency, always works).
 // Secondary source: Google Calendar public API (enriches if available).
-// Used exclusively by withdrawal-policy.ts to determine Monday window shifts.
+// Used exclusively by withdrawal-policy.ts to determine working-day window shifts.
 
 export type Holiday = {
   date: string; // "YYYY-MM-DD"
@@ -175,6 +175,33 @@ export function nextValidWithdrawalMonday(
     const ds = candidate.toISOString().slice(0, 10); // already WAT-adjusted
     if (!isHolidayDate(ds, holidays)) break;
     candidate.setDate(candidate.getDate() + 7);
+  }
+  return candidate;
+}
+/** Returns true if the given WAT date string ("YYYY-MM-DD") is a valid working day (Mon–Fri, not a holiday). */
+export function isWorkingDay(
+  watDateStr: string,
+  holidays: Holiday[] = STATIC_HOLIDAYS,
+): boolean {
+  const day = new Date(watDateStr + "T12:00:00Z").getDay();
+  if (day === 0 || day === 6) return false;
+  return !isHolidayDate(watDateStr, holidays);
+}
+
+/** Returns the next valid working day (Mon–Fri, excluding weekends and holidays) at 08:00 WAT. */
+export function nextValidWithdrawalDay(
+  holidays: Holiday[] = STATIC_HOLIDAYS,
+): Date {
+  const now = nowInWAT();
+  const candidate = new Date(now);
+  candidate.setDate(candidate.getDate() + 1);
+  candidate.setHours(8, 0, 0, 0);
+
+  for (let i = 0; i < 14; i++) {
+    const ds = candidate.toISOString().slice(0, 10);
+    const day = candidate.getDay();
+    if (day !== 0 && day !== 6 && !isHolidayDate(ds, holidays)) break;
+    candidate.setDate(candidate.getDate() + 1);
   }
   return candidate;
 }
