@@ -21,7 +21,7 @@ import {
   type WithdrawalWindow,
   type TierWithdrawalPolicy,
 } from "@/lib/withdrawal-policy";
-import { getHolidaysSync } from "@/lib/holiday-calendar";
+import { getHolidaysSync, countWorkingDaysElapsed, estimateSettlementDate } from "@/lib/holiday-calendar";
 import {
   getCapitalReturnTier,
   getCapitalReturnAmount,
@@ -1785,45 +1785,83 @@ export default function FinancialsPage() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {withdrawals.map((w) => (
-                    <div key={w.id} className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <StatusBadge status={w.tracking_status ?? w.status} />
-                            {w.flagged && (
-                              <span className="text-[10px] font-bold text-orange-400 flex items-center gap-0.5">
-                                ⚠ Under Review
-                              </span>
+                  {withdrawals.map((w) => {
+                    const isPending = ["queued", "processing", "flagged"].includes(w.status);
+                    const targetWorkingDays = 10; // 2 weeks, working days only
+                    const elapsedWorkingDays = isPending
+                      ? Math.min(targetWorkingDays, countWorkingDaysElapsed(w.created_at, holidays))
+                      : 0;
+                    const progressPct = isPending
+                      ? Math.round((elapsedWorkingDays / targetWorkingDays) * 100)
+                      : 0;
+                    const estimatedDate = isPending
+                      ? estimateSettlementDate(w.created_at, targetWorkingDays, holidays)
+                      : null;
+
+                    return (
+                      <div key={w.id} className="bg-slate-900/60 border border-slate-800 rounded-xl p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1 flex-wrap">
+                              <StatusBadge status={w.tracking_status ?? w.status} />
+                              {w.flagged && (
+                                <span className="text-[10px] font-bold text-orange-400 flex items-center gap-0.5">
+                                  ⚠ Under Review
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-slate-400 text-xs">{w.payout_account_name ?? w.wallet_address}</p>
+                            {w.amount_gross && w.amount_fee != null && (
+                              <p className="text-slate-600 text-[10px] mt-0.5">
+                                ${w.amount_gross.toFixed(2)} gross · ${w.amount_fee.toFixed(2)} fee ({w.fee_pct}%) ·{" "}
+                                <span className="text-emerald-500">${w.amount_net?.toFixed(2)} net</span>
+                              </p>
                             )}
-                            {w.expected_date && w.status !== "paid" && (
-                              <span className="text-[10px] text-slate-500">
-                                Est: {new Date(w.expected_date).toLocaleDateString()}
-                              </span>
+                            <p className="text-slate-600 text-[10px] mt-0.5">{new Date(w.created_at).toLocaleString()}</p>
+                            {w.paid_at && (
+                              <p className="text-emerald-500 text-[10px] mt-0.5">✅ Paid: {new Date(w.paid_at).toLocaleString()}</p>
+                            )}
+                            {w.failure_reason && (
+                              <p className="text-red-400 text-[10px] mt-1">❌ {w.failure_reason}</p>
                             )}
                           </div>
-                          <p className="text-slate-400 text-xs">{w.payout_account_name ?? w.wallet_address}</p>
-                          {w.amount_gross && w.amount_fee != null && (
-                            <p className="text-slate-600 text-[10px] mt-0.5">
-                              ${w.amount_gross.toFixed(2)} gross · ${w.amount_fee.toFixed(2)} fee ({w.fee_pct}%) ·{" "}
-                              <span className="text-emerald-500">${w.amount_net?.toFixed(2)} net</span>
+                          <div className="text-right shrink-0">
+                            <p className="text-white font-black text-xl">${w.amount.toFixed(2)}</p>
+                            <p className="text-slate-600 text-[10px]">net received</p>
+                          </div>
+                        </div>
+
+                        {isPending && (
+                          <div className="mt-3 pt-3 border-t border-slate-800">
+                            <div className="flex items-center justify-between mb-1.5">
+                              <p className="text-slate-400 text-[10px] font-bold uppercase tracking-wide">
+                                Settlement Progress
+                              </p>
+                              <p className="text-slate-500 text-[10px]">
+                                {elapsedWorkingDays}/{targetWorkingDays} working days
+                              </p>
+                            </div>
+                            <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                              <div
+                                className="h-full rounded-full transition-all"
+                                style={{
+                                  width: `${Math.max(4, progressPct)}%`,
+                                  background: "linear-gradient(90deg, #10b981, #059669)",
+                                }}
+                              />
+                            </div>
+                            <p className="text-slate-500 text-[10px] mt-1.5">
+                              Estimated settlement by{" "}
+                              <span className="text-emerald-400 font-semibold">
+                                {estimatedDate?.toLocaleDateString("en-NG", { weekday: "long", day: "numeric", month: "short" })}
+                              </span>
+                              {" "}— but can be paid any moment before then. Weekends and public holidays don't count toward this estimate.
                             </p>
-                          )}
-                          <p className="text-slate-600 text-[10px] mt-0.5">{new Date(w.created_at).toLocaleString()}</p>
-                          {w.paid_at && (
-                            <p className="text-emerald-500 text-[10px] mt-0.5">✅ Paid: {new Date(w.paid_at).toLocaleString()}</p>
-                          )}
-                          {w.failure_reason && (
-                            <p className="text-red-400 text-[10px] mt-1">❌ {w.failure_reason}</p>
-                          )}
-                        </div>
-                        <div className="text-right shrink-0">
-                          <p className="text-white font-black text-xl">${w.amount.toFixed(2)}</p>
-                          <p className="text-slate-600 text-[10px]">net received</p>
-                        </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

@@ -216,3 +216,42 @@ export function formatWithdrawalWindow(d: Date): string {
     timeZone: "Africa/Lagos",
   }) + ", 08:00 – 16:00 WAT";
 }
+
+/** Counts full working days (Mon–Fri, non-holiday) elapsed between a start date and now (WAT).
+ *  Weekends and holidays are skipped entirely — they never advance the count. */
+export function countWorkingDaysElapsed(
+  startDate: string | Date,
+  holidays: Holiday[] = STATIC_HOLIDAYS,
+): number {
+  const cursor = new Date(startDate);
+  cursor.setHours(0, 0, 0, 0);
+  const today = new Date(nowInWAT());
+  today.setHours(0, 0, 0, 0);
+
+  let count = 0;
+  while (cursor < today) {
+    cursor.setDate(cursor.getDate() + 1);
+    const ds = cursor.toISOString().slice(0, 10);
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6 && !isHolidayDate(ds, holidays)) count++;
+  }
+  return count;
+}
+
+/** Returns the estimated settlement date: startDate + N working days, skipping weekends and holidays. */
+export function estimateSettlementDate(
+  startDate: string | Date,
+  targetWorkingDays = 10,
+  holidays: Holiday[] = STATIC_HOLIDAYS,
+): Date {
+  const cursor = new Date(startDate);
+  cursor.setHours(8, 0, 0, 0);
+  let counted = 0;
+  while (counted < targetWorkingDays) {
+    cursor.setDate(cursor.getDate() + 1);
+    const ds = cursor.toISOString().slice(0, 10);
+    const day = cursor.getDay();
+    if (day !== 0 && day !== 6 && !isHolidayDate(ds, holidays)) counted++;
+  }
+  return cursor;
+}
