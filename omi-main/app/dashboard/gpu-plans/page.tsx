@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 // app/dashboard/gpu-plans/page.tsx
 // Updates:
 // 1. Amount-based lock days via lib/lock-policy.ts
@@ -130,13 +130,9 @@ type RoiRates = {
   yearly: number;
 };
 
-const TIER_ROI: RoiRates[] = [
-  { hourly: 0.004, daily: 0.025, weekly: 0.15, monthly: 0.55, yearly: 6.6 },
-  { hourly: 0.003, daily: 0.02, weekly: 0.12, monthly: 0.45, yearly: 5.4 },
-  { hourly: 0.005, daily: 0.03, weekly: 0.18, monthly: 0.7, yearly: 8.4 },
-  { hourly: 0.008, daily: 0.05, weekly: 0.35, monthly: 1.2, yearly: 14.4 },
-  { hourly: 0.012, daily: 0.08, weekly: 0.6, monthly: 2.5, yearly: 30 },
-];
+// $10 for 1 week => $3 (30%). Same curve for all tiers; longer = higher.
+const BASE_ROI: RoiRates = { hourly: 0.006, daily: 0.04, weekly: 0.3, monthly: 1.2, yearly: 14.4 };
+const TIER_ROI: RoiRates[] = [BASE_ROI, BASE_ROI, BASE_ROI, BASE_ROI, BASE_ROI];
 
 const NAME_TO_TIER: Record<string, number> = {
   lite: 0, "lite node": 0, "lite-node": 0, litenode: 0, entry: 0, shared: 0,
@@ -174,13 +170,19 @@ export function calcProfit(capital: number, plan: Plan, period: string): number 
   return capital * getPlanRoi(plan, period);
 }
 
+// UI only: shows "$3–4" while all real calculations use the exact $3.
+export function fmtProfitRange(profit: number): string {
+  const f = (n: number) => (Number.isInteger(+n.toFixed(2)) ? n.toFixed(0) : n.toFixed(2));
+  return `$${f(profit)}–${f((profit * 4) / 3)}`;
+}
+
 export async function syncPlanRatesToDB() {
   const updates = [
-    { price_min_match: 0.5, tier_index: 0, price_min: 0.5, hourly_pct: 0.004, daily_pct: 0.025, base_daily_profit_min: 2.5, base_daily_profit_max: 2.5, roi_tier_multiplier: 1.0 },
-    { price_min_match: 5, tier_index: 1, price_min: 5, hourly_pct: 0.003, daily_pct: 0.02, base_daily_profit_min: 2.0, base_daily_profit_max: 2.0, roi_tier_multiplier: 1.0 },
-    { price_min_match: 50, tier_index: 2, price_min: 50, hourly_pct: 0.005, daily_pct: 0.03, base_daily_profit_min: 3.0, base_daily_profit_max: 3.0, roi_tier_multiplier: 1.0 },
-    { price_min_match: 250, tier_index: 3, price_min: 250, hourly_pct: 0.008, daily_pct: 0.05, base_daily_profit_min: 5.0, base_daily_profit_max: 5.0, roi_tier_multiplier: 1.0 },
-    { price_min_match: 1000, tier_index: 4, price_min: 1000, hourly_pct: 0.012, daily_pct: 0.08, base_daily_profit_min: 8.0, base_daily_profit_max: 8.0, roi_tier_multiplier: 1.0 },
+        { price_min_match: 0.5, tier_index: 0, price_min: 0.5, hourly_pct: 0.006, daily_pct: 0.04, base_daily_profit_min: 4.0, base_daily_profit_max: 4.0, roi_tier_multiplier: 1.0 },
+    { price_min_match: 5, tier_index: 1, price_min: 5, hourly_pct: 0.006, daily_pct: 0.04, base_daily_profit_min: 4.0, base_daily_profit_max: 4.0, roi_tier_multiplier: 1.0 },
+    { price_min_match: 50, tier_index: 2, price_min: 50, hourly_pct: 0.006, daily_pct: 0.04, base_daily_profit_min: 4.0, base_daily_profit_max: 4.0, roi_tier_multiplier: 1.0 },
+    { price_min_match: 250, tier_index: 3, price_min: 250, hourly_pct: 0.006, daily_pct: 0.04, base_daily_profit_min: 4.0, base_daily_profit_max: 4.0, roi_tier_multiplier: 1.0 },
+    { price_min_match: 1000, tier_index: 4, price_min: 1000, hourly_pct: 0.006, daily_pct: 0.04, base_daily_profit_min: 4.0, base_daily_profit_max: 4.0, roi_tier_multiplier: 1.0 },
   ];
   for (const { price_min_match, ...fields } of updates) {
     await supabase.from("gpu_plans").update(fields).eq("price_min", price_min_match);
@@ -1273,7 +1275,7 @@ function RemineModal({
                             <span className={`text-sm font-bold ${isSelected ? "text-white" : "text-slate-300"}`}>{label}</span>
                           </div>
                           <div className="text-right">
-                            <p className="text-emerald-400 font-black text-sm">${opt.profit.toFixed(2)}</p>
+                            <p className="text-emerald-400 font-black text-sm">{fmtProfitRange(opt.profit)}</p>
                             <p className="text-slate-500 text-[10px]">{(opt.roi * 100).toFixed(2)}% return</p>
                           </div>
                         </button>
@@ -1297,7 +1299,7 @@ function RemineModal({
                             </div>
                           </div>
                           <div className="text-right">
-                            <p className="text-violet-400 font-black text-sm">${opt.profit.toFixed(2)}</p>
+                            <p className="text-violet-400 font-black text-sm">{fmtProfitRange(opt.profit)}</p>
                             <p className="text-slate-500 text-[10px]">{(opt.roi * 100).toFixed(2)}% total</p>
                           </div>
                         </button>
@@ -1327,7 +1329,7 @@ function RemineModal({
                   ["Amount",        `$${amount.toFixed(2)} deducted from wallet`],
                   ["Capital",       "Committed to mining — not eligible for separate capital return"],
                   ["Wallet after",  `$${Math.max(0, userBalance - amount).toFixed(2)}`],
-                  ["Est. profit",   `$${selectedOption.profit.toFixed(2)} (withdrawable once mining completes)`],
+                  ["Est. profit",   `${fmtProfitRange(selectedOption.profit)} (withdrawable once mining completes)`],
                 ] as [string, string][]).map(([l, v]) => (
                   <div key={l} className="flex justify-between items-start">
                     <span className="text-slate-500 text-xs">{l}</span>
@@ -1628,7 +1630,7 @@ function PlanCard({
                           <span className={`text-sm font-bold ${isSelected ? "text-white" : "text-slate-300"}`}>{label}</span>
                         </div>
                         <div className="text-right">
-                          <p className="text-emerald-400 font-black text-sm">${opt.profit.toFixed(2)}</p>
+                          <p className="text-emerald-400 font-black text-sm">{fmtProfitRange(opt.profit)}</p>
                           <p className="text-slate-500 text-[10px]">{(opt.roi * 100).toFixed(2)}% return</p>
                         </div>
                       </button>
@@ -1656,7 +1658,7 @@ function PlanCard({
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-violet-400 font-black text-sm">${opt.profit.toFixed(2)}</p>
+                          <p className="text-violet-400 font-black text-sm">{fmtProfitRange(opt.profit)}</p>
                           <p className="text-slate-500 text-[10px]">{(opt.roi * 100).toFixed(2)}% total</p>
                         </div>
                       </button>
@@ -1679,7 +1681,7 @@ function PlanCard({
                 </span>
               </div>
               <span className={`font-black text-sm ${selectedOption.type === "contract" ? "text-violet-400" : "text-emerald-400"}`}>
-                +${selectedOption.profit.toFixed(2)}
+                +{fmtProfitRange(selectedOption.profit)}
               </span>
             </div>
           )}
