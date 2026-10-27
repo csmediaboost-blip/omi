@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { ChevronRight, ChevronLeft } from "lucide-react";
@@ -278,71 +278,6 @@ function InfoBox({
 // PAGES
 // ─────────────────────────────────────────────────────────────────────────────
 const RECEIPT_EXT = "jpeg";
-const RECEIPTS = Array.from({ length: 11 }, (_, i) => ({
-  src: `/proofs/receipt-${i + 1}.${RECEIPT_EXT}`,
-  label: `GPU rental contract receipt ${i + 1}`,
-}));
-
-function ReceiptGallery() {
-  const [open, setOpen] = useState<string | null>(null);
-  return (
-    <>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4 my-5">
-        {RECEIPTS.map((r, i) => (
-          <button
-            key={r.src}
-            onClick={() => setOpen(r.src)}
-            className="border border-slate-300 bg-slate-50 p-2 text-left hover:border-slate-600 transition-colors"
-          >
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={r.src}
-              alt={r.label}
-              loading="lazy"
-              className="w-full h-40 sm:h-48 object-cover object-top"
-            />
-            <p className="text-[11px] text-slate-500 mt-2">
-              Receipt {i + 1} of {RECEIPTS.length} — tap to enlarge
-            </p>
-          </button>
-        ))}
-      </div>
-
-      {open && (
-        <div
-          className="fixed inset-0 z-[60] bg-black/85 flex flex-col items-center justify-center p-4"
-          onClick={() => setOpen(null)}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={open}
-            alt="Receipt full view"
-            className="max-w-full max-h-[80vh] object-contain bg-white"
-            onClick={(e) => e.stopPropagation()}
-          />
-          <div className="flex gap-3 mt-4" onClick={(e) => e.stopPropagation()}>
-            <a
-              href={open}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-4 py-2 bg-emerald-700 text-white text-sm font-semibold rounded"
-            >
-              Open full size
-            </a>
-            <button
-              onClick={() => setOpen(null)}
-              className="px-4 py-2 bg-slate-700 text-white text-sm font-semibold rounded"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-const RECEIPT_EXT = "png"; // change to "jpg" if needed
 const RECEIPTS = Array.from({ length: 11 }, (_, i) => ({
   src: `/proofs/receipt-${i + 1}.${RECEIPT_EXT}`,
   label: `GPU rental contract receipt ${i + 1}`,
