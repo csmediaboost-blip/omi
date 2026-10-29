@@ -362,8 +362,20 @@ export async function POST(req: NextRequest) {
     },
   );
 
-  if (rpcErr) {
+    if (rpcErr) {
     console.error("[withdrawal] RPC error:", JSON.stringify(rpcErr));
+
+    // User already has a pending withdrawal (unique constraint) — don't retry
+    if (rpcErr.code === "23505") {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "You already have a pending withdrawal. Please wait until it is paid before requesting another.",
+        },
+        { status: 409 },
+      );
+    }
     // Fallback: insert directly if RPC doesn't exist
     const { data: directInsert, error: insertErr } = await supabase
       .from("withdrawals")
