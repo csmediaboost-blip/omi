@@ -1,5 +1,4 @@
-export const revalidate = false; // Never cache root layout - always fresh for auth
-export const dynamic = "auto"; // Let Next.js decide based on content
+export const dynamic = "auto";
 
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";

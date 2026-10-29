@@ -110,7 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         data: { subscription: sub },
       } = supabase.auth.onAuthStateChange(
         // ✅ FIX: explicitly type both callback parameters
-        async (event: AuthChangeEvent, authSession: Session | null) => {
+                (event: AuthChangeEvent, authSession: Session | null) => {
           if (!mounted) return;
           console.log("[v0] Auth state changed:", event);
           setSession(authSession);
@@ -118,7 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError(null);
 
           if (authSession?.user) {
-            await fetchUserProfile(authSession.user.id);
+            const uid = authSession.user.id;
+            // Defer so the Supabase auth lock is released first (avoids deadlock)
+            setTimeout(() => {
+              if (mounted) fetchUserProfile(uid);
+            }, 0);
           } else {
             setUserProfile(null);
           }

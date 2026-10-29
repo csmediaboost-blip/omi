@@ -71,9 +71,11 @@ export function VerifyPinForm() {
 
   async function init() {
     try {
+            // getSession reads the local session, so it can't hang on a slow network
       const {
-        data: { user },
-      } = await supabase.auth.getUser();
+        data: { session },
+      } = await supabase.auth.getSession();
+      const user = session?.user;
 
       if (!user) {
         router.replace("/auth/signin");

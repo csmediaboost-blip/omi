@@ -1009,12 +1009,25 @@ function CheckoutInner() {
     let cancelled = false;
 
     // Auth fires immediately
-    supabase.auth
-      .getUser()
-      .then(({ data: { user } }: { data: { user: User | null } }) => {
+        Promise.race([
+      supabase.auth.getSession(),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error("auth-timeout")), 8000)),
+    ])
+      .then(({ data: { session } }: any) => {
         if (cancelled) return;
-        if (!user) { router.push("/auth/signin"); return; }
-        setUserId(user.id);
+        if (!session?.user) { router.push("/auth/signin"); return; }
+        sessionStorage.removeItem("co_retry");
+        setUserId(session.user.id);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        if (!sessionStorage.getItem("co_retry")) {
+          sessionStorage.setItem("co_retry", "1");
+          window.location.reload();
+        } else {
+          sessionStorage.removeItem("co_retry");
+          router.push("/auth/signin");
+        }
       });
 
     // Config with 5s timeout — never hangs

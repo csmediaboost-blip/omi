@@ -86,7 +86,12 @@ const stubClient = {
 // component that calls them (auth uses getSession which is local anyway).
 export const supabase =
   supabaseUrl && supabaseAnonKey
-    ? createBrowserClient(supabaseUrl, supabaseAnonKey)
+        ? createBrowserClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          // Navigator lock can deadlock (hung tab/refresh) -> infinite load until refresh
+          lock: async (_name: string, _timeout: number, fn: () => Promise<any>) => await fn(),
+        },
+      } as any)
     : (stubClient as any);
 
 // ── Service-role client (server-side only, never import in client components) ─
