@@ -4,7 +4,7 @@
 //  1. Removed "Minimum withdrawal" display from WithdrawModal and Overview policy grid.
 //  2. Withdrawal window time confirmed as 08:00 – 16:00 WAT throughout.
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import DashboardNavigation from "@/components/dashboard-navigation";
@@ -910,7 +910,7 @@ export default function FinancialsPage() {
   const [userId, setUserId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState<Announcement | null>(null);
 
-  const holidays = getHolidaysSync();
+    const holidays = useMemo(() => getHolidaysSync(), []);
 
   const [liveWindow, setLiveWindow] = useState<WithdrawalWindow>(() =>
     getWithdrawalWindow(false, holidays),

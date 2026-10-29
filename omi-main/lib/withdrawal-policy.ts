@@ -51,23 +51,12 @@ export function getWithdrawalWindow(
   const nextWindowDate = nextValidWithdrawalDay(holidays);
   const nextWindowLabel = formatWithdrawalWindow(nextWindowDate);
 
+  // Only the admin pause can close withdrawals now.
   if (adminPaused) {
     return { state: "PAUSED_ADMIN", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
   }
 
-  if (todayHoliday) {
-    return { state: "CLOSED_HOLIDAY", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
-  }
-
-  if (day === 0 || day === 6) {
-    return { state: "CLOSED_WEEKEND", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
-  }
-
-  // It IS Monday and not a holiday — check time
-  if (hour < WITHDRAWAL_WINDOW_START_HOUR || hour >= WITHDRAWAL_WINDOW_END_HOUR) {
-    return { state: "CLOSED_OUTSIDE_HOURS", isOpen: false, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
-  }
-
+  // Open 24/7, including weekends and holidays.
   return { state: "OPEN", isOpen: true, todayHoliday, nextWindowDate, nextWindowLabel, currentWATHour: hour, currentWATDay: day };
 }
 

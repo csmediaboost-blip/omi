@@ -1,4 +1,5 @@
 // app/api/withdraw/route.ts
+import { createHash } from "crypto";
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 import { NextRequest, NextResponse } from "next/server";
@@ -63,8 +64,19 @@ function checkRateLimit(userId: string): {
 async function verifyPin(
   pinValue: string,
   storedHash: string,
+  userId: string,
 ): Promise<boolean> {
-  return bcrypt.compare(pinValue, storedHash);
+  // bcrypt hash
+  if (/^\$2[aby]\$/.test(storedHash)) {
+    return bcrypt.compare(pinValue, storedHash);
+  }
+  // SHA-256 hash (what verify-pin-form uses)
+  if (/^[a-f0-9]{64}$/.test(storedHash)) {
+    const h = createHash("sha256").update(pinValue + userId).digest("hex");
+    return h === storedHash;
+  }
+  // legacy plain-text PIN
+  return pinValue === storedHash;
 }
 
 // ─── KORAPAY TRANSFER ─────────────────────────────────────────────────────────
@@ -223,14 +235,7 @@ export async function POST(req: NextRequest) {
     }
     const { amount, pin } = parsed.data;
 
-    if (amount < 10) {
-      return NextResponse.json(
-        {
-          error: `Minimum withdrawal is $10.00. You entered $${amount.toFixed(2)}.`,
-        },
-        { status: 400 },
-      );
-    }
+    
 
     // ── 4. Rate limit ─────────────────────────────────────────────────────────
     const { limited, remaining } = checkRateLimit(user.id);
@@ -260,7 +265,7 @@ export async function POST(req: NextRequest) {
         { status: 403 },
       );
     }
-    if (!(await verifyPin(pin, pinData.pin_hash))) {
+    if (!(await verifyPin(pin, pinData.pin_hash, user.id))) {
       return NextResponse.json(
         {
           error: `Incorrect security PIN. (${remaining} attempt${remaining !== 1 ? "s" : ""} remaining this hour)`,
@@ -375,14 +380,7 @@ export async function POST(req: NextRequest) {
     }
 
     const availBal = p.balance_available ?? 0;
-    if (availBal < 10) {
-      return NextResponse.json(
-        {
-          error: `Your available balance ($${availBal.toFixed(2)}) is below the $10.00 minimum withdrawal.`,
-        },
-        { status: 400 },
-      );
-    }
+    
     if (amount > availBal) {
       return NextResponse.json(
         {
